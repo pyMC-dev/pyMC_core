@@ -32,6 +32,8 @@ class SX1262Radio(LoRaRadio):
         bus_id: int = 0,
         cs_id: int = 0,
         cs_pin: int = -1,
+        gpio_chip: int = 0,
+        use_gpiod_backend: bool = False,
         reset_pin: int = 18,
         busy_pin: int = 20,
         irq_pin: int = 16,
@@ -58,6 +60,8 @@ class SX1262Radio(LoRaRadio):
             bus_id: SPI bus ID (default: 0)
             cs_id: SPI chip select ID (default: 0)
             cs_pin: Manual CS GPIO pin (-1 = use hardware CS, e.g. 21 for Waveshare HAT)
+            gpio_chip: GPIO chip select ID (default: 0)
+            use_gpiod_backend: Use alternative backend for GPIO support (default: False)
             reset_pin: GPIO pin for reset (default: 18)
             busy_pin: GPIO pin for busy signal (default: 20)
             irq_pin: GPIO pin for interrupt (default: 16)
@@ -89,6 +93,8 @@ class SX1262Radio(LoRaRadio):
         self.bus_id = bus_id
         self.cs_id = cs_id
         self.cs_pin = cs_pin
+        self.gpio_chip = gpio_chip
+        self.use_gpiod_backend = use_gpiod_backend
         self.reset_pin = reset_pin
         self.busy_pin = busy_pin
         self.irq_pin_number = irq_pin  # Store pin number
@@ -127,11 +133,12 @@ class SX1262Radio(LoRaRadio):
             self._gpio_manager = existing_gpio_manager
             logger.info("Using externally configured GPIO manager")
         else:
-            # Create default GPIO manager for Raspberry Pi
-            self._gpio_manager = GPIOPinManager()
+            backend = "gpiod" if self.use_gpiod_backend else "auto"
+            self._gpio_manager = GPIOPinManager(
+                backend=backend, gpio_chip=f"/dev/gpiochip{self.gpio_chip}"
+            )
             # Share GPIO manager instance with SX126x low-level driver
             set_gpio_manager(self._gpio_manager)
-
         self._interrupt_setup = False
         self._txen_pin_setup = False
         self._txled_pin_setup = False
