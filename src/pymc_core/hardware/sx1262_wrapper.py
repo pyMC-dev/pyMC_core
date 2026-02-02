@@ -1005,6 +1005,11 @@ class SX1262Radio(LoRaRadio):
             if self.lora:
                 self.lora.setStandby(self.lora.STANDBY_RC)
                 await asyncio.sleep(0.05)
+                
+                # Restore RX interrupt configuration
+                rx_mask = self._get_rx_irq_mask()
+                self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+                
                 self.lora.request(self.lora.RX_CONTINUOUS)
                 await asyncio.sleep(0.05)
                 logger.debug("[TX->RX] RX mode restoration completed")
@@ -1409,7 +1414,9 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setStandby(self.lora.STANDBY_RC)
                 await asyncio.sleep(0.001)
 
-                # Use standardized RX restoration method like everywhere else
+                rx_mask = self._get_rx_irq_mask()
+                self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+
                 self.lora.request(self.lora.RX_CONTINUOUS)
                 await asyncio.sleep(0.001)
                 self.lora.clearIrqStatus(0xFFFF)
