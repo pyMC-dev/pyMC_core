@@ -605,6 +605,31 @@ class SX1262Radio(LoRaRadio):
             # Regulator, calibration and RF switch configuration (required for all boards)
             self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
             self.lora.calibrate(0x7F)
+            
+            # Image calibration based on frequency band
+            if self.frequency < 446000000:
+                calFreqMin = self.lora.CAL_IMG_430
+                calFreqMax = self.lora.CAL_IMG_440
+                logger.debug("Image calibration for 430-440MHz band")
+            elif self.frequency < 734000000:
+                calFreqMin = self.lora.CAL_IMG_470
+                calFreqMax = self.lora.CAL_IMG_510
+                logger.debug("Image calibration for 470-510MHz band")
+            elif self.frequency < 828000000:
+                calFreqMin = self.lora.CAL_IMG_779
+                calFreqMax = self.lora.CAL_IMG_787
+                logger.debug("Image calibration for 779-787MHz band")
+            elif self.frequency < 877000000:
+                calFreqMin = self.lora.CAL_IMG_863
+                calFreqMax = self.lora.CAL_IMG_870
+                logger.debug("Image calibration for 863-870MHz band")
+            else:
+                calFreqMin = self.lora.CAL_IMG_902
+                calFreqMax = self.lora.CAL_IMG_928
+                logger.debug("Image calibration for 902-928MHz band")
+            
+            self.lora.calibrateImage(calFreqMin, calFreqMax)
+            
             self.lora.setDio2RfSwitch(self.use_dio2_rf)
             if self.use_dio2_rf:
                 logger.info("DIO2 RF switch control enabled")
