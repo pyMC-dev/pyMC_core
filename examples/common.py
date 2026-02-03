@@ -29,8 +29,9 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
     """Create a radio instance with configuration for specified hardware.
 
     Args:
-        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
-        serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini",
+                    "kiss-tnc", or "kiss-modem")
+        serial_port: Serial port for KISS devices (only used with "kiss-tnc" or "kiss-modem")
 
     Returns:
         Radio instance configured for the specified hardware
@@ -64,6 +65,33 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
                 f"Frequency: {kiss_config['frequency']/1000000:.3f}MHz, TX Power: {kiss_config['power']}dBm"
             )
             return kiss_wrapper
+
+        # Check if this is a MeshCore KISS Modem configuration
+        if radio_type == "kiss-modem":
+            from pymc_core.hardware.kiss_modem_wrapper import KissModemWrapper
+
+            logger.debug("Using MeshCore KISS Modem Wrapper")
+
+            # MeshCore KISS Modem configuration
+            # Note: Sync word is configured at firmware build time
+            modem_config = {
+                "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
+                "bandwidth": int(62.5 * 1000),  # 62.5 kHz
+                "spreading_factor": 8,  # LoRa SF8
+                "coding_rate": 8,  # LoRa CR 4/8
+                "power": 22,  # TX power
+            }
+
+            # Create KISS modem wrapper with specified port
+            modem_wrapper = KissModemWrapper(
+                port=serial_port, baudrate=115200, radio_config=modem_config, auto_configure=True
+            )
+
+            logger.info("Created MeshCore KISS Modem Wrapper")
+            logger.info(
+                f"Frequency: {modem_config['frequency']/1000000:.3f}MHz, TX Power: {modem_config['power']}dBm"
+            )
+            return modem_wrapper
 
         # Direct SX1262 radio for other types
         from pymc_core.hardware.sx1262_wrapper import SX1262Radio
@@ -125,7 +153,8 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
 
         if radio_type not in configs:
             raise ValueError(
-                f"Unknown radio type: {radio_type}. Use 'waveshare', 'meshadv-mini', 'uconsole', or 'kiss-tnc'"
+                f"Unknown radio type: {radio_type}. "
+                "Use 'waveshare', 'meshadv-mini', 'uconsole', 'kiss-tnc', or 'kiss-modem'"
             )
 
         radio_kwargs = configs[radio_type]
@@ -147,27 +176,29 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
 
 
 def create_mesh_node(
-    node_name: str = "ExampleNode", radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"
+    node_name: str = "ExampleNode",
+    radio_type: str = "waveshare",
+    serial_port: str = "/dev/ttyUSB0",
+    use_modem_identity: bool = False,
 ) -> tuple[MeshNode, LocalIdentity]:
     """Create a mesh node with radio.
 
     Args:
         node_name: Name for the mesh node
-        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
-        serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini",
+                    "kiss-tnc", or "kiss-modem")
+        serial_port: Serial port for KISS devices (only used with "kiss-tnc" or "kiss-modem")
+        use_modem_identity: If True and radio_type is "kiss-modem", use the modem's
+                           cryptographic identity instead of generating a local one.
+                           This keeps the private key secure on the modem hardware.
 
     Returns:
-        Tuple of (MeshNode, LocalIdentity)
+        Tuple of (MeshNode, Identity) - Identity may be LocalIdentity or ModemIdentity
     """
     logger.info(f"Creating mesh node with name: {node_name} using {radio_type} radio")
 
     try:
-        # Create a local identity (this generates a new keypair)
-        logger.debug("Creating LocalIdentity...")
-        identity = LocalIdentity()
-        logger.info(f"Created identity with public key: {identity.get_public_key().hex()[:16]}...")
-
-        # Create the radio
+        # Create the radio first (needed for modem identity)
         logger.debug("Creating radio...")
         radio = create_radio(radio_type, serial_port)
 
@@ -185,10 +216,36 @@ def create_mesh_node(
                 logger.error("Failed to connect KISS radio")
                 print(f"Failed to connect to KISS radio on {serial_port}")
                 raise Exception(f"KISS radio connection failed on {serial_port}")
+        elif radio_type == "kiss-modem":
+            logger.debug("Connecting MeshCore KISS modem...")
+            if radio.connect():
+                logger.info("KISS modem connected successfully")
+                print(f"KISS modem connected to {serial_port}")
+                if hasattr(radio, "modem_version") and radio.modem_version:
+                    print(f"Modem version: {radio.modem_version}")
+                if hasattr(radio, "modem_identity") and radio.modem_identity:
+                    print(f"Modem identity: {radio.modem_identity.hex()[:16]}...")
+            else:
+                logger.error("Failed to connect KISS modem")
+                print(f"Failed to connect to KISS modem on {serial_port}")
+                raise Exception(f"KISS modem connection failed on {serial_port}")
         else:
             logger.debug("Calling radio.begin()...")
             radio.begin()
             logger.info("Radio initialized successfully")
+
+        # Create identity - use modem identity if requested and available
+        if use_modem_identity and radio_type == "kiss-modem":
+            from pymc_core.protocol.modem_identity import ModemIdentity
+
+            logger.debug("Creating ModemIdentity from KISS modem...")
+            identity = ModemIdentity(radio)
+            logger.info(f"Using modem identity: {identity.get_public_key().hex()[:16]}...")
+            print(f"Using modem identity (private key secured on modem)")
+        else:
+            logger.debug("Creating LocalIdentity...")
+            identity = LocalIdentity()
+            logger.info(f"Created local identity: {identity.get_public_key().hex()[:16]}...")
 
         # Create a mesh node with the radio and identity
         config = {"node": {"name": node_name}}
