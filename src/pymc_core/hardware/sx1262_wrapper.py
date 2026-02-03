@@ -6,7 +6,6 @@ Implements the LoRaRadio interface using the SX126x library
 import asyncio
 import logging
 import math
-import os
 import random
 import time
 from typing import Optional, Union
@@ -858,55 +857,44 @@ class SX1262Radio(LoRaRadio):
                 busy_wait += 1
 
         # Listen Before Talk (LBT) - Check for channel activity using CAD
-        # You can disable CAD/LBT at runtime for debugging:
-        #   PYMC_CORE_DISABLE_CAD=1
-        disable_cad = os.getenv("PYMC_CORE_DISABLE_CAD", "0") not in {"0", "", "false", "False"}
-
         lbt_backoff_delays = []  # Track each backoff delay in ms
-        if disable_cad:
-            logger.warning(
-                "CAD/LBT disabled via PYMC_CORE_DISABLE_CAD=1 - transmitting without channel check"
-            )
-        else:
-            lbt_attempts = 0
-            max_lbt_attempts = 5
+        lbt_attempts = 0
+        max_lbt_attempts = 5
 
-            while lbt_attempts < max_lbt_attempts:
-                try:
-                    # Perform CAD with your custom thresholds
-                    channel_busy = await self.perform_cad(timeout=0.5)
-                    if not channel_busy:
-                        logger.debug(
-                            f"CAD check clear - channel available after {lbt_attempts + 1} attempts"
-                        )
-                        break
-                    else:
-                        logger.debug("CAD check still busy - channel activity detected")
-                        lbt_attempts += 1
-                        if lbt_attempts < max_lbt_attempts:
-                            # Jitter (50-200ms)
-                            base_delay = random.randint(50, 200)
-                            # Exponential backoff: base * 2^attempts
-                            backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
-                            # Cap at 5 seconds maximum
-                            backoff_ms = min(backoff_ms, 5000)
-
-                            # Record this backoff delay
-                            lbt_backoff_delays.append(float(backoff_ms))
-
-                            logger.debug(
-                                f"CAD backoff - waiting {backoff_ms}ms before retry "
-                                f"(attempt {lbt_attempts}/{max_lbt_attempts})"
-                            )
-                            await asyncio.sleep(backoff_ms / 1000.0)
-                        else:
-                            logger.warning(
-                                f"CAD max attempts reached - channel still busy after "
-                                f"{max_lbt_attempts} attempts, transmitting anyway"
-                            )
-                except Exception as e:
-                    logger.warning(f"CAD check failed: {e}, proceeding with transmission")
+        while lbt_attempts < max_lbt_attempts:
+            try:
+                channel_busy = await self.perform_cad(timeout=0.5)
+                if not channel_busy:
+                    logger.debug(
+                        f"CAD check clear - channel available after {lbt_attempts + 1} attempts"
+                    )
                     break
+
+                logger.debug("CAD check still busy - channel activity detected")
+                lbt_attempts += 1
+                if lbt_attempts < max_lbt_attempts:
+                    # Jitter (50-200ms)
+                    base_delay = random.randint(50, 200)
+                    # Exponential backoff: base * 2^attempts
+                    backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
+                    # Cap at 5 seconds maximum
+                    backoff_ms = min(backoff_ms, 5000)
+
+                    lbt_backoff_delays.append(float(backoff_ms))
+
+                    logger.debug(
+                        f"CAD backoff - waiting {backoff_ms}ms before retry "
+                        f"(attempt {lbt_attempts}/{max_lbt_attempts})"
+                    )
+                    await asyncio.sleep(backoff_ms / 1000.0)
+                else:
+                    logger.warning(
+                        f"CAD max attempts reached - channel still busy after "
+                        f"{max_lbt_attempts} attempts, transmitting anyway"
+                    )
+            except Exception as e:
+                logger.warning(f"CAD check failed: {e}, proceeding with transmission")
+                break
 
         self._control_tx_rx_pins(tx_mode=True)
 
@@ -986,19 +974,11 @@ class SX1262Radio(LoRaRadio):
 
         return True
 
-    async def _wait_for_transmission_complete(
-        self, timeout_seconds: float, *, suppress_timeout_errors: bool = False
-    ) -> bool:
+    async def _wait_for_transmission_complete(self, timeout_seconds: float) -> bool:
         """Wait for transmission to complete.
 
         Primary path: IRQ edge -> _tx_done_event.
-        Fallback path: periodic polling of IRQ status (useful for USB GPIO backends where
-        the IRQ pin may not be wired/working reliably).
-
-        Args:
-            timeout_seconds: Max time to wait.
-            suppress_timeout_errors: If True, log timeouts as warnings and do not emit
-                extra diagnostic ERROR logs. Useful for "best-effort" backends.
+        Fallback path: periodic polling of IRQ status (useful if an IRQ edge is missed).
         """
         logger.debug(f"[TX] Waiting for TX completion (timeout: {timeout_seconds}s)")
         start_time = time.time()
@@ -1010,9 +990,6 @@ class SX1262Radio(LoRaRadio):
             elapsed = time.time() - start_time
             remaining = timeout_seconds - elapsed
             if remaining <= 0:
-                if suppress_timeout_errors:
-                    logger.warning("[TX] TX completion timeout - no interrupt received!")
-                    return False
                 logger.error("[TX] TX completion timeout - no interrupt received!")
                 await self._handle_transmission_timeout(timeout_seconds, start_time)
                 return False
@@ -1044,16 +1021,11 @@ class SX1262Radio(LoRaRadio):
                     continue
 
                 if irq & self.lora.IRQ_TX_DONE:
-                    logger.warning(
-                        "[TX] TX_DONE detected via IRQ status poll (no IRQ edge observed)"
-                    )
+                    logger.debug("[TX] TX_DONE detected via IRQ status poll")
                     return True
 
                 if irq & self.lora.IRQ_TIMEOUT:
-                    if suppress_timeout_errors:
-                        logger.warning("[TX] TX_TIMEOUT detected via IRQ status poll")
-                    else:
-                        logger.error("[TX] TX_TIMEOUT detected via IRQ status poll")
+                    logger.error("[TX] TX_TIMEOUT detected via IRQ status poll")
                     # Clear and fail
                     try:
                         self.lora.clearIrqStatus(irq)
@@ -1145,7 +1117,6 @@ class SX1262Radio(LoRaRadio):
                 self.lora.clearIrqStatus(0xFFFF)
 
                 # Always restore external RF switch control pins to RX mode
-                # (important for best-effort/timeout TX paths that skip _finalize_transmission()).
                 self._control_tx_rx_pins(tx_mode=False)
 
                 logger.debug("[TX->RX] RX mode restoration completed")
@@ -1189,30 +1160,8 @@ class SX1262Radio(LoRaRadio):
                 if not await self._execute_transmission(driver_timeout):
                     raise RuntimeError("Radio failed to start TX")
 
-                is_ch341 = (
-                    self._gpio_manager.__class__.__name__ == "CH341GPIOManager"
-                    or self._gpio_manager.__class__.__module__.endswith("ch341_gpio_manager")
-                )
-
-                tx_ok = await self._wait_for_transmission_complete(
-                    timeout_seconds, suppress_timeout_errors=is_ch341
-                )
+                tx_ok = await self._wait_for_transmission_complete(timeout_seconds)
                 if not tx_ok:
-                    # CH341 setups often don't have a reliable IRQ pin. If we can't observe
-                    # TX_DONE via IRQ edge or status polling, we can still treat TX as
-                    # best-effort (the TX command was already issued).
-                    if is_ch341:
-                        logger.warning(
-                            "[TX] TX completion could not be confirmed (timeout). "
-                            "Continuing in best-effort mode for CH341 backend."
-                        )
-                        return {
-                            "airtime_ms": airtime_ms,
-                            "lbt_attempts": len(lbt_backoff_delays),
-                            "lbt_backoff_delays_ms": lbt_backoff_delays,
-                            "lbt_channel_busy": len(lbt_backoff_delays) > 0,
-                            "tx_confirmed": False,
-                        }
                     raise RuntimeError("TX completion timeout")
 
                 self._finalize_transmission()
@@ -1512,19 +1461,15 @@ class SX1262Radio(LoRaRadio):
                 0,  # no timeout
             )
 
-            # Step 6: Force CH341 to capture the current IRQ pin state (should be LOW)
-            # This establishes the baseline for edge detection
-            initial_irq_state = self._gpio_manager.read_pin(self.irq_pin_number)
-            logger.debug(f"[CAD] IRQ pin state before starting CAD: {initial_irq_state}")
+            # Step 6: Prime the IRQ pin state before starting CAD.
+            # This helps edge-detection/polling GPIO backends establish a baseline.
+            _ = self._gpio_manager.read_pin(self.irq_pin_number)
 
-            # Give CH341 polling one more cycle to ensure it has the LOW state
-            logger.debug("[CAD] About to sleep 20ms before setCad")
-            await asyncio.sleep(0.02)  # 20ms should be enough for one poll cycle
-            logger.debug("[CAD] Sleep complete, calling setCad")
+            # Give polling backends one more cycle to observe the baseline state.
+            await asyncio.sleep(0.02)  # one poll cycle
 
             # Step 7: Start CAD operation
             self.lora.setCad()
-            logger.debug("[CAD] setCad() returned, CAD operation command sent to radio")
 
             # Give hardware time to start CAD and GPIO polling to detect state changes
             # Don't call getMode() or busyCheck() here - they hold the lock and prevent
