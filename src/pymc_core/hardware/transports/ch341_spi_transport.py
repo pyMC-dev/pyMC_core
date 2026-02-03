@@ -108,14 +108,6 @@ class CH341SPITransport(SPITransport):
         try:
             # Convert list to bytes
             data_bytes = bytes(data)
-
-            # CH341 performs full-duplex SPI: write and read simultaneously
-            # For full-duplex SPI, read_len=0 means we only want the echo back
-            # (CH341 always returns writecnt + readcnt bytes)
-            # Since we want N bytes out and N bytes in (standard full-duplex):
-            # - writecnt = len(data)
-            # - readcnt = 0 (no additional reads beyond the write echo)
-            # This returns the data that was clocked in while we clocked out data_bytes
             result = self._ch341.spi_transfer_async(data_bytes, read_len=0)
 
             # Convert bytes to list
@@ -134,16 +126,11 @@ class CH341SPITransport(SPITransport):
         Returns:
             List of bytes received
         """
-        # logger.info(f"[CH341-SPI] xfer2() called with {len(data)} bytes: {data[:8]}...")
-        # start = __import__("time").time()
+
         try:
             result = self.transfer(data)
-            # elapsed = __import__("time").time() - start
-            # logger.info(f"[CH341-SPI] xfer2() completed in {elapsed*1000:.1f}ms")
             return result
         except Exception:
-            # elapsed = __import__("time").time() - start
-            # logger.error(f"[CH341-SPI] xfer2() failed after {elapsed*1000:.1f}ms: {e}")
             raise
 
     def set_mode(self, mode: int) -> None:

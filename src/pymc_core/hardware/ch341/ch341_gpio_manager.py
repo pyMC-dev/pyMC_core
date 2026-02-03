@@ -54,7 +54,6 @@ class CH341GPIOPin:
             # IMPORTANT: do not reuse this for edge detection state in the poller.
             self._cached_state = bool(val)
 
-            # Debug the actual reads on pin 6 (IRQ pin)
             if self.pin == 6:
                 # Sample less frequently - only log occasionally
                 if random.random() < 0.01:
@@ -138,14 +137,11 @@ class CH341GPIOPin:
         return True
 
     def _poll_for_interrupt(self):
-        """Polling thread that checks pin state and triggers callback on rising edge."""
-        poll_interval = 0.001  # 1ms polling interval (was 50ms - too slow!)
+        """Polling thread that checks pin state and triggers callback on configured edge."""
+        poll_interval = 0.001  # 1ms polling interval
         iteration_count = 0
         interrupt_count = 0
         last_debug_time = time.time()
-
-        # Write directly to file for debugging (logging may hang)
-        debug_file = f"/tmp/ch341_poll_pin{self.pin}.log"
 
         interval_ms = poll_interval * 1000
         logger.info(
@@ -158,110 +154,57 @@ class CH341GPIOPin:
         except Exception:
             self._poll_last_state = False
 
-        with open(debug_file, "w") as f:
-            f.write(f"Poll thread started for pin {self.pin}\n")
-            f.write(f"Initial poll state: {self._poll_last_state}\n")
-            f.flush()
+        while not self._stop_polling:
+            iteration_count += 1
 
-            while not self._stop_polling:
-                iteration_count += 1
+            try:
+                current_state = bool(self.read())
 
-                try:
-                    # Write first iteration
-                    if iteration_count <= 5:
-                        f.write(f"Iteration {iteration_count}: Starting read\n")
-                        f.flush()
+                # Periodic debug (very low rate)
+                current_time = time.time()
+                if current_time - last_debug_time > 5.0:
+                    logger.debug(
+                        f"[POLL] pin={self.pin} state={current_state} "
+                        f"last={self._poll_last_state} callbacks={interrupt_count}"
+                    )
+                    last_debug_time = current_time
 
-                    current_state = self.read()
+                # Detect edges. IMPORTANT: keep edge-detection state local to this thread.
+                edge = getattr(self, "_interrupt_edge", "rising")
 
-                    if iteration_count <= 5:
-                        f.write(
-                            f"Iteration {iteration_count}: Read succeeded, state={current_state}\n"
-                        )
-                        f.flush()
+                if edge in ("rising", "both") and (
+                    self._poll_last_state is False and current_state is True
+                ):
+                    interrupt_count += 1
+                    if self._interrupt_callback:
+                        try:
+                            self._interrupt_callback()
+                        except Exception as e:
+                            logger.error(f"Error in interrupt callback: {e}")
 
-                    # Debug every 1 second
-                    current_time = time.time()
-                    if current_time - last_debug_time > 1.0:
-                        debug_msg = (
-                            f"Poll: Pin {self.pin} state={current_state}, "
-                            f"last_state={self._poll_last_state}, callbacks={interrupt_count}\n"
-                        )
-                        f.write(debug_msg)
-                        f.flush()
-                        last_debug_time = current_time
+                if edge in ("falling", "both") and (
+                    self._poll_last_state is True and current_state is False
+                ):
+                    interrupt_count += 1
+                    if self._interrupt_callback:
+                        try:
+                            self._interrupt_callback()
+                        except Exception as e:
+                            logger.error(f"Error in interrupt callback: {e}")
 
-                    # Detect edges. IMPORTANT: keep edge-detection state local to this thread.
-                    edge = getattr(self, "_interrupt_edge", "rising")
+                # Update last state for next iteration
+                self._poll_last_state = current_state
 
-                    if edge in ("rising", "both") and (
-                        self._poll_last_state is False and current_state is True
-                    ):
-                        interrupt_count += 1
-                        f.write(
-                            f"RISING EDGE DETECTED on pin {self.pin} "
-                            f"(interrupt #{interrupt_count})\n"
-                        )
-                        f.flush()
-                        logger.info(
-                            f"[POLL] Rising edge detected on pin {self.pin} "
-                            f"(interrupt #{interrupt_count})"
-                        )
+            except Exception as e:
+                # Suppress expected BUSY errors during heavy SPI activity
+                msg = str(e)
+                if "GPIO read IN failed: -6" not in msg and "GPIO read write failed: -6" not in msg:
+                    logger.warning(
+                        f"Error polling pin {self.pin} (iteration {iteration_count}): {e}"
+                    )
+                time.sleep(0.001)
 
-                        if self._interrupt_callback:
-                            try:
-                                self._interrupt_callback()
-                            except Exception as e:
-                                logger.error(f"Error in interrupt callback: {e}")
-
-                    if edge in ("falling", "both") and (
-                        self._poll_last_state is True and current_state is False
-                    ):
-                        interrupt_count += 1
-                        f.write(
-                            f"FALLING EDGE DETECTED on pin {self.pin} "
-                            f"(interrupt #{interrupt_count})\n"
-                        )
-                        f.flush()
-                        logger.info(
-                            f"[POLL] Falling edge detected on pin {self.pin} "
-                            f"(interrupt #{interrupt_count})"
-                        )
-
-                        if self._interrupt_callback:
-                            try:
-                                self._interrupt_callback()
-                            except Exception as e:
-                                logger.error(f"Error in interrupt callback: {e}")
-
-                    # Update last state for next iteration
-                    self._poll_last_state = current_state
-
-                    if iteration_count == 5:
-                        f.write(f"Iteration {iteration_count}: Complete, about to sleep\n")
-                        f.flush()
-
-                except Exception as e:
-                    # Suppress "GPIO read IN failed: -6" (BUSY) during heavy SPI activity - expected
-                    if "GPIO read IN failed: -6" not in str(
-                        e
-                    ) and "GPIO read write failed: -6" not in str(e):
-                        logger.warning(
-                            f"Error polling pin {self.pin} (iteration {iteration_count}): {e}"
-                        )
-                    f.write(f"ERROR on iteration {iteration_count}: {e}\n")
-                    f.flush()
-                    time.sleep(0.001)
-
-                if iteration_count <= 5:
-                    f.write(f"Iteration {iteration_count}: About to sleep\n")
-                    f.flush()
-
-                time.sleep(poll_interval)
-
-                if iteration_count <= 5:
-                    f.write(f"Iteration {iteration_count}: Sleep done\n")
-                    f.flush()
+            time.sleep(poll_interval)
 
         logger.info(
             f"Interrupt polling thread stopped for pin {self.pin} after "
