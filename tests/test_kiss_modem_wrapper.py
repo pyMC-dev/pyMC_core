@@ -174,6 +174,31 @@ class TestKissFrameEncoding:
         assert modem.stats["last_snr"] == pytest.approx(4.0)
         assert modem.stats["last_rssi"] == -80
 
+    def test_rx_callback_receives_per_packet_rssi_snr(self):
+        """Test that a 3-arg callback receives (data, rssi, snr) per packet without race"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        received = []
+        def capture(data, rssi, snr):
+            received.append((data, rssi, snr))
+
+        modem.on_frame_received = capture
+
+        # First frame: SNR=0x10 (4.0 dB), RSSI=0xB0 (-80)
+        raw1 = bytes([KISS_FEND, CMD_DATA, 0x10, 0xB0, 0x01, 0x02, KISS_FEND])
+        for byte in raw1:
+            modem._decode_kiss_byte(byte)
+
+        # Second frame: different metrics
+        raw2 = bytes([KISS_FEND, CMD_DATA, 0x08, 0x9C, 0x03, 0x04, KISS_FEND])
+        for byte in raw2:
+            modem._decode_kiss_byte(byte)
+
+        assert len(received) == 2
+        assert received[0] == (b"\x01\x02", -80, 4.0)
+        assert received[1] == (b"\x03\x04", -100, 2.0)  # 0x9C signed = -100, 0x08/4 = 2.0
+
 
 class TestCommandResponses:
     """Test command sending and response parsing"""

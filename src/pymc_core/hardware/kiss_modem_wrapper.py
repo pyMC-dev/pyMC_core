@@ -8,11 +8,36 @@ Protocol reference: https://github.com/meshcore-dev/MeshCore
 """
 
 import asyncio
+import inspect
 import logging
 import struct
 import threading
 from collections import deque
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
+
+# RX callback: (data) for backward compat, or (data, rssi, snr) for per-packet metrics
+RxCallback = Union[
+    Callable[[bytes], None],
+    Callable[[bytes, Optional[int], Optional[float]], None],
+]
+
+
+def _invoke_rx_callback(
+    callback: RxCallback,
+    data: bytes,
+    rssi: int,
+    snr: float,
+) -> None:
+    """Invoke RX callback with 1 or 3 args depending on what it accepts."""
+    try:
+        sig = inspect.signature(callback)
+        nparams = len([p for p in sig.parameters if p != "self"])
+    except (ValueError, TypeError):
+        nparams = 1
+    if nparams >= 3:
+        callback(data, rssi, snr)
+    else:
+        callback(data)
 
 import serial
 
@@ -109,7 +134,7 @@ class KissModemWrapper(LoRaRadio):
         port: str,
         baudrate: int = DEFAULT_BAUDRATE,
         timeout: float = DEFAULT_TIMEOUT,
-        on_frame_received: Optional[Callable[[bytes], None]] = None,
+        on_frame_received: Optional[RxCallback] = None,
         radio_config: Optional[Dict[str, Any]] = None,
         auto_configure: bool = True,
     ):
@@ -647,12 +672,13 @@ class KissModemWrapper(LoRaRadio):
 
     # LoRaRadio interface implementation
 
-    def set_rx_callback(self, callback: Callable[[bytes], None]):
+    def set_rx_callback(self, callback: RxCallback):
         """
-        Set the RX callback function
+        Set the RX callback function.
 
-        Args:
-            callback: Function to call when a packet is received
+        The callback may be (data: bytes) or (data, rssi, snr). When invoked
+        by this wrapper it is always called with (data, rssi, snr) so each
+        packet gets correct per-packet metrics without race conditions.
         """
         self.on_frame_received = callback
         logger.debug("RX callback set")
@@ -697,12 +723,14 @@ class KissModemWrapper(LoRaRadio):
 
         original_callback = self.on_frame_received
 
-        def temp_callback(data: bytes):
+        def temp_callback(data: bytes, rssi: Optional[int] = None, snr: Optional[float] = None):
             if not future.done():
                 future.set_result(data)
             if original_callback:
                 try:
-                    original_callback(data)
+                    rssi_val = rssi if rssi is not None else -999
+                    snr_val = snr if snr is not None else -999.0
+                    _invoke_rx_callback(original_callback, data, rssi_val, snr_val)
                 except Exception as e:
                     logger.error(f"Error in original callback: {e}")
 
@@ -830,7 +858,11 @@ class KissModemWrapper(LoRaRadio):
 
                 if self.on_frame_received and len(packet_data) > 0:
                     try:
-                        self.on_frame_received(packet_data)
+                        # Pass per-packet rssi/snr to avoid race with get_last_rssi/get_last_snr
+                        snr_db = snr_raw / 4.0  # SNR in 0.25 dB steps
+                        _invoke_rx_callback(
+                            self.on_frame_received, packet_data, rssi_raw, snr_db
+                        )
                     except Exception as e:
                         logger.error(f"Error in frame received callback: {e}")
 

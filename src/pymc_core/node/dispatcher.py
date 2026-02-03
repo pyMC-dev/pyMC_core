@@ -297,18 +297,26 @@ class Dispatcher:
         """Set callback for raw packet data (includes both parsed packet and raw bytes)."""
         self.raw_packet_callback = callback
 
-    def _on_packet_received(self, data: bytes) -> None:
-        """Called by the radio when a packet comes in."""
-        # Schedule the packet processing in the event loop
+    def _on_packet_received(
+        self,
+        data: bytes,
+        rssi: Optional[int] = None,
+        snr: Optional[float] = None,
+    ) -> None:
+        """Called by the radio when a packet comes in. rssi/snr are per-packet when provided."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._process_received_packet(data))
+            loop.create_task(self._process_received_packet(data, rssi, snr))
         except RuntimeError:
-            # No event loop running, can't process packet
             self._log("No event loop running, cannot process received packet")
 
-    async def _process_received_packet(self, data: bytes) -> None:
-        """Process a received packet from the radio callback."""
+    async def _process_received_packet(
+        self,
+        data: bytes,
+        rssi: Optional[int] = None,
+        snr: Optional[float] = None,
+    ) -> None:
+        """Process a received packet from the radio callback. rssi/snr are per-packet when provided."""
         self._log(f"[RX DEBUG] Processing packet: {len(data)} bytes, data: {data.hex()[:32]}...")
 
         # Generate packet hash for deduplication and blacklist checking
@@ -342,9 +350,9 @@ class Dispatcher:
 
         self._log(f"[RX DEBUG] Packet type: {ptype:02X}")
 
-        # Add signal strength information to packet from radio
-        pkt._rssi = self.radio.get_last_rssi()
-        pkt._snr = self.radio.get_last_snr()
+        # Use per-packet rssi/snr when provided (avoids race); else fall back to radio last values
+        pkt._rssi = rssi if rssi is not None else self.radio.get_last_rssi()
+        pkt._snr = snr if snr is not None else self.radio.get_last_snr()
 
         # Let the node know about this packet for analysis (statistics, caching, etc.)
         if self.packet_analysis_callback:
