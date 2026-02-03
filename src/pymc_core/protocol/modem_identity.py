@@ -126,14 +126,27 @@ class ModemIdentity:
                 return False
         return result
 
-    def calc_shared_secret(self, remote_x25519_pubkey: bytes) -> bytes:
+    def calc_shared_secret(self, remote_ed25519_pubkey: bytes) -> bytes:
         """
-        Compute the ECDH shared secret with a remote public key.
+        Compute the ECDH shared secret with a remote party's public key.
 
         Uses the modem's key_exchange command for secure computation.
+        The modem internally converts the Ed25519 public key to X25519
+        and performs the ECDH computation.
+
+        Note: This method signature differs from Identity.calc_shared_secret()
+        which takes a local private key. ModemIdentity.calc_shared_secret()
+        takes the remote's Ed25519 public key because the modem holds the
+        local private key internally.
+
+        For use in pyMC_core handlers, which call calc_shared_secret on the
+        *peer's* Identity object (not on LocalIdentity/ModemIdentity), this
+        method is provided for cases where you want to compute a shared
+        secret directly using the modem's identity.
 
         Args:
-            remote_x25519_pubkey: The remote party's X25519 public key.
+            remote_ed25519_pubkey: The remote party's 32-byte Ed25519 public key.
+                                  The modem converts this to X25519 internally.
 
         Returns:
             The 32-byte shared secret for encryption.
@@ -141,17 +154,10 @@ class ModemIdentity:
         Raises:
             RuntimeError: If key exchange fails
         """
-        # The modem expects an Ed25519 public key for key exchange,
-        # but we have an X25519 key. We need to use the modem's
-        # key_exchange which internally handles the conversion.
-        #
-        # However, the MeshCore protocol typically passes Ed25519 pubkeys
-        # and converts internally. If we're given an X25519 key directly,
-        # we may need to handle this differently.
-        #
-        # For now, assume we're given the remote's Ed25519 pubkey and
-        # the modem will handle the X25519 conversion internally.
-        shared_secret = self._modem.key_exchange(remote_x25519_pubkey)
+        if len(remote_ed25519_pubkey) != 32:
+            raise ValueError("Remote public key must be 32 bytes (Ed25519)")
+
+        shared_secret = self._modem.key_exchange(remote_ed25519_pubkey)
         if shared_secret is None:
             raise RuntimeError("Modem key exchange failed")
         return shared_secret
