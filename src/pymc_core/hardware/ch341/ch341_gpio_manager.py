@@ -5,7 +5,6 @@ Includes software interrupt polling to emulate hardware interrupts
 """
 
 import logging
-import random
 import threading
 import time
 from typing import Callable, Optional
@@ -53,11 +52,6 @@ class CH341GPIOPin:
             # Cache last known state for any input pin (BUSY/IRQ/etc.).
             # IMPORTANT: do not reuse this for edge detection state in the poller.
             self._cached_state = bool(val)
-
-            if self.pin == 6:
-                # Sample less frequently - only log occasionally
-                if random.random() < 0.01:
-                    logger.debug(f"[CH341-GPIO6] Read value: {self._cached_state}")
             return self._cached_state
         except CH341Error:
             # If we can't acquire lock (e.g., SPI transfer in progress),
