@@ -1,14 +1,3 @@
-"""CH341 USB-to-SPI/GPIO driver using PyUSB.
-
-This module replaces the previous ctypes+libusb implementation (now preserved as
-`ch341_async_ctypes.py`) with a PyUSB backend.
-
-Notes
-- CH341 bulk endpoints are typically EP_OUT=0x02 and EP_IN=0x82.
-- This driver intentionally serializes SPI and GPIO operations using locks;
-  the CH341 often behaves poorly with concurrent access.
-"""
-
 from __future__ import annotations
 
 import errno
