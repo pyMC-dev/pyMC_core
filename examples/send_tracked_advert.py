@@ -65,7 +65,13 @@ async def send_simple_tracked_advert(
     success = await mesh_node.dispatcher.send_packet(advert_packet, wait_for_ack=False)
 
     if success:
-        print("Advert sent successfully!")
+        # Some backends (e.g. CH341) may run in best-effort TX mode if IRQ/TX_DONE cannot
+        # be confirmed. Dispatcher stores TX metadata on the packet when available.
+        tx_meta = getattr(advert_packet, "_tx_metadata", None)
+        if isinstance(tx_meta, dict) and tx_meta.get("tx_confirmed") is False:
+            print("Advert sent (TX not confirmed; best-effort mode)")
+        else:
+            print("Advert sent successfully!")
         print("Listening for repeats... (Ctrl+C to stop)")
         print("-" * 40)
 
@@ -93,7 +99,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a location-tracked advertisement")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "ch341"],
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

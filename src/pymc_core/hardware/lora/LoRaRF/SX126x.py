@@ -1,15 +1,34 @@
+import logging
 import time
-import spidev
+
+logger = logging.getLogger(__name__)
+
+# Optional import - spidev is only needed for hardware SPI (Raspberry Pi)
+# When using USB adapters like CH341, a custom transport is provided instead
+try:
+    import spidev
+
+    spi = spidev.SpiDev()
+except ImportError:
+    spidev = None
+    spi = None
 
 from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
-spi = spidev.SpiDev()
+
 _gpio_manager = None
+
 
 def set_gpio_manager(gpio_manager):
     """Set the GPIO manager instance to be used by this module"""
     global _gpio_manager
     _gpio_manager = gpio_manager
+
+
+def set_spi_transport(spi_transport):
+    """Set the SPI transport instance to be used by this module"""
+    global spi
+    spi = spi_transport
 
 
 def _get_output(pin):
@@ -402,7 +421,7 @@ class SX126x(BaseLoRa):
 
         reset_pin.write(False)  # periphery: write(False) = LOW
         time.sleep(0.001)
-        reset_pin.write(True)   # periphery: write(True) = HIGH
+        reset_pin.write(True)  # periphery: write(True) = HIGH
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):
@@ -425,16 +444,27 @@ class SX126x(BaseLoRa):
         self.setStandby(option)
 
     def busyCheck(self, timeout: int = _busyTimeout):
-        # wait for busy pin to LOW or timeout reached
+        """Return True if radio is still BUSY after waiting up to `timeout` ms."""
         busy_pin = _get_input_safe(self._busy)
         if busy_pin is None:
-            return False  # Assume not busy to continue
+            return False
 
-        t = time.time()
-        while busy_pin.read():  # periphery: read() returns True for HIGH
-            if (time.time() - t) > (timeout / 1000):
+        deadline = time.time() + (timeout / 1000.0)
+        while True:
+            try:
+                # Always do a real read for BUSY. A stale cached HIGH can deadlock init.
+                is_busy = bool(busy_pin.read())
+            except Exception:
+                # If we can't read BUSY reliably, don't block forever.
+                return False
+
+            if not is_busy:
+                return False
+
+            if time.time() >= deadline:
                 return True
-        return False
+
+            time.sleep(0.001)
 
     def setFallbackMode(self, fallbackMode):
         self.setRxTxFallbackMode(fallbackMode)
@@ -1285,6 +1315,8 @@ class SX126x(BaseLoRa):
 
     def getIrqStatus(self) -> int:
         buf = self._readBytes(0x12, 3)
+        if len(buf) < 3:
+            raise RuntimeError(f"GetIrqStatus: short read (got {len(buf)} bytes)")
         return (buf[1] << 8) | buf[2]
 
     def clearIrqStatus(self, clearIrqParam: int):
@@ -1417,6 +1449,8 @@ class SX126x(BaseLoRa):
 
     def getStatus(self) -> int:
         buf = self._readBytes(0xC0, 1)
+        if len(buf) < 1:
+            raise RuntimeError(f"GetStatus: short read (got {len(buf)} bytes)")
         return buf[0]
 
     def getRxBufferStatus(self) -> tuple:
@@ -1478,7 +1512,9 @@ class SX126x(BaseLoRa):
     ### SX126X API: UTILITIES ###
 
     def _writeBytes(self, opCode: int, data: tuple, nBytes: int):
-        if self.busyCheck():
+        # Wait for radio to be ready (BUSY low)
+        if self.busyCheck(timeout=100):
+            logger.warning("Radio BUSY timeout before write")
             return
 
         # Adaptive CS control based on CS pin type
@@ -1503,7 +1539,9 @@ class SX126x(BaseLoRa):
             _get_output(self._cs_define).write(True)
 
     def _readBytes(self, opCode: int, nBytes: int, address: tuple = (), nAddress: int = 0) -> tuple:
-        if self.busyCheck():
+        # Wait for radio to be ready (BUSY low)
+        if self.busyCheck(timeout=100):
+            logger.warning("Radio BUSY timeout before read")
             return ()
 
         # Adaptive CS control based on CS pin type

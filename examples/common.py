@@ -11,8 +11,15 @@ import os
 import sys
 
 # Set up logging
+# Default to INFO to avoid extremely verbose CH341/SPI debug logs.
+# Override at runtime, e.g.:
+#   PYMC_LOG_LEVEL=DEBUG .venv/bin/python pyMC_core/examples/send_tracked_advert.py --radio-type ch341
+_level_name = os.getenv("PYMC_LOG_LEVEL", "INFO").upper()
+_level = getattr(logging, _level_name, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=_level,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -29,7 +36,7 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
     """Create a radio instance with configuration for specified hardware.
 
     Args:
-        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", "kiss-tnc", or "ch341")
         serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
 
     Returns:
@@ -64,6 +71,55 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
                 f"Frequency: {kiss_config['frequency']/1000000:.3f}MHz, TX Power: {kiss_config['power']}dBm"
             )
             return kiss_wrapper
+
+        # Check if this is a CH341 configuration
+        if radio_type == "ch341":
+            from pymc_core.hardware.ch341.ch341_gpio_manager import CH341GPIOManager
+            from pymc_core.hardware.lora.LoRaRF.SX126x import set_gpio_manager, set_spi_transport
+            from pymc_core.hardware.sx1262_wrapper import SX1262Radio
+            from pymc_core.hardware.transports.ch341_spi_transport import CH341SPITransport
+
+            logger.debug("Using CH341 USB-to-SPI adapter")
+
+            # Create CH341 GPIO manager and set it globally
+            ch341_gpio = CH341GPIOManager(vid=0x1A86, pid=0x5512)
+            set_gpio_manager(ch341_gpio)
+            logger.debug("Set CH341 GPIO manager globally")
+
+            # Create CH341 SPI transport and set it globally
+            ch341_spi = CH341SPITransport(vid=0x1A86, pid=0x5512, auto_setup_gpio=False)
+            set_spi_transport(ch341_spi)
+            logger.debug("Set CH341 SPI transport globally")
+
+            # CH341 pin configuration (using actual CH341 GPIO pins 0-7)
+            ch341_config = {
+                "bus_id": 0,  # Not used with CH341 but required parameter
+                "cs_id": 0,  # Not used with CH341 but required parameter
+                "cs_pin": 0,  # CH341 GPIO 0 for CS
+                "reset_pin": 2,  # CH341 GPIO 2 for Reset
+                "busy_pin": 4,  # CH341 GPIO 4 for Busy
+                "irq_pin": 6,  # CH341 GPIO 6 for IRQ
+                "txen_pin": -1,  # Not used
+                "rxen_pin": 1,  # CH341 GPIO 1 for RX enable
+                "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
+                "tx_power": 22,
+                "spreading_factor": 8,
+                "bandwidth": int(62.5 * 1000),
+                "coding_rate": 8,
+                "preamble_length": 17,
+                "use_dio2_rf": True,
+                "is_waveshare": False,  # Waveshare SX1262 LoRa HAT pinout
+                "use_dio3_tcxo": True,  # Enable TCXO on DIO3
+                "dio3_tcxo_voltage": 1.8,  # 1.8V TCXO
+            }
+
+            logger.debug(f"CH341 configuration: {ch341_config}")
+            radio = SX1262Radio(**ch341_config)
+            logger.info("SX1262 radio created with CH341 USB adapter")
+            logger.info(
+                f"Frequency: {ch341_config['frequency']/1000000:.1f}MHz, TX Power: {ch341_config['tx_power']}dBm"
+            )
+            return radio
 
         # Direct SX1262 radio for other types
         from pymc_core.hardware.sx1262_wrapper import SX1262Radio
@@ -125,7 +181,7 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
 
         if radio_type not in configs:
             raise ValueError(
-                f"Unknown radio type: {radio_type}. Use 'waveshare', 'meshadv-mini', 'uconsole', or 'kiss-tnc'"
+                f"Unknown radio type: {radio_type}. Use 'waveshare', 'meshadv-mini', 'uconsole', 'kiss-tnc', or 'ch341'"
             )
 
         radio_kwargs = configs[radio_type]
@@ -153,7 +209,7 @@ def create_mesh_node(
 
     Args:
         node_name: Name for the mesh node
-        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", "kiss-tnc", or "ch341")
         serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
 
     Returns:
@@ -185,9 +241,18 @@ def create_mesh_node(
                 logger.error("Failed to connect KISS radio")
                 print(f"Failed to connect to KISS radio on {serial_port}")
                 raise Exception(f"KISS radio connection failed on {serial_port}")
+        elif radio_type == "ch341":
+            logger.debug("Initializing CH341 radio...")
+            ok = radio.begin()
+            if ok is False:
+                raise RuntimeError("CH341 SX1262 radio begin() returned False")
+            logger.info("CH341 radio initialized successfully")
+            print("CH341 USB adapter radio initialized")
         else:
             logger.debug("Calling radio.begin()...")
-            radio.begin()
+            ok = radio.begin()
+            if ok is False:
+                raise RuntimeError("SX1262 radio begin() returned False")
             logger.info("Radio initialized successfully")
 
         # Create a mesh node with the radio and identity

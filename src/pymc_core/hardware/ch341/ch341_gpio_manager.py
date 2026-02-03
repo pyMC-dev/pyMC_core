@@ -1,0 +1,551 @@
+"""
+Mock GPIO Manager for CH341
+Provides GPIO interface using CH341's built-in GPIO pins instead of system GPIO
+Includes software interrupt polling to emulate hardware interrupts
+"""
+
+import logging
+import random
+import threading
+import time
+from typing import Callable, Optional
+
+from .ch341_async import CH341Error
+
+logger = logging.getLogger(__name__)
+
+
+class CH341GPIOPin:
+    """Mock GPIO pin that uses CH341 GPIO"""
+
+    def __init__(self, ch341_device, pin_number: int, is_output: bool = True, gpio_manager=None):
+        self.ch341 = ch341_device
+        self.pin = pin_number
+        self.is_output = is_output
+        self._value = True if is_output else False
+        self._interrupt_callback = None
+        self._polling_thread = None
+        self._stop_polling = False
+
+        # For INPUT pins we keep a cached last-read state so callers can get a value
+        # even when the CH341 is busy with SPI.
+        self._cached_state = None
+
+        self._direction_configured = False
+        self._gpio_manager = gpio_manager  # Reference to manager for CS state checking
+
+    def read(self) -> bool:
+        """Read pin value"""
+        # Lazy configure: set direction on first access
+        if not self._direction_configured:
+            try:
+                self.ch341.gpio_set_direction(self.pin, self.is_output)
+                self._direction_configured = True
+                direction = "output" if self.is_output else "input"
+                logger.debug(f"[CH341] GPIO pin {self.pin} configured as {direction}")
+            except Exception as e:
+                logger.debug(f"Failed to set CH341 GPIO {self.pin} direction on first read: {e}")
+
+        if self.is_output:
+            return self._value
+        try:
+            val = self.ch341.gpio_get(self.pin)
+            # Cache last known state for any input pin (BUSY/IRQ/etc.).
+            # IMPORTANT: do not reuse this for edge detection state in the poller.
+            self._cached_state = bool(val)
+
+            # Debug the actual reads on pin 6 (IRQ pin)
+            if self.pin == 6:
+                # Sample less frequently - only log occasionally
+                if random.random() < 0.01:
+                    logger.debug(f"[CH341-GPIO6] Read value: {self._cached_state}")
+            return self._cached_state
+        except CH341Error:
+            # If we can't acquire lock (e.g., SPI transfer in progress),
+            # return last known state
+            if self._cached_state is not None:
+                return self._cached_state
+            return False  # Default to LOW if no cached value
+
+    def read_cached(self) -> bool:
+        """Read cached pin value without acquiring locks (non-blocking)"""
+        if self.is_output:
+            return self._value
+        if self._cached_state is not None:
+            return self._cached_state
+        # No cached value, do a blocking read as fallback
+        return self.read()
+
+    def write(self, value: bool) -> None:
+        """Write pin value"""
+        # Lazy configure: set direction on first access
+        if not self._direction_configured:
+            try:
+                self.ch341.gpio_set_direction(self.pin, self.is_output)
+                self._direction_configured = True
+            except Exception as e:
+                logger.debug(f"Failed to set CH341 GPIO {self.pin} direction on first write: {e}")
+
+        if not self.is_output:
+            logger.warning(f"Attempting to write to input pin {self.pin}")
+            return
+
+        self._value = value
+        try:
+            self.ch341.gpio_set(self.pin, value)
+        except Exception as e:
+            logger.warning(f"Failed to write CH341 GPIO pin {self.pin}: {e}")
+
+    def enable_interrupt(self, callback: Callable, edge: str = "rising"):
+        """
+        Enable software interrupt polling on this pin.
+
+        Args:
+            callback: Function to call when interrupt triggers
+            edge: 'rising', 'falling', or 'both'
+        """
+        if self.is_output:
+            logger.error(f"Cannot enable interrupt on output pin {self.pin}")
+            return False
+
+        self._interrupt_callback = callback
+        self._interrupt_edge = edge
+        self._stop_polling = False
+
+        # Prime cached state
+        try:
+            self._cached_state = bool(self.read())
+        except Exception:
+            self._cached_state = False
+
+        # Delay starting the polling thread - it interferes with radio init
+        # The radio doesn't need IRQ monitoring until after initialization completes
+        logger.info(f"IRQ callback registered for pin {self.pin} - polling will start after init")
+        return True
+
+    def start_polling(self):
+        """Start the interrupt polling thread (call after radio init completes)"""
+        if self._polling_thread is not None:
+            return True  # Already started
+
+        # Start polling thread
+        self._polling_thread = threading.Thread(
+            target=self._poll_for_interrupt, daemon=True, name=f"CH341-IRQ-Poll-{self.pin}"
+        )
+        self._polling_thread.start()
+        edge = getattr(self, "_interrupt_edge", "rising")
+        logger.info(f"Started interrupt polling on CH341 GPIO {self.pin} (edge={edge})")
+        return True
+
+    def _poll_for_interrupt(self):
+        """Polling thread that checks pin state and triggers callback on rising edge."""
+        poll_interval = 0.001  # 1ms polling interval (was 50ms - too slow!)
+        iteration_count = 0
+        interrupt_count = 0
+        last_debug_time = time.time()
+
+        # Write directly to file for debugging (logging may hang)
+        debug_file = f"/tmp/ch341_poll_pin{self.pin}.log"
+
+        interval_ms = poll_interval * 1000
+        logger.info(
+            f"Interrupt polling thread started for pin {self.pin} with {interval_ms}ms interval"
+        )
+
+        # Local edge state for polling (do NOT reuse _cached_state; that is for non-blocking reads)
+        try:
+            self._poll_last_state = bool(self.read_cached())
+        except Exception:
+            self._poll_last_state = False
+
+        with open(debug_file, "w") as f:
+            f.write(f"Poll thread started for pin {self.pin}\n")
+            f.write(f"Initial poll state: {self._poll_last_state}\n")
+            f.flush()
+
+            while not self._stop_polling:
+                iteration_count += 1
+
+                try:
+                    # Write first iteration
+                    if iteration_count <= 5:
+                        f.write(f"Iteration {iteration_count}: Starting read\n")
+                        f.flush()
+
+                    current_state = self.read()
+
+                    if iteration_count <= 5:
+                        f.write(
+                            f"Iteration {iteration_count}: Read succeeded, state={current_state}\n"
+                        )
+                        f.flush()
+
+                    # Debug every 1 second
+                    current_time = time.time()
+                    if current_time - last_debug_time > 1.0:
+                        debug_msg = (
+                            f"Poll: Pin {self.pin} state={current_state}, "
+                            f"last_state={self._poll_last_state}, callbacks={interrupt_count}\n"
+                        )
+                        f.write(debug_msg)
+                        f.flush()
+                        last_debug_time = current_time
+
+                    # Detect edges. IMPORTANT: keep edge-detection state local to this thread.
+                    edge = getattr(self, "_interrupt_edge", "rising")
+
+                    if edge in ("rising", "both") and (
+                        self._poll_last_state is False and current_state is True
+                    ):
+                        interrupt_count += 1
+                        f.write(
+                            f"RISING EDGE DETECTED on pin {self.pin} "
+                            f"(interrupt #{interrupt_count})\n"
+                        )
+                        f.flush()
+                        logger.info(
+                            f"[POLL] Rising edge detected on pin {self.pin} "
+                            f"(interrupt #{interrupt_count})"
+                        )
+
+                        if self._interrupt_callback:
+                            try:
+                                self._interrupt_callback()
+                            except Exception as e:
+                                logger.error(f"Error in interrupt callback: {e}")
+
+                    if edge in ("falling", "both") and (
+                        self._poll_last_state is True and current_state is False
+                    ):
+                        interrupt_count += 1
+                        f.write(
+                            f"FALLING EDGE DETECTED on pin {self.pin} "
+                            f"(interrupt #{interrupt_count})\n"
+                        )
+                        f.flush()
+                        logger.info(
+                            f"[POLL] Falling edge detected on pin {self.pin} "
+                            f"(interrupt #{interrupt_count})"
+                        )
+
+                        if self._interrupt_callback:
+                            try:
+                                self._interrupt_callback()
+                            except Exception as e:
+                                logger.error(f"Error in interrupt callback: {e}")
+
+                    # Update last state for next iteration
+                    self._poll_last_state = current_state
+
+                    if iteration_count == 5:
+                        f.write(f"Iteration {iteration_count}: Complete, about to sleep\n")
+                        f.flush()
+
+                except Exception as e:
+                    # Suppress "GPIO read IN failed: -6" (BUSY) during heavy SPI activity - expected
+                    if "GPIO read IN failed: -6" not in str(
+                        e
+                    ) and "GPIO read write failed: -6" not in str(e):
+                        logger.warning(
+                            f"Error polling pin {self.pin} (iteration {iteration_count}): {e}"
+                        )
+                    f.write(f"ERROR on iteration {iteration_count}: {e}\n")
+                    f.flush()
+                    time.sleep(0.001)
+
+                if iteration_count <= 5:
+                    f.write(f"Iteration {iteration_count}: About to sleep\n")
+                    f.flush()
+
+                time.sleep(poll_interval)
+
+                if iteration_count <= 5:
+                    f.write(f"Iteration {iteration_count}: Sleep done\n")
+                    f.flush()
+
+        logger.info(
+            f"Interrupt polling thread stopped for pin {self.pin} after "
+            f"{iteration_count} iterations, {interrupt_count} interrupts detected"
+        )
+
+    def disable_interrupt(self):
+        """Stop interrupt polling."""
+        self._stop_polling = True
+        if self._polling_thread and self._polling_thread.is_alive():
+            self._polling_thread.join(timeout=0.5)
+        self._interrupt_callback = None
+        logger.debug(f"Disabled interrupt polling on CH341 GPIO {self.pin}")
+
+
+class CH341GPIOManager:
+    """GPIO manager that uses CH341's GPIO pins (0-7) directly"""
+
+    def __init__(self, vid: int = 0x1A86, pid: int = 0x5512):
+        """
+        Initialize CH341 GPIO manager
+
+        Args:
+            vid: USB Vendor ID (default: 0x1a86 for CH341)
+            pid: USB Product ID (default: 0x5512 for CH341)
+        """
+        from .ch341_async import CH341Async
+
+        # Get singleton CH341 device instance
+        self.ch341 = CH341Async.get_instance(vid=vid, pid=pid)
+        self._pins = {}  # pin_number -> CH341GPIOPin
+        self._cs_pin_number = None  # Track CS pin for SPI state detection
+
+        # LED blink support (same semantics as GPIOPinManager)
+        self._led_threads = {}  # pin_number -> Thread
+        self._led_stop_events = {}  # pin_number -> Event
+
+        logger.info("Using CH341 GPIO manager - CH341 pins 0-7 only")
+
+    def setup_output_pin(self, pin: int, initial_value: bool = True) -> bool:
+        """
+        Setup output pin using CH341 GPIO
+
+        Args:
+            pin: CH341 GPIO pin number (0-7)
+            initial_value: Initial pin state
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not (0 <= pin <= 7):
+                logger.error(f"CH341 pin {pin} out of range (must be 0-7)")
+                return False
+
+            if pin in self._pins:
+                logger.debug(f"CH341 GPIO {pin} already set up")
+                return True
+
+            gpio_pin = CH341GPIOPin(self.ch341, pin, is_output=True, gpio_manager=self)
+            gpio_pin.write(initial_value)
+            self._pins[pin] = gpio_pin
+
+            # Track CS pin (pin 0 for CS)
+            if pin == 0:
+                self._cs_pin_number = pin
+                logger.debug(f"Registered CS pin {pin} for SPI state tracking")
+
+            logger.debug(f"CH341 GPIO output pin {pin} configured")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to setup CH341 output pin {pin}: {e}")
+            return False
+
+    def setup_input_pin(self, pin: int) -> bool:
+        """
+        Setup input pin using CH341 GPIO
+
+        Args:
+            pin: CH341 GPIO pin number (0-7)
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not (0 <= pin <= 7):
+                logger.error(f"CH341 pin {pin} out of range (must be 0-7)")
+                return False
+
+            if pin in self._pins:
+                logger.debug(f"CH341 GPIO {pin} already set up")
+                return True
+
+            gpio_pin = CH341GPIOPin(self.ch341, pin, is_output=False, gpio_manager=self)
+            self._pins[pin] = gpio_pin
+            logger.debug(f"CH341 GPIO input pin {pin} configured")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to setup CH341 input pin {pin}: {e}")
+            return False
+
+    def setup_interrupt_pin(
+        self, pin: int, pull_up: bool = False, callback: Optional[Callable] = None
+    ):
+        """
+        Setup interrupt pin with software polling to emulate hardware interrupts.
+
+        CH341 doesn't support hardware interrupts, so this uses a polling thread
+        to detect pin state changes and call the callback function.
+
+        Args:
+            pin: CH341 GPIO pin number (0-7)
+            pull_up: Pull-up resistor (ignored, CH341 has internal config)
+            callback: Interrupt callback function
+
+        Returns:
+            Pin object with interrupt polling enabled, or None on failure
+        """
+        if not (0 <= pin <= 7):
+            logger.error(f"CH341 pin {pin} out of range (must be 0-7)")
+            return None
+
+        # Create input pin
+        if not self.setup_input_pin(pin):
+            logger.error(f"Failed to setup input pin {pin} for interrupt")
+            return None
+
+        gpio_pin = self._pins[pin]
+
+        # Enable software interrupt polling if callback provided
+        if callback:
+            if gpio_pin.enable_interrupt(callback, edge="rising"):
+                logger.info(f"Interrupt polling enabled on CH341 GPIO {pin}")
+            else:
+                logger.error(f"Failed to enable interrupt polling on pin {pin}")
+                return None
+        else:
+            logger.warning("No callback provided for interrupt pin - polling not started")
+
+        return gpio_pin
+
+    def cleanup_all(self) -> None:
+        """Cleanup all GPIO pins and stop interrupt polling threads"""
+        logger.debug("Cleaning up CH341 GPIO pins")
+
+        # Stop all LED threads
+        for stop_event in self._led_stop_events.values():
+            stop_event.set()
+        for thread in self._led_threads.values():
+            thread.join(timeout=0.2)
+        self._led_threads.clear()
+        self._led_stop_events.clear()
+
+        # Stop all interrupt polling threads
+        for pin in self._pins.values():
+            if hasattr(pin, "disable_interrupt"):
+                pin.disable_interrupt()
+        self._pins.clear()
+
+    def get_pin(self, pin: int):
+        """Get pin object"""
+        return self._pins.get(pin)
+
+    def set_pin_high(self, pin_number: int) -> bool:
+        """Set output pin to HIGH"""
+        if pin_number in self._pins:
+            try:
+                gpio = self._pins[pin_number]
+                if gpio.is_output:
+                    gpio.write(True)
+                    return True
+                else:
+                    logger.warning(f"Pin {pin_number} is not configured as output")
+            except Exception as e:
+                logger.warning(f"Failed to set pin {pin_number} HIGH: {e}")
+        else:
+            logger.debug(f"Pin {pin_number} not configured")
+        return False
+
+    def set_pin_low(self, pin_number: int) -> bool:
+        """Set output pin to LOW"""
+        if pin_number in self._pins:
+            try:
+                gpio = self._pins[pin_number]
+                if gpio.is_output:
+                    gpio.write(False)
+                    return True
+                else:
+                    logger.warning(f"Pin {pin_number} is not configured as output")
+            except Exception as e:
+                logger.warning(f"Failed to set pin {pin_number} LOW: {e}")
+        else:
+            logger.debug(f"Pin {pin_number} not configured")
+        return False
+
+    def write_pin(self, pin_number: int, value: bool) -> bool:
+        """
+        Write value to output pin
+
+        Args:
+            pin_number: Pin number to write to
+            value: True for HIGH, False for LOW
+
+        Returns:
+            True if successful
+        """
+        if value:
+            return self.set_pin_high(pin_number)
+        else:
+            return self.set_pin_low(pin_number)
+
+    def read_pin(self, pin_number: int) -> Optional[bool]:
+        """
+        Read current state of a pin
+
+        Returns:
+            True for HIGH, False for LOW, None if pin not configured or error
+        """
+        if pin_number in self._pins:
+            try:
+                return self._pins[pin_number].read()
+            except Exception as e:
+                logger.warning(f"Failed to read pin {pin_number}: {e}")
+        else:
+            logger.debug(f"Pin {pin_number} not configured")
+        return None
+
+    def _led_blink_thread(
+        self, pin_number: int, duration: float, stop_event: threading.Event
+    ) -> None:
+        try:
+            self.set_pin_high(pin_number)
+            stop_event.wait(timeout=duration)
+        finally:
+            try:
+                self.set_pin_low(pin_number)
+            except Exception:
+                pass
+            self._led_threads.pop(pin_number, None)
+            self._led_stop_events.pop(pin_number, None)
+
+    def blink_led(self, pin_number: int, duration: float = 0.2) -> None:
+        """Blink a CH341-controlled LED pin (non-blocking)."""
+        if pin_number == -1:
+            return
+
+        gpio = self._pins.get(pin_number)
+        if gpio is None or not getattr(gpio, "is_output", False):
+            return
+
+        # Stop any existing blink
+        if pin_number in self._led_stop_events:
+            self._led_stop_events[pin_number].set()
+        if pin_number in self._led_threads:
+            self._led_threads[pin_number].join(timeout=0.05)
+
+        stop_event = threading.Event()
+        self._led_stop_events[pin_number] = stop_event
+
+        thread = threading.Thread(
+            target=self._led_blink_thread,
+            args=(pin_number, duration, stop_event),
+            daemon=True,
+            name=f"CH341-LED-{pin_number}",
+        )
+        thread.start()
+        self._led_threads[pin_number] = thread
+
+    def is_spi_active(self) -> bool:
+        """Check if SPI is active by reading CS pin state.
+
+        Returns:
+            True if SPI is active (CS is LOW), False otherwise
+        """
+        if self._cs_pin_number is None:
+            return False  # CS not configured, assume SPI inactive
+
+        cs_pin = self._pins.get(self._cs_pin_number)
+        if cs_pin is None:
+            return False
+
+        # CS LOW = SPI active, CS HIGH = SPI idle
+        try:
+            cs_state = cs_pin._value  # Read cached value to avoid USB round-trip
+            return not cs_state  # LOW = active
+        except Exception:
+            return False  # On error, assume inactive
