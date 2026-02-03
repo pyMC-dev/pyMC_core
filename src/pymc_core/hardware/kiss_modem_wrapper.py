@@ -127,6 +127,20 @@ class KissModemWrapper(LoRaRadio):
     operations via the modem's identity.
 
     Implements the LoRaRadio interface for PyMC Core compatibility.
+
+    Threading Model:
+        This wrapper uses background threads for serial RX/TX. The RX callback
+        (on_frame_received) is invoked from the RX thread by default. For async
+        applications, call set_event_loop() to have callbacks scheduled onto
+        the event loop via call_soon_threadsafe().
+
+    RX Callback Signature:
+        The callback may accept either:
+        - (data: bytes) - backward compatible, single argument
+        - (data: bytes, rssi: int, snr: float) - per-packet signal metrics
+
+        When using the 3-argument form, rssi and snr are the values for that
+        specific packet, avoiding race conditions with get_last_rssi/get_last_snr.
     """
 
     def __init__(
@@ -145,9 +159,11 @@ class KissModemWrapper(LoRaRadio):
             port: Serial port device path (e.g., '/dev/ttyUSB0', '/dev/ttyACM0')
             baudrate: Serial communication baud rate (default: 115200)
             timeout: Serial read timeout in seconds (default: 1.0)
-            on_frame_received: Callback for received data packets
+            on_frame_received: Callback for received data packets. May be invoked
+                              from a background thread unless set_event_loop() is used.
             radio_config: Optional radio configuration dict with keys:
-                         frequency, bandwidth, spreading_factor, coding_rate, power
+                         frequency, bandwidth, spreading_factor, coding_rate,
+                         power (or tx_power)
             auto_configure: If True, automatically configure radio on connect
         """
         self.port = port
@@ -174,6 +190,9 @@ class KissModemWrapper(LoRaRadio):
 
         # Callbacks
         self.on_frame_received = on_frame_received
+
+        # Event loop for thread-safe async callback invocation
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Response handling
         self._response_event = threading.Event()
@@ -202,6 +221,20 @@ class KissModemWrapper(LoRaRadio):
         # Modem info
         self.modem_version: Optional[int] = None
         self.modem_identity: Optional[bytes] = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Set the event loop for thread-safe async callback invocation.
+
+        When set, RX callbacks are scheduled onto the event loop via
+        call_soon_threadsafe() instead of being invoked directly from
+        the RX thread. This is required for proper async integration.
+
+        Args:
+            loop: The asyncio event loop to use for callbacks
+        """
+        self._event_loop = loop
+        logger.debug("Event loop set for thread-safe callbacks")
 
     def connect(self) -> bool:
         """
@@ -296,11 +329,12 @@ class KissModemWrapper(LoRaRadio):
 
         try:
             # Extract configuration parameters with defaults
+            # Support both "power" and "tx_power" for compatibility with different config styles
             frequency_hz = self.radio_config.get("frequency", int(869.618 * 1000000))
             bandwidth_hz = self.radio_config.get("bandwidth", int(62500))
             sf = self.radio_config.get("spreading_factor", 8)
             cr = self.radio_config.get("coding_rate", 8)
-            power = self.radio_config.get("power", 22)
+            power = self.radio_config.get("power", self.radio_config.get("tx_power", 22))
 
             # Set radio parameters (frequency, bandwidth, SF, CR)
             # Format: Freq (4) + BW (4) + SF (1) + CR (1) - all little-endian
@@ -824,6 +858,35 @@ class KissModemWrapper(LoRaRadio):
             if self.in_frame:
                 self.rx_frame_buffer.append(byte)
 
+    def _dispatch_rx_callback(self, data: bytes, rssi: int, snr: float) -> None:
+        """
+        Dispatch RX callback, optionally via event loop for thread safety.
+
+        If an event loop is set via set_event_loop(), the callback is scheduled
+        onto that loop using call_soon_threadsafe(). Otherwise, the callback
+        is invoked directly from the RX thread.
+
+        Args:
+            data: Received packet data
+            rssi: RSSI in dBm
+            snr: SNR in dB
+        """
+        if self.on_frame_received is None:
+            return
+
+        if self._event_loop is not None:
+            # Schedule callback on event loop for thread-safe async
+            try:
+                self._event_loop.call_soon_threadsafe(
+                    lambda: _invoke_rx_callback(self.on_frame_received, data, rssi, snr)
+                )
+            except RuntimeError as e:
+                # Event loop may be closed
+                logger.warning(f"Failed to schedule RX callback on event loop: {e}")
+        else:
+            # Direct invocation from RX thread
+            _invoke_rx_callback(self.on_frame_received, data, rssi, snr)
+
     def _process_received_frame(self):
         """Process a complete received KISS frame"""
         if len(self.rx_frame_buffer) < 1:
@@ -860,9 +923,7 @@ class KissModemWrapper(LoRaRadio):
                     try:
                         # Pass per-packet rssi/snr to avoid race with get_last_rssi/get_last_snr
                         snr_db = snr_raw / 4.0  # SNR in 0.25 dB steps
-                        _invoke_rx_callback(
-                            self.on_frame_received, packet_data, rssi_raw, snr_db
-                        )
+                        self._dispatch_rx_callback(packet_data, rssi_raw, snr_db)
                     except Exception as e:
                         logger.error(f"Error in frame received callback: {e}")
 

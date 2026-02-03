@@ -579,6 +579,128 @@ class TestQueryMethods:
         assert modem.ping() is False
 
 
+class TestEventLoop:
+    """Test event loop integration for thread-safe async"""
+
+    def test_set_event_loop(self):
+        """Test setting event loop"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        loop = MagicMock()
+
+        modem.set_event_loop(loop)
+
+        assert modem._event_loop is loop
+
+    def test_dispatch_uses_event_loop_when_set(self):
+        """Test that dispatch uses call_soon_threadsafe when loop is set"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        loop = MagicMock()
+        modem.set_event_loop(loop)
+
+        callback = MagicMock()
+        modem.on_frame_received = callback
+
+        modem._dispatch_rx_callback(b"test", -80, 4.0)
+
+        # Should have called call_soon_threadsafe
+        loop.call_soon_threadsafe.assert_called_once()
+
+    def test_dispatch_direct_when_no_event_loop(self):
+        """Test that dispatch invokes callback directly when no loop set"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        received = []
+
+        def callback(data, rssi, snr):
+            received.append((data, rssi, snr))
+
+        modem.on_frame_received = callback
+
+        modem._dispatch_rx_callback(b"test", -80, 4.0)
+
+        assert len(received) == 1
+        assert received[0] == (b"test", -80, 4.0)
+
+
+class TestRadioConfigCompatibility:
+    """Test radio config key compatibility"""
+
+    def test_power_key(self):
+        """Test that 'power' key is used"""
+        modem = KissModemWrapper(
+            port="/dev/null",
+            auto_configure=False,
+            radio_config={"power": 15},
+        )
+
+        sent_commands = []
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            sent_commands.append((cmd, data))
+            return (RESP_OK, b"")
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        modem.configure_radio()
+
+        # Find SET_TX_POWER command
+        tx_power_cmd = next((c for c in sent_commands if c[0] == CMD_SET_TX_POWER), None)
+        assert tx_power_cmd is not None
+        assert tx_power_cmd[1] == bytes([15])
+
+    def test_tx_power_key_fallback(self):
+        """Test that 'tx_power' key is used when 'power' is not present"""
+        modem = KissModemWrapper(
+            port="/dev/null",
+            auto_configure=False,
+            radio_config={"tx_power": 20},
+        )
+
+        sent_commands = []
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            sent_commands.append((cmd, data))
+            return (RESP_OK, b"")
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        modem.configure_radio()
+
+        # Find SET_TX_POWER command
+        tx_power_cmd = next((c for c in sent_commands if c[0] == CMD_SET_TX_POWER), None)
+        assert tx_power_cmd is not None
+        assert tx_power_cmd[1] == bytes([20])
+
+    def test_power_takes_precedence_over_tx_power(self):
+        """Test that 'power' takes precedence over 'tx_power'"""
+        modem = KissModemWrapper(
+            port="/dev/null",
+            auto_configure=False,
+            radio_config={"power": 10, "tx_power": 20},
+        )
+
+        sent_commands = []
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            sent_commands.append((cmd, data))
+            return (RESP_OK, b"")
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        modem.configure_radio()
+
+        # Find SET_TX_POWER command - should use 'power' value
+        tx_power_cmd = next((c for c in sent_commands if c[0] == CMD_SET_TX_POWER), None)
+        assert tx_power_cmd is not None
+        assert tx_power_cmd[1] == bytes([10])
+
+
 class TestContextManager:
     """Test context manager functionality"""
 
