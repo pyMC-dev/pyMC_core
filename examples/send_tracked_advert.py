@@ -93,7 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a location-tracked advertisement")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem", "ch341"],
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )
@@ -106,7 +106,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Using {args.radio_type} radio configuration")
-    if args.radio_type == "kiss-tnc":
+    if args.radio_type in ("kiss-tnc", "kiss-modem"):
         print(f"Serial port: {args.serial_port}")
 
     try:
