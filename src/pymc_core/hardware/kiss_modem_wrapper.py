@@ -49,66 +49,130 @@ KISS_FESC = 0xDB  # Frame Escape
 KISS_TFEND = 0xDC  # Transposed Frame End
 KISS_TFESC = 0xDD  # Transposed Frame Escape
 
-# MeshCore KISS Modem Request Commands (Host -> Modem)
-# Aligned with firmware: 0x0B/0x0E not in firmware
-CMD_DATA = 0x00
-CMD_GET_IDENTITY = 0x01
-CMD_GET_RANDOM = 0x02
-CMD_VERIFY_SIGNATURE = 0x03
-CMD_SIGN_DATA = 0x04
-CMD_ENCRYPT_DATA = 0x05
-CMD_DECRYPT_DATA = 0x06
-CMD_KEY_EXCHANGE = 0x07
-CMD_HASH = 0x08
-CMD_SET_RADIO = 0x09
-CMD_SET_TX_POWER = 0x0A
-CMD_GET_RADIO = 0x0C
-CMD_GET_TX_POWER = 0x0D
-CMD_GET_VERSION = 0x0F
-CMD_GET_CURRENT_RSSI = 0x10
-CMD_IS_CHANNEL_BUSY = 0x11
-CMD_GET_AIRTIME = 0x12
-CMD_GET_NOISE_FLOOR = 0x13
-CMD_GET_STATS = 0x14
-CMD_GET_BATTERY = 0x15
-CMD_PING = 0x16
-CMD_GET_SENSORS = 0x17
+# Standard KISS type bytes (port in bits 7-4, command in bits 3-0)
+CMD_DATA = 0x00  # Data frame (raw packet)
+KISS_CMD_SETHARDWARE = 0x06  # SetHardware: first payload byte is sub-command
+KISS_CMD_RETURN = 0xFF  # Exit KISS mode (no-op)
 
-# MeshCore KISS Modem Response Commands (Modem -> Host)
-RESP_IDENTITY = 0x21
-RESP_RANDOM = 0x22
-RESP_VERIFY = 0x23
-RESP_SIGNATURE = 0x24
-RESP_ENCRYPTED = 0x25
-RESP_DECRYPTED = 0x26
-RESP_SHARED_SECRET = 0x27
-RESP_HASH = 0x28
-RESP_OK = 0x29
-RESP_RADIO = 0x2A
-RESP_TX_POWER = 0x2B
-RESP_VERSION = 0x2C
-RESP_ERROR = 0x2D
-RESP_TX_DONE = 0x2E
-RESP_CURRENT_RSSI = 0x2F
-RESP_CHANNEL_BUSY = 0x30
-RESP_AIRTIME = 0x31
-RESP_NOISE_FLOOR = 0x33
-RESP_STATS = 0x34
-RESP_BATTERY = 0x35
-RESP_PONG = 0x36
-RESP_SENSORS = 0x37
+# SetHardware request sub-commands (Host -> TNC, first data byte inside 0x06)
+HW_CMD_GET_IDENTITY = 0x01
+HW_CMD_GET_RANDOM = 0x02
+HW_CMD_VERIFY_SIGNATURE = 0x03
+HW_CMD_SIGN_DATA = 0x04
+HW_CMD_ENCRYPT_DATA = 0x05
+HW_CMD_DECRYPT_DATA = 0x06
+HW_CMD_KEY_EXCHANGE = 0x07
+HW_CMD_HASH = 0x08
+HW_CMD_SET_RADIO = 0x09
+HW_CMD_SET_TX_POWER = 0x0A
+HW_CMD_GET_RADIO = 0x0B
+HW_CMD_GET_TX_POWER = 0x0C
+HW_CMD_GET_CURRENT_RSSI = 0x0D
+HW_CMD_IS_CHANNEL_BUSY = 0x0E
+HW_CMD_GET_AIRTIME = 0x0F
+HW_CMD_GET_NOISE_FLOOR = 0x10
+HW_CMD_GET_VERSION = 0x11
+HW_CMD_GET_STATS = 0x12
+HW_CMD_GET_BATTERY = 0x13
+HW_CMD_GET_MCU_TEMP = 0x14
+HW_CMD_GET_SENSORS = 0x15
+HW_CMD_GET_DEVICE_NAME = 0x16
+HW_CMD_PING = 0x17
+HW_CMD_REBOOT = 0x18
 
-# Error Codes
-ERR_INVALID_LENGTH = 0x01
-ERR_INVALID_PARAM = 0x02
-ERR_NO_CALLBACK = 0x03
-ERR_MAC_FAILED = 0x04
-ERR_UNKNOWN_CMD = 0x05
-ERR_ENCRYPT_FAILED = 0x06
-ERR_TX_PENDING = 0x07
+# SetHardware response sub-commands (TNC -> Host)
+HW_RESP_IDENTITY = 0x21
+HW_RESP_RANDOM = 0x22
+HW_RESP_VERIFY = 0x23
+HW_RESP_SIGNATURE = 0x24
+HW_RESP_ENCRYPTED = 0x25
+HW_RESP_DECRYPTED = 0x26
+HW_RESP_SHARED_SECRET = 0x27
+HW_RESP_HASH = 0x28
+HW_RESP_OK = 0x29
+HW_RESP_ERROR = 0x2A
+HW_RESP_RADIO = 0x2B
+HW_RESP_TX_POWER = 0x2C
+HW_RESP_CURRENT_RSSI = 0x2D
+HW_RESP_CHANNEL_BUSY = 0x2E
+HW_RESP_AIRTIME = 0x2F
+HW_RESP_NOISE_FLOOR = 0x30
+HW_RESP_VERSION = 0x31
+HW_RESP_STATS = 0x32
+HW_RESP_BATTERY = 0x33
+HW_RESP_MCU_TEMP = 0x34
+HW_RESP_SENSORS = 0x35
+HW_RESP_DEVICE_NAME = 0x36
+HW_RESP_PONG = 0x37
+HW_RESP_TX_DONE = 0x38
+HW_RESP_RX_META = 0x39
+
+# Backward-compatible aliases (same values as HW_*)
+CMD_GET_IDENTITY = HW_CMD_GET_IDENTITY
+CMD_GET_RANDOM = HW_CMD_GET_RANDOM
+CMD_VERIFY_SIGNATURE = HW_CMD_VERIFY_SIGNATURE
+CMD_SIGN_DATA = HW_CMD_SIGN_DATA
+CMD_ENCRYPT_DATA = HW_CMD_ENCRYPT_DATA
+CMD_DECRYPT_DATA = HW_CMD_DECRYPT_DATA
+CMD_KEY_EXCHANGE = HW_CMD_KEY_EXCHANGE
+CMD_HASH = HW_CMD_HASH
+CMD_SET_RADIO = HW_CMD_SET_RADIO
+CMD_SET_TX_POWER = HW_CMD_SET_TX_POWER
+CMD_GET_RADIO = HW_CMD_GET_RADIO
+CMD_GET_TX_POWER = HW_CMD_GET_TX_POWER
+CMD_GET_CURRENT_RSSI = HW_CMD_GET_CURRENT_RSSI
+CMD_IS_CHANNEL_BUSY = HW_CMD_IS_CHANNEL_BUSY
+CMD_GET_AIRTIME = HW_CMD_GET_AIRTIME
+CMD_GET_NOISE_FLOOR = HW_CMD_GET_NOISE_FLOOR
+CMD_GET_VERSION = HW_CMD_GET_VERSION
+CMD_GET_STATS = HW_CMD_GET_STATS
+CMD_GET_BATTERY = HW_CMD_GET_BATTERY
+CMD_GET_SENSORS = HW_CMD_GET_SENSORS
+CMD_PING = HW_CMD_PING
+
+RESP_IDENTITY = HW_RESP_IDENTITY
+RESP_RANDOM = HW_RESP_RANDOM
+RESP_VERIFY = HW_RESP_VERIFY
+RESP_SIGNATURE = HW_RESP_SIGNATURE
+RESP_ENCRYPTED = HW_RESP_ENCRYPTED
+RESP_DECRYPTED = HW_RESP_DECRYPTED
+RESP_SHARED_SECRET = HW_RESP_SHARED_SECRET
+RESP_HASH = HW_RESP_HASH
+RESP_OK = HW_RESP_OK
+RESP_RADIO = HW_RESP_RADIO
+RESP_TX_POWER = HW_RESP_TX_POWER
+RESP_VERSION = HW_RESP_VERSION
+RESP_ERROR = HW_RESP_ERROR
+RESP_TX_DONE = HW_RESP_TX_DONE
+RESP_CURRENT_RSSI = HW_RESP_CURRENT_RSSI
+RESP_CHANNEL_BUSY = HW_RESP_CHANNEL_BUSY
+RESP_AIRTIME = HW_RESP_AIRTIME
+RESP_NOISE_FLOOR = HW_RESP_NOISE_FLOOR
+RESP_STATS = HW_RESP_STATS
+RESP_BATTERY = HW_RESP_BATTERY
+RESP_PONG = HW_RESP_PONG
+RESP_SENSORS = HW_RESP_SENSORS
+
+# Error codes (SetHardware Error response payload)
+HW_ERR_INVALID_LENGTH = 0x01
+HW_ERR_INVALID_PARAM = 0x02
+HW_ERR_NO_CALLBACK = 0x03
+HW_ERR_MAC_FAILED = 0x04
+HW_ERR_UNKNOWN_CMD = 0x05
+HW_ERR_ENCRYPT_FAILED = 0x06
+
+ERR_INVALID_LENGTH = HW_ERR_INVALID_LENGTH
+ERR_INVALID_PARAM = HW_ERR_INVALID_PARAM
+ERR_NO_CALLBACK = HW_ERR_NO_CALLBACK
+ERR_MAC_FAILED = HW_ERR_MAC_FAILED
+ERR_UNKNOWN_CMD = HW_ERR_UNKNOWN_CMD
+ERR_ENCRYPT_FAILED = HW_ERR_ENCRYPT_FAILED
 
 # Buffer and timing constants
 MAX_FRAME_SIZE = 512
+# Data payload ≤255 bytes (MeshCore MAX_TRANS_UNIT); queue bounds unpaired Data frames
+KISS_MAX_PACKET_SIZE = 255
+MAX_PENDING_RX_FRAMES = 64  # max Data frames queued awaiting RxMeta; each payload ≤255 bytes
 RX_BUFFER_SIZE = 1024
 TX_BUFFER_SIZE = 1024
 DEFAULT_BAUDRATE = 115200
@@ -202,6 +266,9 @@ class KissModemWrapper(LoRaRadio):
         # TX completion tracking
         self._tx_done_event = threading.Event()
         self._tx_done_result: Optional[bool] = None
+
+        # Pending RX data payloads (Data frame) waiting for RxMeta frame
+        self._pending_rx_queue: deque = deque()
 
         self.stats = {
             "frames_sent": 0,
@@ -377,8 +444,10 @@ class KissModemWrapper(LoRaRadio):
             logger.warning("Cannot send frame: not connected")
             return False
 
-        if len(data) < 2 or len(data) > 255:
-            logger.warning(f"Invalid frame size: {len(data)} (must be 2-255 bytes)")
+        if len(data) < 2 or len(data) > KISS_MAX_PACKET_SIZE:
+            logger.warning(
+                f"Invalid frame size: {len(data)} (must be 2-{KISS_MAX_PACKET_SIZE} bytes)"
+            )
             return False
 
         try:
@@ -423,25 +492,29 @@ class KissModemWrapper(LoRaRadio):
             return False
 
     def _send_command(
-        self, cmd: int, data: bytes = b"", timeout: float = RESPONSE_TIMEOUT
+        self, sub_cmd: int, data: bytes = b"", timeout: float = RESPONSE_TIMEOUT
     ) -> Optional[tuple[int, bytes]]:
         """
-        Send a command and wait for response
+        Send a SetHardware command and wait for response.
+
+        Encodes as KISS frame: FEND + 0x06 (SetHardware) + sub_cmd + data + FEND.
 
         Args:
-            cmd: Command byte
-            data: Command data
+            sub_cmd: SetHardware sub-command byte (e.g. HW_CMD_GET_IDENTITY)
+            data: Sub-command payload
             timeout: Response timeout in seconds
 
         Returns:
-            Tuple of (response_cmd, response_data) or None on timeout
+            Tuple of (response_sub_cmd, response_data) or None on timeout
         """
         with self._response_lock:
             self._response_event.clear()
             self._pending_response = None
 
-        # Create and send KISS frame
-        kiss_frame = self._encode_kiss_frame(cmd, data)
+        # SetHardware frame: type 0x06, payload = sub_cmd (1 byte) + data
+        kiss_frame = self._encode_kiss_frame(
+            KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data
+        )
 
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.write(kiss_frame)
@@ -452,7 +525,7 @@ class KissModemWrapper(LoRaRadio):
             with self._response_lock:
                 return self._pending_response
         else:
-            logger.warning(f"Command 0x{cmd:02X} timeout")
+            logger.warning(f"SetHardware sub_cmd 0x{sub_cmd:02X} timeout")
             return None
 
     def get_radio_config(self) -> Optional[Dict[str, Any]]:
@@ -563,6 +636,44 @@ class KissModemWrapper(LoRaRadio):
         if resp and resp[0] == RESP_SENSORS:
             return resp[1]
         return None
+
+    def get_mcu_temp(self) -> Optional[float]:
+        """
+        Get MCU temperature in degrees Celsius.
+
+        Returns:
+            Temperature in °C, or None if unsupported or error.
+        """
+        resp = self._send_command(HW_CMD_GET_MCU_TEMP)
+        if resp and resp[0] == HW_RESP_MCU_TEMP and len(resp[1]) >= 2:
+            temp_tenths = struct.unpack("<h", resp[1][:2])[0]
+            return temp_tenths / 10.0
+        if resp and resp[0] == HW_RESP_ERROR and len(resp[1]) >= 1:
+            if resp[1][0] == HW_ERR_NO_CALLBACK:
+                return None
+        return None
+
+    def get_device_name(self) -> Optional[str]:
+        """
+        Get device/manufacturer name (UTF-8 string).
+
+        Returns:
+            Device name string or None on error.
+        """
+        resp = self._send_command(HW_CMD_GET_DEVICE_NAME)
+        if resp and resp[0] == HW_RESP_DEVICE_NAME:
+            try:
+                return resp[1].decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        return None
+
+    def reboot(self) -> None:
+        """
+        Request modem reboot. Sends Reboot (0x18), expects OK then connection drop.
+        Does not wait for disconnect.
+        """
+        self._send_command(HW_CMD_REBOOT, timeout=1.0)
 
     # Cryptographic operations using modem's identity
 
@@ -888,68 +999,85 @@ class KissModemWrapper(LoRaRadio):
             _invoke_rx_callback(self.on_frame_received, data, rssi, snr)
 
     def _process_received_frame(self):
-        """Process a complete received KISS frame"""
+        """Process a complete received KISS frame (spec: type byte = port | cmd)."""
         if len(self.rx_frame_buffer) < 1:
             return
 
-        # Extract command byte
-        cmd = self.rx_frame_buffer[0]
-        data = bytes(self.rx_frame_buffer[1:])
+        type_byte = self.rx_frame_buffer[0]
+        port = (type_byte >> 4) & 0x0F
+        cmd = type_byte & 0x0F
+
+        # Only process port 0 (single-port TNC)
+        if port != 0:
+            return
 
         self.stats["frames_received"] += 1
-        self.stats["bytes_received"] += len(data)
+        self.stats["bytes_received"] += len(self.rx_frame_buffer) - 1
 
         if cmd == CMD_DATA:
-            # Data packet received - extract RSSI/SNR and payload
-            if len(data) >= 2:
-                # First byte is SNR * 4 (signed), second byte is RSSI (signed)
-                snr_raw = data[0]
-                rssi_raw = data[1]
+            # Data frame: raw packet only (≤255 bytes per spec); queue until RxMeta arrives
+            payload = bytes(self.rx_frame_buffer[1:])
+            if len(self._pending_rx_queue) >= MAX_PENDING_RX_FRAMES:
+                self.stats["frame_errors"] += 1
+                logger.warning(
+                    "Pending RX queue full (max %d), dropping Data frame",
+                    MAX_PENDING_RX_FRAMES,
+                )
+            else:
+                self._pending_rx_queue.append(payload)
 
-                # Convert to signed values
-                if snr_raw > 127:
-                    snr_raw -= 256
-                if rssi_raw > 127:
-                    rssi_raw -= 256
+        elif cmd == KISS_CMD_SETHARDWARE:
+            # SetHardware: first byte is sub_cmd, rest is payload
+            if len(self.rx_frame_buffer) < 2:
+                return
+            sub_cmd = self.rx_frame_buffer[1]
+            payload = bytes(self.rx_frame_buffer[2:])
 
-                self.stats["last_snr"] = snr_raw / 4.0  # SNR in 0.25 dB steps
-                self.stats["last_rssi"] = rssi_raw
-                self.stats["rx_packets"] += 1
+            if sub_cmd == HW_RESP_RX_META:
+                # RxMeta follows a Data frame: SNR (1), RSSI (1); deliver queued data
+                rssi_raw = -999
+                snr_db = -999.0
+                if len(payload) >= 2:
+                    snr_raw = payload[0]
+                    rssi_raw = payload[1]
+                    if snr_raw > 127:
+                        snr_raw -= 256
+                    if rssi_raw > 127:
+                        rssi_raw -= 256
+                    snr_db = snr_raw / 4.0  # 0.25 dB steps
+                    self.stats["last_snr"] = snr_db
+                    self.stats["last_rssi"] = rssi_raw
+                    self.stats["rx_packets"] += 1
+                if self._pending_rx_queue:
+                    packet_data = self._pending_rx_queue.popleft()
+                    if self.on_frame_received:
+                        try:
+                            self._dispatch_rx_callback(packet_data, rssi_raw, snr_db)
+                        except Exception as e:
+                            logger.error(f"Error in frame received callback: {e}")
+                else:
+                    logger.warning("RxMeta received with no pending Data frame")
 
-                # Extract packet payload (skip SNR and RSSI bytes)
-                packet_data = data[2:]
+            elif sub_cmd == HW_RESP_TX_DONE:
+                if len(payload) >= 1:
+                    self._tx_done_result = payload[0] == 0x01
+                    self.stats["tx_packets"] += 1
+                self._tx_done_event.set()
 
-                if self.on_frame_received and len(packet_data) > 0:
-                    try:
-                        # Pass per-packet rssi/snr to avoid race with get_last_rssi/get_last_snr
-                        snr_db = snr_raw / 4.0  # SNR in 0.25 dB steps
-                        self._dispatch_rx_callback(packet_data, rssi_raw, snr_db)
-                    except Exception as e:
-                        logger.error(f"Error in frame received callback: {e}")
+            elif sub_cmd == HW_RESP_ERROR:
+                if len(payload) >= 1:
+                    self.stats["errors"] += 1
+                    logger.warning(f"Modem error: 0x{payload[0]:02X}")
+                with self._response_lock:
+                    self._pending_response = (sub_cmd, payload)
+                    self._response_event.set()
 
-        elif cmd == RESP_TX_DONE:
-            # TX completion response
-            if len(data) >= 1:
-                self._tx_done_result = data[0] == 0x01
-                self.stats["tx_packets"] += 1
-            self._tx_done_event.set()
-
-        elif cmd == RESP_ERROR:
-            # Error response
-            if len(data) >= 1:
-                error_code = data[0]
-                self.stats["errors"] += 1
-                logger.warning(f"Modem error: 0x{error_code:02X}")
-            # Signal response for command waiting
-            with self._response_lock:
-                self._pending_response = (cmd, data)
-                self._response_event.set()
-
-        else:
-            # Response to a command
-            with self._response_lock:
-                self._pending_response = (cmd, data)
-                self._response_event.set()
+            else:
+                # Other response sub-commands (Identity, Radio, OK, etc.)
+                with self._response_lock:
+                    self._pending_response = (sub_cmd, payload)
+                    self._response_event.set()
+        # cmd 0xFF (Return) has port=15 so is already discarded above
 
     def _rx_worker(self):
         """Background thread for receiving data"""

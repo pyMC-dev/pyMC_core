@@ -30,6 +30,14 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     CMD_SET_TX_POWER,
     CMD_SIGN_DATA,
     CMD_VERIFY_SIGNATURE,
+    HW_CMD_GET_DEVICE_NAME,
+    HW_CMD_GET_MCU_TEMP,
+    HW_CMD_GET_VERSION,
+    HW_CMD_REBOOT,
+    HW_RESP_DEVICE_NAME,
+    HW_RESP_MCU_TEMP,
+    HW_RESP_OK,
+    KISS_CMD_SETHARDWARE,
     KISS_FEND,
     KISS_FESC,
     KISS_TFEND,
@@ -115,67 +123,67 @@ class TestKissFrameEncoding:
         assert frame == expected
 
     def test_decode_simple_frame(self):
-        """Test decoding a simple frame"""
+        """Test decoding Data frame then RxMeta (spec: data and metadata separate)"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
         received_frames = []
         modem.on_frame_received = lambda data: received_frames.append(data)
 
-        # Simulate receiving: FEND + CMD_DATA + SNR + RSSI + payload + FEND
-        raw_bytes = bytes([KISS_FEND, CMD_DATA, 0x10, 0xB0, 0x01, 0x02, 0x03, KISS_FEND])
+        # Data frame: FEND + 0x00 + raw_packet + FEND (no in-frame metadata)
+        data_frame = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, 0x03, KISS_FEND])
+        # RxMeta: FEND + 0x06 + 0x39 + SNR + RSSI + FEND (sent immediately after Data)
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
 
-        for byte in raw_bytes:
+        for byte in data_frame:
+            modem._decode_kiss_byte(byte)
+        for byte in rx_meta_frame:
             modem._decode_kiss_byte(byte)
 
         assert len(received_frames) == 1
-        assert received_frames[0] == b"\x01\x02\x03"  # payload without SNR/RSSI
+        assert received_frames[0] == b"\x01\x02\x03"
 
     def test_decode_frame_with_escapes(self):
-        """Test decoding a frame with escaped characters"""
+        """Test decoding Data frame with escaped FEND, then RxMeta"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
         received_frames = []
         modem.on_frame_received = lambda data: received_frames.append(data)
 
-        # Frame with escaped FEND (0xC0) in payload
-        # SNR=0x10, RSSI=0xB0, payload contains 0xC0 escaped
-        raw_bytes = bytes(
-            [
-                KISS_FEND,
-                CMD_DATA,
-                0x10,
-                0xB0,  # SNR, RSSI
-                KISS_FESC,
-                KISS_TFEND,  # escaped 0xC0
-                KISS_FEND,
-            ]
+        # Data frame: payload is escaped 0xC0 (FESC + TFEND)
+        data_frame = bytes(
+            [KISS_FEND, CMD_DATA, KISS_FESC, KISS_TFEND, KISS_FEND]
         )
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
 
-        for byte in raw_bytes:
+        for byte in data_frame:
+            modem._decode_kiss_byte(byte)
+        for byte in rx_meta_frame:
             modem._decode_kiss_byte(byte)
 
         assert len(received_frames) == 1
         assert received_frames[0] == bytes([0xC0])
 
     def test_decode_extracts_rssi_snr(self):
-        """Test that RSSI and SNR are extracted from received frames"""
+        """Test that RSSI and SNR are extracted from RxMeta frame"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
-        # SNR = 0x10 (4.0 dB when divided by 4)
-        # RSSI = 0xB0 (-80 dBm as signed byte)
-        raw_bytes = bytes([KISS_FEND, CMD_DATA, 0x10, 0xB0, 0xAA, 0xBB, KISS_FEND])
+        data_frame = bytes([KISS_FEND, CMD_DATA, 0xAA, 0xBB, KISS_FEND])
+        # RxMeta: SNR=0x10 (4.0 dB), RSSI=0xB0 (-80)
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
 
-        for byte in raw_bytes:
+        for byte in data_frame:
+            modem._decode_kiss_byte(byte)
+        for byte in rx_meta_frame:
             modem._decode_kiss_byte(byte)
 
         assert modem.stats["last_snr"] == pytest.approx(4.0)
         assert modem.stats["last_rssi"] == -80
 
     def test_rx_callback_receives_per_packet_rssi_snr(self):
-        """Test that a 3-arg callback receives (data, rssi, snr) per packet without race"""
+        """Test that a 3-arg callback receives (data, rssi, snr) per Data+RxMeta pair"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
@@ -185,55 +193,92 @@ class TestKissFrameEncoding:
 
         modem.on_frame_received = capture
 
-        # First frame: SNR=0x10 (4.0 dB), RSSI=0xB0 (-80)
-        raw1 = bytes([KISS_FEND, CMD_DATA, 0x10, 0xB0, 0x01, 0x02, KISS_FEND])
-        for byte in raw1:
+        # First packet: Data then RxMeta (SNR=4.0 dB, RSSI=-80)
+        data1 = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, KISS_FEND])
+        meta1 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
+        for byte in data1:
+            modem._decode_kiss_byte(byte)
+        for byte in meta1:
             modem._decode_kiss_byte(byte)
 
-        # Second frame: different metrics
-        raw2 = bytes([KISS_FEND, CMD_DATA, 0x08, 0x9C, 0x03, 0x04, KISS_FEND])
-        for byte in raw2:
+        # Second packet: Data then RxMeta (SNR=2.0 dB, RSSI=-100)
+        data2 = bytes([KISS_FEND, CMD_DATA, 0x03, 0x04, KISS_FEND])
+        meta2 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x08, 0x9C, KISS_FEND])
+        for byte in data2:
+            modem._decode_kiss_byte(byte)
+        for byte in meta2:
             modem._decode_kiss_byte(byte)
 
         assert len(received) == 2
         assert received[0] == (b"\x01\x02", -80, 4.0)
-        assert received[1] == (b"\x03\x04", -100, 2.0)  # 0x9C signed = -100, 0x08/4 = 2.0
+        assert received[1] == (b"\x03\x04", -100, 2.0)
+
+    def test_data_frame_without_rx_meta_does_not_call_callback(self):
+        """Spec: Data frame queues payload; callback only on following RxMeta"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        received = []
+        modem.on_frame_received = lambda data: received.append(data)
+
+        # Only Data frame, no RxMeta
+        data_frame = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, 0x03, KISS_FEND])
+        for byte in data_frame:
+            modem._decode_kiss_byte(byte)
+
+        assert len(received) == 0
+        assert len(modem._pending_rx_queue) == 1
+        assert modem._pending_rx_queue[0] == b"\x01\x02\x03"
+
+    def test_port_non_zero_discarded(self):
+        """Frames with port != 0 are ignored (type byte 0x10 = port 1, cmd 0)"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        received = []
+        modem.on_frame_received = lambda data: received.append(data)
+
+        # Type 0x10: port=1, cmd=0 (Data on port 1) - should be discarded
+        frame = bytes([KISS_FEND, 0x10, 0x01, 0x02, 0x03, KISS_FEND])
+        for byte in frame:
+            modem._decode_kiss_byte(byte)
+
+        assert len(received) == 0
+        assert len(modem._pending_rx_queue) == 0
 
 
 class TestCommandResponses:
     """Test command sending and response parsing"""
 
     def test_send_command_encodes_correctly(self):
-        """Test that _send_command creates correct KISS frame"""
+        """Test that _send_command sends SetHardware frame (FEND + 0x06 + sub_cmd + data + FEND)"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
 
-        # Mock serial connection
         mock_serial = MagicMock()
         mock_serial.is_open = True
         modem.serial_conn = mock_serial
         modem.is_connected = True
 
-        # Send command with short timeout (will timeout since no response)
         modem._send_command(CMD_GET_VERSION, timeout=0.1)
 
-        # Verify frame was written
         assert mock_serial.write.called
         written_frame = mock_serial.write.call_args[0][0]
 
         assert written_frame[0] == KISS_FEND
-        assert written_frame[1] == CMD_GET_VERSION
+        assert written_frame[1] == KISS_CMD_SETHARDWARE  # type SetHardware
+        assert written_frame[2] == HW_CMD_GET_VERSION     # sub_cmd GetVersion
         assert written_frame[-1] == KISS_FEND
 
     def test_response_parsing_identity(self):
-        """Test parsing identity response"""
+        """Test parsing SetHardware Identity response (FEND + 0x06 + 0x21 + pubkey + FEND)"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
-        # Simulate response: RESP_IDENTITY + 32 bytes pubkey
         pubkey = bytes(range(32))
-        raw_bytes = bytes([KISS_FEND, RESP_IDENTITY]) + pubkey + bytes([KISS_FEND])
+        raw_bytes = (
+            bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_IDENTITY]) + pubkey + bytes([KISS_FEND])
+        )
 
-        # Set up response capture
         modem._response_event = threading.Event()
         modem._pending_response = None
 
@@ -245,12 +290,11 @@ class TestCommandResponses:
         assert modem._pending_response[1] == pubkey
 
     def test_response_parsing_error(self):
-        """Test parsing error response"""
+        """Test parsing SetHardware Error response (FEND + 0x06 + 0x2A + code + FEND)"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
-        # Simulate error response
-        raw_bytes = bytes([KISS_FEND, RESP_ERROR, 0x05, KISS_FEND])  # ERR_UNKNOWN_CMD
+        raw_bytes = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_ERROR, 0x05, KISS_FEND])
 
         modem._response_event = threading.Event()
         modem._pending_response = None
@@ -263,13 +307,12 @@ class TestCommandResponses:
         assert modem._pending_response[1][0] == 0x05
 
     def test_tx_done_response(self):
-        """Test TX done response sets event"""
+        """Test SetHardware TxDone (0x38) response sets event"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
         modem._tx_done_event = threading.Event()
 
-        # Simulate TX done success
-        raw_bytes = bytes([KISS_FEND, RESP_TX_DONE, 0x01, KISS_FEND])
+        raw_bytes = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_TX_DONE, 0x01, KISS_FEND])
 
         for byte in raw_bytes:
             modem._decode_kiss_byte(byte)
@@ -577,6 +620,73 @@ class TestQueryMethods:
         modem.is_connected = True
 
         assert modem.ping() is False
+
+    def test_get_mcu_temp_parses_response(self):
+        """Test get_mcu_temp parses signed int16 tenths of °C"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        # 253 tenths = 25.3 °C
+        response_data = struct.pack("<h", 253)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_GET_MCU_TEMP:
+                return (HW_RESP_MCU_TEMP, response_data)
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_mcu_temp() == pytest.approx(25.3)
+
+    def test_get_mcu_temp_returns_none_on_no_callback_error(self):
+        """Test get_mcu_temp returns None when modem returns NoCallback error"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_GET_MCU_TEMP:
+                return (RESP_ERROR, bytes([0x03]))  # HW_ERR_NO_CALLBACK
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_mcu_temp() is None
+
+    def test_get_device_name_parses_utf8(self):
+        """Test get_device_name returns UTF-8 decoded string"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        name = "TestDevice"
+        response_data = name.encode("utf-8")
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_GET_DEVICE_NAME:
+                return (HW_RESP_DEVICE_NAME, response_data)
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_device_name() == "TestDevice"
+
+    def test_reboot_sends_command(self):
+        """Test reboot sends HW_CMD_REBOOT SetHardware command"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        sent = []
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            sent.append((cmd, data))
+            return (HW_RESP_OK, b"")
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        modem.reboot()
+
+        assert len(sent) == 1
+        assert sent[0][0] == HW_CMD_REBOOT
+        assert sent[0][1] == b""
 
 
 class TestEventLoop:
