@@ -299,6 +299,10 @@ class KissModemWrapper(LoRaRadio):
 
         logger.info(f"KISS modem disconnected from {self.port}")
 
+    def cleanup(self) -> None:
+        """Release modem resources (disconnect serial and stop threads)."""
+        self.disconnect()
+
     def _query_modem_info(self):
         """Query modem version and identity"""
         try:
@@ -724,6 +728,16 @@ class KissModemWrapper(LoRaRadio):
         if not success:
             raise Exception("Failed to initialize KISS modem")
 
+    def check_radio_health(self) -> bool:
+        """Check modem connectivity. Returns True if connected and modem responds to ping."""
+        if not self.is_connected:
+            return False
+        try:
+            return self.ping()
+        except Exception as e:
+            logger.debug(f"KISS modem health check failed: {e}")
+            return False
+
     # LBT parameters aligned with MeshCore firmware (CAD fail retry / max duration)
     LBT_RETRY_DELAYS_MS = (120, 240, 360)  # random(1, 4) * 120
     LBT_MAX_WAIT_MS = 4000
@@ -849,6 +863,24 @@ class KissModemWrapper(LoRaRadio):
     def get_stats(self) -> Dict[str, Any]:
         """Get interface statistics"""
         return self.stats.copy()
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get radio status. Uses cached config/stats where possible."""
+        cfg = self.get_radio_config()
+        tx_power = self.get_tx_power()
+        status: Dict[str, Any] = {
+            "initialized": self.is_connected,
+            "frequency": cfg["frequency"] if cfg else self.radio_config.get("frequency", 0),
+            "tx_power": tx_power if tx_power is not None else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
+            "spreading_factor": cfg["spreading_factor"] if cfg else self.radio_config.get("spreading_factor", 0),
+            "bandwidth": cfg["bandwidth"] if cfg else self.radio_config.get("bandwidth", 0),
+            "coding_rate": cfg["coding_rate"] if cfg else self.radio_config.get("coding_rate", 0),
+            "last_rssi": self.stats.get("last_rssi", -999),
+            "last_snr": self.stats.get("last_snr", -999.0),
+            "last_signal_rssi": self.stats.get("last_rssi", -999),
+            "hardware_ready": self.is_connected,
+        }
+        return status
 
     # KISS frame encoding/decoding
 
