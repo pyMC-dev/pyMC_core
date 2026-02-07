@@ -4,7 +4,8 @@ MeshCore KISS Modem Protocol Wrapper
 Implements the MeshCore KISS modem protocol for sending/receiving
 MeshCore packets over LoRa and cryptographic operations.
 
-Protocol reference: https://github.com/meshcore-dev/MeshCore
+Protocol spec (frame format, SetHardware sub-commands, Data + RxMeta ordering):
+  https://github.com/ViezeVingertjes/MeshCore/blob/kiss-modem-spec-compliance/docs/kiss_modem_protocol.md
 """
 
 import asyncio
@@ -13,6 +14,7 @@ import logging
 import struct
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional, Union
 
 # RX callback: (data) for backward compat, or (data, rssi, snr) for per-packet metrics
@@ -257,6 +259,8 @@ class KissModemWrapper(LoRaRadio):
 
         # Event loop for thread-safe async callback invocation
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        # When no event loop is set, run callback in a worker so RX thread never blocks
+        self._callback_executor: Optional[ThreadPoolExecutor] = None
 
         # Response handling
         self._response_event = threading.Event()
@@ -359,11 +363,45 @@ class KissModemWrapper(LoRaRadio):
         if self.tx_thread and self.tx_thread.is_alive():
             self.tx_thread.join(timeout=2.0)
 
+        if self._callback_executor is not None:
+            self._callback_executor.shutdown(wait=False)
+            self._callback_executor = None
+
         # Close serial connection
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.close()
 
         logger.info(f"KISS modem disconnected from {self.port}")
+
+    def _write_frame(self, frame: bytes) -> bool:
+        """
+        Write a complete KISS frame to the serial port.
+
+        Ensures the entire frame (including trailing FEND) is written; retries
+        on partial write so we never send a truncated frame.
+
+        Returns:
+            True if all bytes written, False on error or incomplete write.
+        """
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return False
+        offset = 0
+        while offset < len(frame):
+            try:
+                n = self.serial_conn.write(frame[offset:])
+                if n is None or n <= 0:
+                    logger.error("Serial write returned %s", n)
+                    return False
+                offset += n
+            except Exception as e:
+                logger.error("Serial write error: %s", e)
+                return False
+        try:
+            self.serial_conn.flush()
+        except Exception as e:
+            logger.error("Serial flush error: %s", e)
+            return False
+        return True
 
     def _query_modem_info(self):
         """Query modem version and identity"""
@@ -516,9 +554,9 @@ class KissModemWrapper(LoRaRadio):
             KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data
         )
 
-        if self.serial_conn and self.serial_conn.is_open:
-            self.serial_conn.write(kiss_frame)
-            self.serial_conn.flush()
+        if not self._write_frame(kiss_frame):
+            logger.warning("SetHardware frame write failed")
+            return None
 
         # Wait for response
         if self._response_event.wait(timeout):
@@ -960,22 +998,34 @@ class KissModemWrapper(LoRaRadio):
             elif byte == KISS_TFESC:
                 self.rx_frame_buffer.append(KISS_FESC)
             else:
-                # Invalid escape sequence
+                # Invalid escape sequence; reset so we resync at next FEND
                 self.stats["frame_errors"] += 1
                 logger.warning(f"Invalid KISS escape sequence: 0x{byte:02X}")
+                self.rx_frame_buffer.clear()
+                self.in_frame = False
             self.escaped = False
 
         else:
             if self.in_frame:
-                self.rx_frame_buffer.append(byte)
+                if len(self.rx_frame_buffer) >= MAX_FRAME_SIZE:
+                    # Frame too long (e.g. lost FEND); reset and resync at next FEND
+                    self.stats["frame_errors"] += 1
+                    logger.warning(
+                        "KISS frame exceeded max size (%d), resyncing", MAX_FRAME_SIZE
+                    )
+                    self.rx_frame_buffer.clear()
+                    self.in_frame = False
+                else:
+                    self.rx_frame_buffer.append(byte)
 
     def _dispatch_rx_callback(self, data: bytes, rssi: int, snr: float) -> None:
         """
-        Dispatch RX callback, optionally via event loop for thread safety.
+        Dispatch RX callback without blocking the RX thread.
 
         If an event loop is set via set_event_loop(), the callback is scheduled
-        onto that loop using call_soon_threadsafe(). Otherwise, the callback
-        is invoked directly from the RX thread.
+        onto that loop. Otherwise, the callback is run in a single-worker thread
+        pool so the RX thread can keep reading serial data (avoids dropped
+        packets when the callback does I/O or heavy work).
 
         Args:
             data: Received packet data
@@ -986,16 +1036,21 @@ class KissModemWrapper(LoRaRadio):
             return
 
         if self._event_loop is not None:
-            # Schedule callback on event loop for thread-safe async
             try:
                 self._event_loop.call_soon_threadsafe(
                     lambda: _invoke_rx_callback(self.on_frame_received, data, rssi, snr)
                 )
             except RuntimeError as e:
-                # Event loop may be closed
                 logger.warning(f"Failed to schedule RX callback on event loop: {e}")
+        elif self.rx_thread is not None and threading.current_thread() is self.rx_thread:
+            # We're in the RX thread; run callback in executor so we don't block reading
+            if self._callback_executor is None:
+                self._callback_executor = ThreadPoolExecutor(max_workers=1)
+            self._callback_executor.submit(
+                _invoke_rx_callback, self.on_frame_received, data, rssi, snr
+            )
         else:
-            # Direct invocation from RX thread
+            # Called from main thread (e.g. unit test); invoke directly
             _invoke_rx_callback(self.on_frame_received, data, rssi, snr)
 
     def _process_received_frame(self):
@@ -1105,11 +1160,11 @@ class KissModemWrapper(LoRaRadio):
                     frame = self.tx_buffer.popleft()
 
                     if self.serial_conn and self.serial_conn.is_open:
-                        self.serial_conn.write(frame)
-                        self.serial_conn.flush()
-
-                        self.stats["frames_sent"] += 1
-                        self.stats["bytes_sent"] += len(frame)
+                        if self._write_frame(frame):
+                            self.stats["frames_sent"] += 1
+                            self.stats["bytes_sent"] += len(frame)
+                        else:
+                            logger.warning("TX frame write failed, dropping frame")
                     else:
                         logger.warning("Serial connection not open")
                 else:
