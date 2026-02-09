@@ -11,6 +11,7 @@ Protocol spec (frame format, SetHardware sub-commands, Data + RxMeta ordering):
 import asyncio
 import inspect
 import logging
+import random
 import struct
 import threading
 from collections import deque
@@ -876,28 +877,94 @@ class KissModemWrapper(LoRaRadio):
         if not success:
             raise Exception("Failed to initialize KISS modem")
 
+    def check_radio_health(self) -> bool:
+        """Check modem connectivity. Returns True if connected and modem responds to ping."""
+        if not self.is_connected:
+            return False
+        try:
+            return self.ping()
+        except Exception as e:
+            logger.debug(f"KISS modem health check failed: {e}")
+            return False
+
+    # LBT parameters aligned with MeshCore firmware (CAD fail retry / max duration)
+    LBT_RETRY_DELAYS_MS = (120, 240, 360)  # random(1, 4) * 120
+    LBT_MAX_WAIT_MS = 4000
+
+    async def _prepare_for_tx_lbt(self) -> tuple[bool, list[float]]:
+        """
+        Listen-Before-Talk: query modem channel busy until clear or max wait.
+        Modeled on MeshCore firmware: retry delay one of 120, 240, 360 ms; give up
+        after 4 s total wait and transmit anyway. Returns (success, lbt_backoff_delays_ms).
+        """
+        lbt_backoff_delays: list[float] = []
+        total_wait_ms = 0.0
+
+        while total_wait_ms < self.LBT_MAX_WAIT_MS:
+            try:
+                channel_busy = await asyncio.to_thread(self.is_channel_busy)
+                if not channel_busy:
+                    logger.debug(
+                        "Channel busy check clear - channel available after "
+                        f"{len(lbt_backoff_delays) + 1} check(s)"
+                    )
+                    break
+
+                logger.debug("Channel busy check still busy - activity detected")
+                remaining_ms = self.LBT_MAX_WAIT_MS - total_wait_ms
+                retry_delay_ms = random.choice(self.LBT_RETRY_DELAYS_MS)
+                backoff_ms = min(retry_delay_ms, remaining_ms)
+                lbt_backoff_delays.append(float(backoff_ms))
+                total_wait_ms += backoff_ms
+
+                logger.debug(
+                    f"LBT backoff - waiting {backoff_ms}ms before retry "
+                    f"(total wait {total_wait_ms:.0f}ms / {self.LBT_MAX_WAIT_MS}ms)"
+                )
+                await asyncio.sleep(backoff_ms / 1000.0)
+
+                if total_wait_ms >= self.LBT_MAX_WAIT_MS:
+                    logger.warning(
+                        f"LBT max duration reached ({self.LBT_MAX_WAIT_MS}ms) - "
+                        "channel still busy, transmitting anyway"
+                    )
+            except Exception as e:
+                logger.warning(f"Channel busy check failed: {e}, proceeding with transmission")
+                break
+
+        return True, lbt_backoff_delays
+
     async def send(self, data: bytes) -> Optional[Dict[str, Any]]:
         """
         Send data via KISS modem (LoRaRadio interface)
+
+        Runs Listen-Before-Talk (query channel busy until clear), then sends
+        the frame. Returns metadata including LBT metrics for parity with
+        SX1262 wrapper.
 
         Args:
             data: Data to send
 
         Returns:
-            Transmission metadata dict or None
+            Transmission metadata dict (airtime_ms, lbt_attempts,
+            lbt_backoff_delays_ms, lbt_channel_busy)
 
         Raises:
             Exception: If send fails
         """
+        _, lbt_backoff_delays = await self._prepare_for_tx_lbt()
+
         success = self.send_frame(data)
         if not success:
             raise Exception("Failed to send frame via KISS modem")
 
-        # Return metadata if available
         airtime = self.get_airtime(len(data))
-        if airtime:
-            return {"airtime_ms": airtime}
-        return None
+        return {
+            "airtime_ms": airtime if airtime is not None else 0,
+            "lbt_attempts": len(lbt_backoff_delays),
+            "lbt_backoff_delays_ms": lbt_backoff_delays,
+            "lbt_channel_busy": len(lbt_backoff_delays) > 0,
+        }
 
     async def wait_for_rx(self) -> bytes:
         """
@@ -945,6 +1012,24 @@ class KissModemWrapper(LoRaRadio):
     def get_stats(self) -> Dict[str, Any]:
         """Get interface statistics"""
         return self.stats.copy()
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get radio status. Uses cached config/stats where possible."""
+        cfg = self.get_radio_config()
+        tx_power = self.get_tx_power()
+        status: Dict[str, Any] = {
+            "initialized": self.is_connected,
+            "frequency": cfg["frequency"] if cfg else self.radio_config.get("frequency", 0),
+            "tx_power": tx_power if tx_power is not None else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
+            "spreading_factor": cfg["spreading_factor"] if cfg else self.radio_config.get("spreading_factor", 0),
+            "bandwidth": cfg["bandwidth"] if cfg else self.radio_config.get("bandwidth", 0),
+            "coding_rate": cfg["coding_rate"] if cfg else self.radio_config.get("coding_rate", 0),
+            "last_rssi": self.stats.get("last_rssi", -999),
+            "last_snr": self.stats.get("last_snr", -999.0),
+            "last_signal_rssi": self.stats.get("last_rssi", -999),
+            "hardware_ready": self.is_connected,
+        }
+        return status
 
     # KISS frame encoding/decoding
 

@@ -536,7 +536,7 @@ class Dispatcher:
 
     def _register_ack_received(self, crc: int) -> None:
         """Record that an ACK with the given CRC was received."""
-        ts = asyncio.get_event_loop().time()
+        ts = asyncio.get_running_loop().time()
         self._recent_acks[crc] = ts
 
         # Notify waiting sender if this CRC matches
@@ -549,7 +549,7 @@ class Dispatcher:
         health_check_counter = 0
         while True:
             # Clean out old ACK CRCs (older than 5 seconds)
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             self._recent_acks = {crc: ts for crc, ts in self._recent_acks.items() if now - ts < 5}
 
             # Clean old packet hashes for deduplication
