@@ -60,6 +60,7 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     RESP_TX_POWER,
     RESP_VERIFY,
     RESP_VERSION,
+    HW_RESP_RX_META,
     KissModemWrapper,
 )
 
@@ -132,8 +133,8 @@ class TestKissFrameEncoding:
 
         # Data frame: FEND + 0x00 + raw_packet + FEND (no in-frame metadata)
         data_frame = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, 0x03, KISS_FEND])
-        # RxMeta: FEND + 0x06 + 0x39 + SNR + RSSI + FEND (sent immediately after Data)
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
+        # RxMeta: FEND + 0x06 + 0xF9 + SNR + RSSI + FEND (sent immediately after Data)
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -155,7 +156,7 @@ class TestKissFrameEncoding:
         data_frame = bytes(
             [KISS_FEND, CMD_DATA, KISS_FESC, KISS_TFEND, KISS_FEND]
         )
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -172,7 +173,7 @@ class TestKissFrameEncoding:
 
         data_frame = bytes([KISS_FEND, CMD_DATA, 0xAA, 0xBB, KISS_FEND])
         # RxMeta: SNR=0x10 (4.0 dB), RSSI=0xB0 (-80)
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
+        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -195,7 +196,7 @@ class TestKissFrameEncoding:
 
         # First packet: Data then RxMeta (SNR=4.0 dB, RSSI=-80)
         data1 = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, KISS_FEND])
-        meta1 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x10, 0xB0, KISS_FEND])
+        meta1 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
         for byte in data1:
             modem._decode_kiss_byte(byte)
         for byte in meta1:
@@ -203,7 +204,7 @@ class TestKissFrameEncoding:
 
         # Second packet: Data then RxMeta (SNR=2.0 dB, RSSI=-100)
         data2 = bytes([KISS_FEND, CMD_DATA, 0x03, 0x04, KISS_FEND])
-        meta2 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, 0x39, 0x08, 0x9C, KISS_FEND])
+        meta2 = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x08, 0x9C, KISS_FEND])
         for byte in data2:
             modem._decode_kiss_byte(byte)
         for byte in meta2:
@@ -307,7 +308,7 @@ class TestCommandResponses:
         assert modem._pending_response[1][0] == 0x05
 
     def test_tx_done_response(self):
-        """Test SetHardware TxDone (0x38) response sets event"""
+        """Test SetHardware TxDone (0xF8) response sets event"""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
         modem._tx_done_event = threading.Event()
