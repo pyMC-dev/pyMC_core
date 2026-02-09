@@ -5,7 +5,7 @@ Implements the MeshCore KISS modem protocol for sending/receiving
 MeshCore packets over LoRa and cryptographic operations.
 
 Protocol spec (frame format, SetHardware sub-commands, Data + RxMeta ordering):
-  https://github.com/ViezeVingertjes/MeshCore/blob/kiss-modem-spec-compliance/docs/kiss_modem_protocol.md
+  https://github.com/meshcore-dev/MeshCore/blob/dev/docs/kiss_modem_protocol.md
 """
 
 import asyncio
