@@ -54,6 +54,11 @@ KISS_TFESC = 0xDD  # Transposed Frame Escape
 
 # Standard KISS type bytes (port in bits 7-4, command in bits 3-0)
 CMD_DATA = 0x00  # Data frame (raw packet)
+KISS_CMD_TXDELAY = 0x01  # Transmitter keyup delay in 10ms units (firmware default 50 = 500ms)
+KISS_CMD_PERSISTENCE = 0x02  # CSMA persistence 0-255 (firmware default 63)
+KISS_CMD_SLOTTIME = 0x03  # CSMA slot interval in 10ms units (firmware default 10 = 100ms)
+KISS_CMD_TXTAIL = 0x04  # Post-TX hold time in 10ms units (default: 0)
+KISS_CMD_FULLDUPLEX = 0x05  # 0 = half duplex, nonzero = full duplex (default: 0)
 KISS_CMD_SETHARDWARE = 0x06  # SetHardware: first payload byte is sub-command
 KISS_CMD_RETURN = 0xFF  # Exit KISS mode (no-op)
 
@@ -222,6 +227,7 @@ class KissModemWrapper(LoRaRadio):
         on_frame_received: Optional[RxCallback] = None,
         radio_config: Optional[Dict[str, Any]] = None,
         auto_configure: bool = True,
+        lbt_enabled: bool = False,
     ):
         """
         Initialize MeshCore KISS Modem Wrapper
@@ -234,13 +240,23 @@ class KissModemWrapper(LoRaRadio):
                               from a background thread unless set_event_loop() is used.
             radio_config: Optional radio configuration dict with keys:
                          frequency, bandwidth, spreading_factor, coding_rate,
-                         power (or tx_power)
+                         power (or tx_power), tx_delay_ms (KISS key-up delay in ms;
+                         default 50), kiss_persistence (0-255), kiss_slottime_ms,
+                         kiss_txtail_ms (post-TX hold), kiss_full_duplex (bool),
+                         and SetHardware options as needed
             auto_configure: If True, automatically configure radio on connect
+            lbt_enabled: If True, run Listen-Before-Talk before each send (default False).
+                         For standard half-duplex the modem firmware performs p-persistent
+                         CSMA; host-side LBT is redundant. Only enable for the marginal case
+                         of full-duplex modem on a physically half-duplex link, where a
+                         host "is channel busy?" check can delay submitting the next frame
+                         to avoid collisions.
         """
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.auto_configure = auto_configure
+        self.lbt_enabled = lbt_enabled
 
         self.radio_config = radio_config or {}
         self.is_configured = False
@@ -312,6 +328,21 @@ class KissModemWrapper(LoRaRadio):
         self._event_loop = loop
         logger.debug("Event loop set for thread-safe callbacks")
 
+    def set_lbt_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable host-side Listen-Before-Talk before each send.
+
+        When enabled, send() checks is_channel_busy() and backs off (120/240/360 ms)
+        until clear or 4 s. For standard half-duplex the modem already does CSMA;
+        enable only for full-duplex modem on a physically half-duplex link.
+        """
+        self.lbt_enabled = enabled
+        logger.debug("Software LBT %s", "enabled" if enabled else "disabled")
+
+    def get_lbt_enabled(self) -> bool:
+        """Return whether host-side Listen-Before-Talk is enabled."""
+        return self.lbt_enabled
+
     def connect(self) -> bool:
         """
         Connect to serial port and start communication threads
@@ -349,6 +380,19 @@ class KissModemWrapper(LoRaRadio):
 
             # Query modem info
             self._query_modem_info()
+
+            # Set KISS TXDELAY so key-up delay is not the firmware default 500ms (reduces
+            # round-trip latency for repeaters). Value in 10ms units; default 50ms.
+            tx_delay_ms = self.radio_config.get("tx_delay_ms", 50)
+            self._set_kiss_tx_delay(tx_delay_ms)
+            if "kiss_persistence" in self.radio_config:
+                self.set_kiss_persistence(self.radio_config["kiss_persistence"])
+            if "kiss_slottime_ms" in self.radio_config:
+                self.set_kiss_slottime(self.radio_config["kiss_slottime_ms"])
+            if "kiss_txtail_ms" in self.radio_config:
+                self.set_kiss_txtail(self.radio_config["kiss_txtail_ms"])
+            if "kiss_full_duplex" in self.radio_config:
+                self.set_kiss_full_duplex(bool(self.radio_config["kiss_full_duplex"]))
 
             return True
 
@@ -407,6 +451,108 @@ class KissModemWrapper(LoRaRadio):
             logger.error("Serial flush error: %s", e)
             return False
         return True
+
+    def _set_kiss_tx_delay(self, delay_ms: int) -> None:
+        """
+        Send KISS TXDELAY command so modem key-up delay is not the default 500ms.
+        Value is in 10ms units; firmware default is 50 (= 500ms). Typical for
+        repeaters: 50ms (value 5).
+        """
+        value = max(1, min(255, delay_ms // 10))
+        frame = self._encode_kiss_frame(KISS_CMD_TXDELAY, bytes([value]))
+        if self._write_frame(frame):
+            logger.debug("KISS TXDELAY set to %dms (value %d)", value * 10, value)
+        else:
+            logger.warning("Failed to set KISS TXDELAY")
+
+    def set_kiss_persistence(self, value: int) -> bool:
+        """
+        Set KISS CSMA persistence parameter (0-255). Lower values defer longer
+        when channel is busy; firmware default is 63.
+
+        Returns:
+            True if the command was written successfully.
+        """
+        val = max(0, min(255, value))
+        frame = self._encode_kiss_frame(KISS_CMD_PERSISTENCE, bytes([val]))
+        ok = self._write_frame(frame)
+        if ok:
+            logger.debug("KISS PERSISTENCE set to %d", val)
+        return ok
+
+    def set_kiss_slottime(self, slottime_ms: int) -> bool:
+        """
+        Set KISS CSMA slot time in milliseconds (sent as 10ms units to modem).
+        Firmware default is 100ms (value 10). Lower values reduce backoff delay
+        when channel is busy at the cost of more collisions under load.
+
+        Returns:
+            True if the command was written successfully.
+        """
+        value = max(0, min(255, slottime_ms // 10))
+        frame = self._encode_kiss_frame(KISS_CMD_SLOTTIME, bytes([value]))
+        ok = self._write_frame(frame)
+        if ok:
+            logger.debug("KISS SLOTTIME set to %dms (value %d)", value * 10, value)
+        return ok
+
+    def set_kiss_txtail(self, txtail_ms: int) -> bool:
+        """
+        Set KISS post-TX hold time (TXtail) in milliseconds (sent as 10ms units).
+        Firmware default is 0. Some radios need a short hold after TX.
+
+        Returns:
+            True if the command was written successfully.
+        """
+        value = max(0, min(255, txtail_ms // 10))
+        frame = self._encode_kiss_frame(KISS_CMD_TXTAIL, bytes([value]))
+        ok = self._write_frame(frame)
+        if ok:
+            logger.debug("KISS TXTAIL set to %dms (value %d)", value * 10, value)
+        return ok
+
+    def set_kiss_full_duplex(self, full_duplex: bool) -> bool:
+        """
+        Set KISS full-duplex mode. When False (default), modem uses p-persistent
+        CSMA. When True, CSMA is bypassed and packets transmit after TXDELAY only.
+
+        Returns:
+            True if the command was written successfully.
+        """
+        value = 0x01 if full_duplex else 0x00
+        frame = self._encode_kiss_frame(KISS_CMD_FULLDUPLEX, bytes([value]))
+        ok = self._write_frame(frame)
+        if ok:
+            logger.debug("KISS FullDuplex set to %s", full_duplex)
+        return ok
+
+    def set_signal_report(self, enabled: bool) -> bool:
+        """
+        Enable or disable RxMeta frames (SNR + RSSI after each Data frame).
+        Enabled by default. When disabled, the modem does not send SetHardware
+        RxMeta (0xF9) after received packets.
+
+        Returns:
+            True if the command was sent and a valid response was received.
+        """
+        payload = bytes([0x01 if enabled else 0x00])
+        resp = self._send_command(HW_CMD_SET_SIGNAL_REPORT, payload)
+        if resp and resp[0] in (HW_RESP_SIGNAL_REPORT, HW_RESP_OK):
+            return True
+        return False
+
+    def get_signal_report(self) -> Optional[bool]:
+        """
+        Query whether RxMeta (signal report) is enabled. When enabled, the modem
+        sends an RxMeta frame after each received Data frame.
+
+        Returns:
+            True if enabled, False if disabled, None on error.
+        """
+        resp = self._send_command(HW_CMD_GET_SIGNAL_REPORT)
+        if resp and resp[0] == HW_RESP_SIGNAL_REPORT and len(resp[1]) >= 1:
+            return resp[1][0] != 0x00
+        return None
 
     def _query_modem_info(self):
         """Query modem version and identity"""
@@ -887,15 +1033,15 @@ class KissModemWrapper(LoRaRadio):
             logger.debug(f"KISS modem health check failed: {e}")
             return False
 
-    # LBT parameters aligned with MeshCore firmware (CAD fail retry / max duration)
-    LBT_RETRY_DELAYS_MS = (120, 240, 360)  # random(1, 4) * 120
+    # Optional host-side LBT (only when lbt_enabled, e.g. full-duplex on half-duplex link)
+    LBT_RETRY_DELAYS_MS = (120, 240, 360)
     LBT_MAX_WAIT_MS = 4000
 
     async def _prepare_for_tx_lbt(self) -> tuple[bool, list[float]]:
         """
         Listen-Before-Talk: query modem channel busy until clear or max wait.
-        Modeled on MeshCore firmware: retry delay one of 120, 240, 360 ms; give up
-        after 4 s total wait and transmit anyway. Returns (success, lbt_backoff_delays_ms).
+        Used only when lbt_enabled (marginal case: full-duplex modem on physically
+        half-duplex link). Returns (success, lbt_backoff_delays_ms).
         """
         lbt_backoff_delays: list[float] = []
         total_wait_ms = 0.0
@@ -938,9 +1084,9 @@ class KissModemWrapper(LoRaRadio):
         """
         Send data via KISS modem (LoRaRadio interface)
 
-        Runs Listen-Before-Talk (query channel busy until clear), then sends
-        the frame. Returns metadata including LBT metrics for parity with
-        SX1262 wrapper.
+        For standard half-duplex, relies on the modem's p-persistent CSMA; no
+        host-side LBT. When lbt_enabled is True (full-duplex on half-duplex link),
+        runs a channel-busy check before submitting the frame.
 
         Args:
             data: Data to send
@@ -952,7 +1098,9 @@ class KissModemWrapper(LoRaRadio):
         Raises:
             Exception: If send fails
         """
-        _, lbt_backoff_delays = await self._prepare_for_tx_lbt()
+        lbt_backoff_delays: list[float] = []
+        if self.lbt_enabled:
+            _, lbt_backoff_delays = await self._prepare_for_tx_lbt()
 
         success = self.send_frame(data)
         if not success:

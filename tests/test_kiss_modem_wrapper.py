@@ -32,12 +32,19 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     CMD_VERIFY_SIGNATURE,
     HW_CMD_GET_DEVICE_NAME,
     HW_CMD_GET_MCU_TEMP,
+    HW_CMD_GET_SIGNAL_REPORT,
     HW_CMD_GET_VERSION,
     HW_CMD_REBOOT,
+    HW_CMD_SET_SIGNAL_REPORT,
     HW_RESP_DEVICE_NAME,
     HW_RESP_MCU_TEMP,
     HW_RESP_OK,
+    HW_RESP_SIGNAL_REPORT,
+    KISS_CMD_FULLDUPLEX,
+    KISS_CMD_PERSISTENCE,
     KISS_CMD_SETHARDWARE,
+    KISS_CMD_SLOTTIME,
+    KISS_CMD_TXTAIL,
     KISS_FEND,
     KISS_FESC,
     KISS_TFEND,
@@ -810,6 +817,186 @@ class TestRadioConfigCompatibility:
         tx_power_cmd = next((c for c in sent_commands if c[0] == CMD_SET_TX_POWER), None)
         assert tx_power_cmd is not None
         assert tx_power_cmd[1] == bytes([10])
+
+
+class TestKissTuningMethods:
+    """Test KISS config commands: persistence, slottime, txtail, full_duplex, signal report"""
+
+    def test_set_kiss_persistence_sends_correct_frame(self):
+        """Test set_kiss_persistence sends KISS_CMD_PERSISTENCE with value 0-255"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        written = []
+
+        def capture_write(frame):
+            written.append(bytes(frame))
+            return True
+
+        modem._write_frame = capture_write
+        modem.is_connected = True
+
+        result = modem.set_kiss_persistence(63)
+        assert result is True
+        assert len(written) == 1
+        # FEND + 0x02 + 0x3F + FEND
+        assert written[0][0] == KISS_FEND
+        assert written[0][1] == KISS_CMD_PERSISTENCE
+        assert written[0][2] == 63
+        assert written[0][3] == KISS_FEND
+
+    def test_set_kiss_persistence_clamps_value(self):
+        """Test set_kiss_persistence clamps to 0-255"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        written = []
+
+        def capture_write(frame):
+            written.append(bytes(frame))
+            return True
+
+        modem._write_frame = capture_write
+        modem.is_connected = True
+
+        modem.set_kiss_persistence(300)
+        assert written[0][2] == 255
+        written.clear()
+        modem.set_kiss_persistence(-1)
+        assert written[0][2] == 0
+
+    def test_set_kiss_slottime_sends_correct_frame(self):
+        """Test set_kiss_slottime sends KISS_CMD_SLOTTIME with value in 10ms units"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        written = []
+
+        def capture_write(frame):
+            written.append(bytes(frame))
+            return True
+
+        modem._write_frame = capture_write
+        modem.is_connected = True
+
+        result = modem.set_kiss_slottime(100)
+        assert result is True
+        assert len(written) == 1
+        assert written[0][0] == KISS_FEND
+        assert written[0][1] == KISS_CMD_SLOTTIME
+        assert written[0][2] == 10  # 100ms / 10
+        assert written[0][3] == KISS_FEND
+
+    def test_set_kiss_txtail_sends_correct_frame(self):
+        """Test set_kiss_txtail sends KISS_CMD_TXTAIL with value in 10ms units"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        written = []
+
+        def capture_write(frame):
+            written.append(bytes(frame))
+            return True
+
+        modem._write_frame = capture_write
+        modem.is_connected = True
+
+        result = modem.set_kiss_txtail(50)
+        assert result is True
+        assert written[0][1] == KISS_CMD_TXTAIL
+        assert written[0][2] == 5  # 50ms / 10
+
+    def test_set_kiss_full_duplex_sends_correct_frame(self):
+        """Test set_kiss_full_duplex sends KISS_CMD_FULLDUPLEX 0x01 or 0x00"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        written = []
+
+        def capture_write(frame):
+            written.append(bytes(frame))
+            return True
+
+        modem._write_frame = capture_write
+        modem.is_connected = True
+
+        modem.set_kiss_full_duplex(True)
+        assert written[0][1] == KISS_CMD_FULLDUPLEX
+        assert written[0][2] == 0x01
+        written.clear()
+        modem.set_kiss_full_duplex(False)
+        assert written[0][2] == 0x00
+
+    def test_set_signal_report_returns_true_on_ok_response(self):
+        """Test set_signal_report returns True when modem responds OK or SignalReport"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_SET_SIGNAL_REPORT:
+                return (HW_RESP_SIGNAL_REPORT, bytes([0x01]))
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.set_signal_report(True) is True
+        assert modem.set_signal_report(False) is True
+
+    def test_set_signal_report_returns_true_on_ok(self):
+        """Test set_signal_report returns True when modem responds HW_RESP_OK"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_SET_SIGNAL_REPORT:
+                return (HW_RESP_OK, b"")
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.set_signal_report(True) is True
+
+    def test_set_signal_report_returns_false_on_error_or_timeout(self):
+        """Test set_signal_report returns False on error or timeout"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.set_signal_report(True) is False
+
+    def test_get_signal_report_returns_true_when_enabled(self):
+        """Test get_signal_report returns True when modem reports enabled"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_GET_SIGNAL_REPORT:
+                return (HW_RESP_SIGNAL_REPORT, bytes([0x01]))
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_signal_report() is True
+
+    def test_get_signal_report_returns_false_when_disabled(self):
+        """Test get_signal_report returns False when modem reports disabled"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            if cmd == HW_CMD_GET_SIGNAL_REPORT:
+                return (HW_RESP_SIGNAL_REPORT, bytes([0x00]))
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_signal_report() is False
+
+    def test_get_signal_report_returns_none_on_timeout(self):
+        """Test get_signal_report returns None on timeout or error"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+
+        def mock_send_command(cmd, data=b"", timeout=5.0):
+            return None
+
+        modem._send_command = mock_send_command
+        modem.is_connected = True
+
+        assert modem.get_signal_report() is None
 
 
 class TestContextManager:

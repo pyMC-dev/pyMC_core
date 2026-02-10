@@ -32,7 +32,10 @@ from pymc_core.hardware.base import LoRaRadio
 from pymc_core.node.node import MeshNode
 
 
-def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0") -> LoRaRadio:
+def create_radio(
+    radio_type: str = "waveshare",
+    serial_port: str = "/dev/ttyUSB0",
+) -> LoRaRadio:
     """Create a radio instance with configuration for specified hardware.
 
     Args:
@@ -89,9 +92,14 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
                 "power": 22,  # TX power
             }
 
-            # Create KISS modem wrapper with specified port
+            # Create KISS modem wrapper with specified port.
+            # To enable host-side LBT (e.g. full-duplex on half-duplex link), call
+            # modem_wrapper.set_lbt_enabled(True) after creation.
             modem_wrapper = KissModemWrapper(
-                port=serial_port, baudrate=115200, radio_config=modem_config, auto_configure=True
+                port=serial_port,
+                baudrate=115200,
+                radio_config=modem_config,
+                auto_configure=True,
             )
 
             logger.info("Created MeshCore KISS Modem Wrapper")

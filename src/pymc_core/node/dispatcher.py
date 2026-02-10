@@ -57,6 +57,10 @@ class Dispatcher:
         log_fn: Optional[Callable[[str], None]] = None,
         packet_filter: Optional[Any] = None,
     ) -> None:
+        # tx_delay: seconds to wait after TX before starting ACK wait (only when wait_for_ack).
+        # Round-trip latency can also be increased by: modem CSMA (TXDELAY/SlotTime in
+        # firmware), handler response delays (e.g. login_server 300 ms), and serial/
+        # event-loop scheduling. KISS wrapper relies on modem CSMA by default (no host LBT).
         self.radio = radio
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
