@@ -256,7 +256,7 @@ class SX1262Radio(LoRaRadio):
             irqStat = self.lora.getIrqStatus()
 
             if irqStat != 0:
-                self.lora.clearIrqStatus(irqStat)
+                self.lora.clearIrqStatus(0xFFFF)
 
             self._last_irq_status = irqStat
             if irqStat & self.lora.IRQ_TX_DONE:

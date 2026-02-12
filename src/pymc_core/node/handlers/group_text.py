@@ -228,10 +228,10 @@ class GroupTextHandler(BaseHandler):
                 "full_content": parsed_message["content"],
             }
 
-            # Check if this message is from ourselves using sender name (echo prevention)
-            if self._is_own_message(packet):
-                self.log(f"Ignoring echo of our own message: {sender_name}: {message_body}")
-                return
+            # Check if this message is from ourselves using sender name (echo detection)
+            is_own = self._is_own_message(packet)
+            if is_own:
+                self.log(f"Own echo detected (will publish for heard-count): {sender_name}: {message_body}")
 
             # Log the group message
             self.log(f"<<< Channel [{channel_name}] {sender_name}: {message_body} >>>")
@@ -243,6 +243,7 @@ class GroupTextHandler(BaseHandler):
                 message_body,
                 channel_name,
                 parsed_message["timestamp"],
+                is_outgoing=is_own,
             )
 
             # Note: Group messages are unverified according to spec, so no ACK needed
@@ -254,7 +255,7 @@ class GroupTextHandler(BaseHandler):
             self.log(f"Traceback: {traceback.format_exc()}")
 
     async def _save_and_broadcast_group_message(
-        self, packet, sender_name, message_body, channel_name, timestamp
+        self, packet, sender_name, message_body, channel_name, timestamp, is_outgoing: bool = False
     ):
         """Save the group message to database and broadcast via WebSocket."""
         try:
@@ -283,7 +284,7 @@ class GroupTextHandler(BaseHandler):
                         "full_content": packet.decrypted.get("group_text_data", {}).get(
                             "full_content"
                         ),
-                        "is_outgoing": False,  # Mark as incoming for UI bubble color
+                        "is_outgoing": bool(is_outgoing),
                         "network_info": {
                             "header": f"0x{packet.header:02X}",
                             "payload_type": packet.get_payload_type(),
