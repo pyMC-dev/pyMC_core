@@ -259,10 +259,7 @@ class GroupTextHandler(BaseHandler):
     ):
         """Save the group message to database and broadcast via WebSocket."""
         try:
-            # Create message ID for both database and WebSocket
-            normalized_timestamp = (timestamp // 1000) * 1000
-            content_hash = hash(f"{sender_name}_{message_body}_{normalized_timestamp}") & 0xFFFFFFFF
-            message_id = f"grp_{normalized_timestamp}_{content_hash:08x}"
+            message_id = packet.get_packet_hash_hex(16)  
 
             # Publish channel message event if available
             if self.event_service:
