@@ -271,6 +271,9 @@ class GroupTextHandler(BaseHandler):
 
                     channel_hash = f"{packet.get_payload()[0]:02X}"
 
+                    # Extract path from packet (list of node hashes)
+                    path = list(packet.path) if hasattr(packet, "path") and packet.path else None
+
                     # Use a custom message type for single channel message addition
                     message_data = {
                         "message_id": message_id,
@@ -285,6 +288,7 @@ class GroupTextHandler(BaseHandler):
                             "full_content"
                         ),
                         "is_outgoing": bool(is_outgoing),
+                        "path": path,
                         "network_info": {
                             "header": f"0x{packet.header:02X}",
                             "payload_type": packet.get_payload_type(),
