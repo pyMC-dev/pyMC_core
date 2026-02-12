@@ -78,7 +78,7 @@ class SX1262Radio(LoRaRadio):
             is_waveshare: Use alternate initialization needed for Waveshare HAT
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
-            use_dio2_rf: Enable DIO2 as RF switch control (default: False)
+            use_dio2_rf: Enable DIO2 as RF switch control (default: False)    
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
