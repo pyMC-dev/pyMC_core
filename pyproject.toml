@@ -39,6 +39,7 @@ hardware = [
     "gpiod>=2.4.0",
     "spidev>=3.5",
     "pyserial>=3.5",
+    "pyusb>=1.2.1",
 ]
 websocket = [
     "websockets>=11.0.0",

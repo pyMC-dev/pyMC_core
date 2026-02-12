@@ -58,6 +58,7 @@ from .crypto import CryptoUtils
 
 # Import identity classes after other imports to avoid circular dependencies
 from .identity import Identity, LocalIdentity
+from .modem_identity import ModemIdentity
 from .packet import Packet
 
 # PacketBuilder imports from other protocol modules so import it last
@@ -81,6 +82,7 @@ __all__ = [
     "PacketFilter",
     "CryptoUtils",
     "LocalIdentity",
+    "ModemIdentity",
     "Identity",
     # Utility functions
     "parse_advert_payload",

@@ -1,0 +1,3 @@
+# CH341 USB-to-SPI adapter
+# VID=0x1A86, PID=0x5512
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="5512", MODE="0666", GROUP="plugdev"

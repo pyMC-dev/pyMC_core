@@ -1,15 +1,30 @@
 import time
-import spidev
+
+# Optional import - spidev is only needed for hardware SPI (Raspberry Pi)
+# When using USB adapters like CH341, a custom transport is provided instead
+try:
+    import spidev
+
+    spi = spidev.SpiDev()
+except ImportError:
+    spi = None
 
 from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
-spi = spidev.SpiDev()
+
 _gpio_manager = None
+
 
 def set_gpio_manager(gpio_manager):
     """Set the GPIO manager instance to be used by this module"""
     global _gpio_manager
     _gpio_manager = gpio_manager
+
+
+def set_spi_transport(spi_transport):
+    """Set the SPI transport instance to be used by this module"""
+    global spi
+    spi = spi_transport
 
 
 def _get_output(pin):
@@ -402,7 +417,7 @@ class SX126x(BaseLoRa):
 
         reset_pin.write(False)  # periphery: write(False) = LOW
         time.sleep(0.001)
-        reset_pin.write(True)   # periphery: write(True) = HIGH
+        reset_pin.write(True)  # periphery: write(True) = HIGH
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):

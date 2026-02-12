@@ -72,18 +72,23 @@ class GPIOPinManager:
                 self._backend = "periphery"
             elif GPIOD_AVAILABLE:
                 self._backend = "gpiod"
+
                 class GpiodGPIO:
                     def __init__(self, chip_path, lineoffset, direction, bias=None, edge=None):
                         # chip_path is like '/dev/gpiochip0' — use it directly
                         try:
                             self._chip = gpiod.Chip(chip_path)
                         except Exception as e:
-                            raise FileNotFoundError(f"gpiod Chip '{chip_path}' not found: {e}") from e
+                            raise FileNotFoundError(
+                                f"gpiod Chip '{chip_path}' not found: {e}"
+                            ) from e
 
                         self._line = self._chip.get_line(lineoffset)
                         self.direction = direction
                         self._consumer = "pymc_core"
 
+                        # Request line for input or output using libgpiod v2 LineRequest,
+                        # if available.
                         requested = False
                         try:
                             LineRequest = getattr(gpiod, "LineRequest", None)
@@ -129,7 +134,9 @@ class GPIOPinManager:
 
                         if not requested:
                             raise RuntimeError(
-                                "Unsupported gpiod Python library on this system. Please install a compatible python-libgpiod (v2.4) or adjust the wrapper."
+                                "Unsupported gpiod Python API on this system. "
+                                "Please install a compatible python-libgpiod (v2.4) "
+                                "or adjust the wrapper."
                             )
 
                     def write(self, value: bool):
@@ -150,11 +157,12 @@ class GPIOPinManager:
                     def read_event(self):
                         return None
 
-                # make the module-level GPIO name point to the wrapper so rest of code can instantiate
+                # Make the module-level GPIO name point to the wrapper so the rest of the
+                # code can instantiate it.
                 globals()["GPIO"] = GpiodGPIO
             else:
                 raise GPIOImportError()
-        
+
         self._gpio_chip = self._resolve_gpio_chip(gpio_chip)
         self._pins: Dict[int, GPIO] = {}
         self._led_threads: Dict[int, threading.Thread] = {}  # Track active LED threads
@@ -163,7 +171,9 @@ class GPIOPinManager:
         self._edge_threads: Dict[int, threading.Thread] = {}  # Track edge detection threads
         self._edge_stop_events: Dict[int, threading.Event] = {}  # Stop events for edge threads
 
-        logger.debug(f"GPIO Manager initialized with chip: {self._gpio_chip} using backend: {self._backend}")
+        logger.debug(
+            f"GPIO Manager initialized with chip: {self._gpio_chip} using backend: {self._backend}"
+        )
 
     def _resolve_gpio_chip(self, gpio_chip: str) -> str:
         """Resolve GPIO chip path, auto-detecting if needed"""
@@ -223,9 +233,13 @@ class GPIOPinManager:
                 sys.exit(1)
             else:
                 logger.error(
-                    f"Failed to setup output pin {pin_number} on {self._gpio_chip} (backend={self._backend}): {e}"
+                    f"Failed to setup output pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend}): {e}"
                 )
-                print(f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} (backend={self._backend})")
+                print(
+                    f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend})"
+                )
                 print("━" * 60)
                 print(f"Error: {e}")
                 print("\nThe system cannot function without GPIO access.")
@@ -304,9 +318,13 @@ class GPIOPinManager:
                 sys.exit(1)
             else:
                 logger.error(
-                    f"Failed to setup input pin {pin_number} on {self._gpio_chip} (backend={self._backend}): {e}"
+                    f"Failed to setup input pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend}): {e}"
                 )
-                print(f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} (backend={self._backend})")
+                print(
+                    f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend})"
+                )
                 print("━" * 60)
                 print(f"Error: {e}")
                 print("\nThe system cannot function without GPIO access.")
@@ -381,9 +399,13 @@ class GPIOPinManager:
                 sys.exit(1)
             else:
                 logger.error(
-                    f"Failed to setup interrupt pin {pin_number} on {self._gpio_chip} (backend={self._backend}): {e}"
+                    f"Failed to setup interrupt pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend}): {e}"
                 )
-                print(f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} (backend={self._backend})")
+                print(
+                    f"\nFATAL: Cannot setup GPIO pin {pin_number} on {self._gpio_chip} "
+                    f"(backend={self._backend})"
+                )
                 print("━" * 60)
                 print(f"Error: {e}")
                 print("\nThe system cannot function without GPIO access.")
@@ -406,7 +428,10 @@ class GPIOPinManager:
         logger.debug(f"Edge detection thread started for pin {pin_number}")
 
     def _start_polling_detection(self, pin_number: int, interval: float = 0.02) -> None:
-        """Start a polling thread to detect rising edges for GPIO lines (used with gpiod backend)."""
+        """Start a polling thread to detect rising edges for GPIO lines.
+
+        This is used with the gpiod backend.
+        """
         stop_event = threading.Event()
         self._edge_stop_events[pin_number] = stop_event
 
@@ -418,9 +443,13 @@ class GPIOPinManager:
         )
         thread.start()
         self._edge_threads[pin_number] = thread
-        logger.debug(f"Polling detection thread started for pin {pin_number} (interval={interval}s)")
+        logger.debug(
+            f"Polling detection thread started for pin {pin_number} (interval={interval}s)"
+        )
 
-    def _monitor_polling(self, pin_number: int, stop_event: threading.Event, interval: float) -> None:
+    def _monitor_polling(
+        self, pin_number: int, stop_event: threading.Event, interval: float
+    ) -> None:
         """Poll input state and invoke callback on rising edge (low->high)."""
         try:
             gpio = self._pins.get(pin_number)
