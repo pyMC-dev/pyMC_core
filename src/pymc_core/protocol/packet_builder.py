@@ -536,7 +536,7 @@ class PacketBuilder:
         mac = CryptoUtils._hmac_sha256(secret_bytes, ciphertext)[:2]
         payload = bytearray([channel_hash]) + mac + ciphertext
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT)
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -573,7 +573,7 @@ class PacketBuilder:
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = bytearray([channel_hash]) + cipher
 
-        header = PacketBuilder._create_header(ptype)
+        header = PacketBuilder._create_header(ptype, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
