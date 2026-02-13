@@ -301,6 +301,7 @@ class SX126x(BaseLoRa):
     RX_GAIN_BOOSTED = 0x01  #                       boosted gain
     POWER_SAVING_GAIN = 0x94  # power saving gain register value
     BOOSTED_GAIN = 0x96  # boosted gain register value
+    _rxGain = RX_GAIN_POWER_SAVING  # track configured gain for re-apply after standby
 
     # TX and RX operation status
     STATUS_DEFAULT = 0  # default status (false)
@@ -696,6 +697,7 @@ class SX126x(BaseLoRa):
 
     def setRxGain(self, rxGain):
         # set power saving or boosted gain in register
+        self._rxGain = rxGain
         gain = self.POWER_SAVING_GAIN
         if rxGain == self.RX_GAIN_BOOSTED:
             gain = self.BOOSTED_GAIN
@@ -952,9 +954,9 @@ class SX126x(BaseLoRa):
     ### RECEIVE RELATED METHODS ###
 
     def request(self, timeout: int = RX_SINGLE) -> bool:
-        # skip to enter RX mode when previous RX operation incomplete
-        if self.getMode() == self.STATUS_MODE_RX:
-            return False
+        # # skip to enter RX mode when previous RX operation incomplete
+        # if self.getMode() == self.STATUS_MODE_RX:
+        #     return False
         # clear previous interrupt and set RX done, RX timeout, header error, and CRC error as interrupt source
         self._irqSetup(self.IRQ_RX_DONE | self.IRQ_TIMEOUT | self.IRQ_HEADER_ERR | self.IRQ_CRC_ERR)
         # set status to RX wait or RX continuous wait
@@ -971,6 +973,8 @@ class SX126x(BaseLoRa):
         if self._txen != -1:
             self._txState = _get_output(self._txen).read()
             _get_output(self._txen).write(True)
+        # re-apply RX gain — register 0x08AC resets to power-saving after standby
+        self.setRxGain(self._rxGain)
         # set device to receive mode with configured timeout, single, or continuous operation
         self.setRx(rxTimeout)
         # IRQ event handling should be implemented in the higher-level driver using periphery GPIO
