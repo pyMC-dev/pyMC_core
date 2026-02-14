@@ -1,7 +1,8 @@
+import struct
 import time
 from typing import Any, Dict, Optional
 
-from ...protocol import Identity, Packet, decode_appdata
+from ...protocol import Identity, Packet, decode_appdata, parse_advert_payload
 from ...protocol.constants import (
     MAX_ADVERT_DATA_SIZE,
     PAYLOAD_TYPE_ADVERT,
@@ -11,6 +12,7 @@ from ...protocol.constants import (
     describe_advert_flags,
 )
 from ...protocol.utils import determine_contact_type_from_flags, get_contact_type_name
+from ..events import MeshEvents
 from .base import BaseHandler
 
 
@@ -19,33 +21,9 @@ class AdvertHandler(BaseHandler):
     def payload_type() -> int:
         return PAYLOAD_TYPE_ADVERT
 
-    def __init__(self, log_fn):
+    def __init__(self, log_fn, event_service=None):
         self.log = log_fn
-
-    def _extract_advert_components(self, packet: Packet):
-        """Extract and validate advert packet components."""
-        payload = packet.get_payload()
-        header_len = PUB_KEY_SIZE + TIMESTAMP_SIZE + SIGNATURE_SIZE
-        if len(payload) < header_len:
-            self.log(
-                f"Advert payload too short ({len(payload)} bytes, expected at least {header_len})"
-            )
-            return None
-
-        sig_offset = PUB_KEY_SIZE + TIMESTAMP_SIZE
-        pubkey = payload[:PUB_KEY_SIZE]
-        timestamp = payload[PUB_KEY_SIZE:sig_offset]
-        signature = payload[sig_offset : sig_offset + SIGNATURE_SIZE]
-        appdata = payload[sig_offset + SIGNATURE_SIZE :]
-
-        if len(appdata) > MAX_ADVERT_DATA_SIZE:
-            self.log(
-                f"Advert appdata too large ({len(appdata)} bytes). "
-                f"Truncating to {MAX_ADVERT_DATA_SIZE}"
-            )
-            appdata = appdata[:MAX_ADVERT_DATA_SIZE]
-
-        return pubkey, timestamp, signature, appdata
+        self.event_service = event_service
 
     def _verify_advert_signature(
         self, pubkey: bytes, timestamp: bytes, appdata: bytes, signature: bytes
@@ -85,13 +63,26 @@ class AdvertHandler(BaseHandler):
     async def __call__(self, packet: Packet) -> Optional[Dict[str, Any]]:
         """Process advert packet and return parsed data with signature verification."""
         try:
-            # Extract and validate packet components
-            components = self._extract_advert_components(packet)
-            if not components:
+            payload = packet.get_payload()
+            if not payload:
+                return None
+            try:
+                parsed = parse_advert_payload(payload)
+            except ValueError as e:
+                self.log(f"Advert payload parse error: {e}")
                 return None
 
-            pubkey_bytes, timestamp_bytes, signature_bytes, appdata = components
-            pubkey_hex = pubkey_bytes.hex()
+            pubkey_bytes = bytes.fromhex(parsed["pubkey"])
+            pubkey_hex = parsed["pubkey"]
+            advert_timestamp = parsed["timestamp"]
+            timestamp_bytes = struct.pack("<I", advert_timestamp)
+            signature_bytes = bytes.fromhex(parsed["signature"])
+            appdata = parsed["appdata"]
+            if len(appdata) > MAX_ADVERT_DATA_SIZE:
+                self.log(
+                    f"Advert appdata too large ({len(appdata)} bytes), truncating to {MAX_ADVERT_DATA_SIZE}"
+                )
+                appdata = appdata[:MAX_ADVERT_DATA_SIZE]
 
             # Verify cryptographic signature
             if not self._verify_advert_signature(
@@ -102,7 +93,7 @@ class AdvertHandler(BaseHandler):
 
             self.log(f"Processing advert for pubkey: {pubkey_hex[:16]}...")
 
-            # Decode application data
+            # Decode application data (protocol.utils.decode_appdata)
             decoded = decode_appdata(appdata)
 
             # Extract name from decoded data
@@ -119,6 +110,11 @@ class AdvertHandler(BaseHandler):
             contact_type_id = determine_contact_type_from_flags(flags_int)
             contact_type = get_contact_type_name(contact_type_id)
 
+            # Clamp to current time if remote clock is ahead (avoid "future" last-advert in UI)
+            now = int(time.time())
+            if advert_timestamp > now:
+                advert_timestamp = now
+
             # Build parsed advert data
             advert_data = {
                 "public_key": pubkey_hex,
@@ -129,6 +125,7 @@ class AdvertHandler(BaseHandler):
                 "flags_description": flags_description,
                 "contact_type_id": contact_type_id,
                 "contact_type": contact_type,
+                "advert_timestamp": advert_timestamp,
                 "timestamp": int(time.time()),
                 "snr": packet._snr if hasattr(packet, "_snr") else 0.0,
                 "rssi": packet._rssi if hasattr(packet, "_rssi") else 0,
@@ -136,6 +133,23 @@ class AdvertHandler(BaseHandler):
             }
 
             self.log(f"Parsed advert: {name} ({contact_type})")
+
+            # Publish so companion/app receives node-discovered and advert_received callbacks
+            if self.event_service:
+                try:
+                    event_data = {
+                        "public_key": pubkey_hex,
+                        "name": name,
+                        "contact_type": contact_type_id,
+                        "lat": lat,
+                        "lon": lon,
+                        "snr": advert_data["snr"],
+                        "rssi": advert_data["rssi"],
+                    }
+                    self.event_service.publish_sync(MeshEvents.NODE_DISCOVERED, event_data)
+                except Exception as e:
+                    self.log(f"Failed to publish NODE_DISCOVERED event: {e}")
+
             return advert_data
 
         except Exception as e:

@@ -70,6 +70,17 @@ class CryptoUtils:
         return decrypted
 
     @staticmethod
+    def x25519_clamp_scalar(scalar: bytes) -> bytes:
+        """Clamp a 32-byte scalar for X25519 (matches MeshCore key_exchange.c)."""
+        if len(scalar) != 32:
+            raise ValueError("scalar must be 32 bytes")
+        s = bytearray(scalar)
+        s[0] &= 248
+        s[31] &= 63
+        s[31] |= 64
+        return bytes(s)
+
+    @staticmethod
     def scalarmult(private_key: bytes, public_key: bytes) -> bytes:
         """ECDH shared secret calculation (X25519)."""
         return crypto_scalarmult(private_key, public_key)

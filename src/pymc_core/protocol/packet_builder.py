@@ -523,9 +523,15 @@ class PacketBuilder:
         secret_bytes = (
             bytes.fromhex(channel["secret"])
             if isinstance(channel["secret"], str)
-            else channel["secret"].encode("utf-8")
+            else (channel["secret"] if isinstance(channel["secret"], bytes) else channel["secret"].encode("utf-8"))
         )
-        channel_hash = hashlib.sha256(secret_bytes).digest()[0]
+        # Use same channel hash derivation as GroupTextHandler (firmware: hash first 16 bytes when 32-byte key has second 16 zero)
+        hash_input = (
+            secret_bytes[:16]
+            if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16
+            else (secret_bytes[:32] if len(secret_bytes) > 32 else secret_bytes)
+        )
+        channel_hash = hashlib.sha256(hash_input).digest()[0]
         secret_bytes = (secret_bytes + b"\x00" * 32)[:32]
 
         timestamp, flags = PacketBuilder._get_timestamp(), 0x00
@@ -536,7 +542,7 @@ class PacketBuilder:
         mac = CryptoUtils._hmac_sha256(secret_bytes, ciphertext)[:2]
         payload = bytearray([channel_hash]) + mac + ciphertext
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT)
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -573,7 +579,7 @@ class PacketBuilder:
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = bytearray([channel_hash]) + cipher
 
-        header = PacketBuilder._create_header(ptype)
+        header = PacketBuilder._create_header(ptype, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod

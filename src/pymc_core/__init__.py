@@ -21,5 +21,17 @@ __all__ = [
     "__version__",
 ]
 
+# Conditional import for CompanionRadio
+try:
+    from .companion.companion_radio import CompanionRadio
+
+    _COMPANION_AVAILABLE = True
+except ImportError:
+    _COMPANION_AVAILABLE = False
+    CompanionRadio = None
+
+if _COMPANION_AVAILABLE:
+    __all__.append("CompanionRadio")
+
 
 # End of mesh package exports

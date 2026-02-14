@@ -191,6 +191,7 @@ class TextMessageHandler(BaseHandler):
                     "contact_name": matched_contact.name,
                     "contact_pubkey": matched_contact.public_key,
                     "message_text": decoded_msg,
+                    "txt_type": txt_type,
                     "is_outgoing": False,
                     "timestamp": message_timestamp,
                     "delivery_status": "received",

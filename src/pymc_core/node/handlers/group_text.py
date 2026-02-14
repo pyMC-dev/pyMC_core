@@ -1,7 +1,11 @@
 from typing import Optional
 
 from ...protocol import Packet
-from ...protocol.constants import PAYLOAD_TYPE_GRP_TXT
+from ...protocol.constants import (
+    PAYLOAD_TYPE_GRP_TXT,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
+)
 from ...protocol.crypto import CryptoUtils
 from .base import BaseHandler
 
@@ -49,33 +53,32 @@ class GroupTextHandler(BaseHandler):
             self.log(f"Error querying channel database: {e}")
             return None
 
-    def _derive_channel_hash(self, channel_secret: str) -> int:
-        """Derive a consistent channel hash from the secret."""
-        import hashlib
-
-        # Convert hex secret to bytes, then derive key
+    def _secret_bytes_for_hash(self, channel_secret: str) -> bytes:
+        """Normalize secret to bytes used for channel hash (match MeshCore firmware).
+        Firmware hashes only first 16 bytes when second 16 are zero (128-bit key)."""
         try:
             secret_bytes = bytes.fromhex(channel_secret)
         except ValueError:
-            # If not hex, treat as UTF-8 string
             secret_bytes = channel_secret.encode("utf-8")
+        if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16:
+            return secret_bytes[:16]
+        if len(secret_bytes) > 32:
+            return secret_bytes[:32]
+        return secret_bytes
 
-        # Simple SHA256 derivation (no salt) to match official spec
+    def _derive_channel_hash(self, channel_secret: str) -> int:
+        """Derive channel hash (first byte of SHA256) to match MeshCore firmware."""
+        import hashlib
+
+        secret_bytes = self._secret_bytes_for_hash(channel_secret)
         channel_key = hashlib.sha256(secret_bytes).digest()
-
-        # Return first byte as the channel hash
         return channel_key[0]
 
     def _derive_channel_keys(self, channel_secret: str) -> tuple:
         """Derive all necessary keys from channel secret."""
         import hashlib
 
-        try:
-            secret_bytes = bytes.fromhex(channel_secret)
-        except ValueError:
-            secret_bytes = channel_secret.encode("utf-8")
-
-        # Simple SHA256 derivation to match official spec
+        secret_bytes = self._secret_bytes_for_hash(channel_secret)
         master_key = hashlib.sha256(secret_bytes).digest()
 
         # Split into different keys
@@ -124,7 +127,9 @@ class GroupTextHandler(BaseHandler):
         try:
             timestamp = int.from_bytes(plaintext[:4], "little")
             flags = plaintext[4]
-            message_content = plaintext[5:].decode("utf-8", errors="replace")
+            # Decode and strip trailing null/padding (AES decrypt returns block-aligned data with zero padding)
+            raw = plaintext[5:].decode("utf-8", errors="replace")
+            message_content = raw.rstrip("\x00")
 
             # Parse message flags according to spec
             message_type = "unknown"
@@ -137,7 +142,8 @@ class GroupTextHandler(BaseHandler):
                 # For signed messages, first two bytes are sender prefix
                 if len(plaintext) >= 7:
                     # sender_prefix = plaintext[5:7]  # Unused for now
-                    message_content = plaintext[7:].decode("utf-8", errors="replace")
+                    raw = plaintext[7:].decode("utf-8", errors="replace")
+                    message_content = raw.rstrip("\x00")
 
             return {
                 "timestamp": timestamp,
@@ -270,6 +276,13 @@ class GroupTextHandler(BaseHandler):
 
                     channel_hash = f"{packet.get_payload()[0]:02X}"
 
+                    # path_len: flood packets use actual path length; direct uses 0xFF
+                    route_type = packet.header & 0x03
+                    if route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+                        path_len = getattr(packet, "path_len", 0) or len(packet.path or [])
+                    else:
+                        path_len = 0xFF
+
                     # Use a custom message type for single channel message addition
                     message_data = {
                         "message_id": message_id,
@@ -280,6 +293,8 @@ class GroupTextHandler(BaseHandler):
                         "timestamp": timestamp,
                         "message_type": "group_text",
                         "flags": 0,
+                        "path_len": path_len,
+                        "packet_hash": packet.calculate_packet_hash().hex().upper(),
                         "full_content": packet.decrypted.get("group_text_data", {}).get(
                             "full_content"
                         ),
@@ -293,8 +308,8 @@ class GroupTextHandler(BaseHandler):
                         },
                     }
 
-                    # Publish channel message event
-                    self.event_service.publish_sync(MeshEvents.NEW_CHANNEL_MESSAGE, message_data)
+                    # Publish channel message event (await so message is queued and MSG_WAITING sent before return)
+                    await self.event_service.publish(MeshEvents.NEW_CHANNEL_MESSAGE, message_data)
                     self.log("Published group message event")
                 except Exception as publish_error:
                     self.log(f"Failed to publish group message event: {publish_error}")

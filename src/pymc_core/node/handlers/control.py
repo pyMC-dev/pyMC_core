@@ -24,13 +24,22 @@ class ControlHandler:
     This handler processes incoming discovery requests and responses.
     """
 
-    def __init__(self, log_fn: Callable[[str], None]):
+    def __init__(
+        self,
+        log_fn: Callable[[str], None],
+        debug_log_fn: Optional[Callable[[str], None]] = None,
+    ):
         """Initialize control handler.
-        
+
         Args:
-            log_fn: Logging function
+            log_fn: Logging function for normal messages.
+            debug_log_fn: Optional logging function for verbose messages (e.g. callback
+                presence). If set, "No callback waiting" and "Called response callback"
+                use this instead of log_fn, so callers can use logger.debug to avoid noise
+                when forwarding discovery to companions.
         """
         self._log = log_fn
+        self._debug_log = debug_log_fn if debug_log_fn is not None else log_fn
 
         # Callbacks for discovery responses
         self._response_callbacks: Dict[int, Callable[[Dict[str, Any]], None]] = {}
@@ -192,11 +201,11 @@ class ControlHandler:
                 callback = self._response_callbacks[tag]
                 if callback:
                     callback(response_data)
-                    self._log(
+                    self._debug_log(
                         f"[ControlHandler] Called response callback for tag 0x{tag:08X}"
                     )
             else:
-                self._log(
+                self._debug_log(
                     f"[ControlHandler] No callback waiting for tag 0x{tag:08X}"
                 )
 
@@ -205,6 +214,3 @@ class ControlHandler:
         except Exception as e:
             self._log(f"[ControlHandler] Error handling discovery response: {e}")
             return None
-
-        except Exception as e:
-            self._log(f"[ControlHandler] Error handling discovery response: {e}")

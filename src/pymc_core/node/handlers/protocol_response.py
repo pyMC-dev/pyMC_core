@@ -4,12 +4,13 @@ Handles responses to protocol requests (like stats, config, etc.) that come
 back as PATH packets with encrypted payloads.
 """
 
+import asyncio
 import struct
 from typing import Any, Callable, Dict, Optional
 
 from ...hardware.signal_utils import snr_register_to_db
 from ...protocol import CryptoUtils, Identity, Packet
-from ...protocol.constants import PAYLOAD_TYPE_PATH
+from ...protocol.constants import MAX_PATH_SIZE, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE
 
 
 class ProtocolResponseHandler:
@@ -28,6 +29,9 @@ class ProtocolResponseHandler:
 
         # Callbacks for protocol responses
         self._response_callbacks: Dict[int, Callable[[bool, str, Dict[str, Any]], None]] = {}
+        # Optional: when set, decrypted payloads with tag+data (and optional path) are passed as binary response
+        # Signature: (tag_bytes, response_data, path_info=None). path_info = (out_path, in_path, contact_pubkey).
+        self._binary_response_callback: Optional[Callable[..., Any]] = None
 
     @staticmethod
     def payload_type() -> int:
@@ -43,6 +47,11 @@ class ProtocolResponseHandler:
         """Clear callback for protocol responses from a specific contact."""
         self._response_callbacks.pop(contact_hash, None)
 
+    def set_binary_response_callback(self, callback: Callable[..., Any]) -> None:
+        """Set callback for binary responses. Called with (tag_bytes, response_data, path_info=None).
+        path_info when present is (out_path, in_path, contact_pubkey) for path-return format."""
+        self._binary_response_callback = callback
+
     async def __call__(self, pkt: Packet) -> None:
         """Handle incoming PATH packet that might be a protocol response."""
         try:
@@ -54,9 +63,9 @@ class ProtocolResponseHandler:
             # dest_hash(1) + src_hash(1) + encrypted_data(N)
             src_hash = pkt.payload[1]
 
-            # Check if we have a callback waiting for this source
-            if src_hash not in self._response_callbacks:
-                return  # Not waiting for response from this source
+            # Proceed if we have a callback for this source or the binary (path-discovery) callback
+            if src_hash not in self._response_callbacks and self._binary_response_callback is None:
+                return
 
             self._log(
                 "[ProtocolResponse] Processing potential protocol response "
@@ -64,9 +73,46 @@ class ProtocolResponseHandler:
             )
 
             # Try to decrypt the response
-            success, decoded_text, parsed_data = await self._decrypt_protocol_response(
+            success, decoded_text, parsed_data, raw_decrypted = await self._decrypt_protocol_response(
                 pkt, src_hash
             )
+
+            # If binary response callback is set, parse and invoke (plain tag+data or path-return format)
+            if (
+                success
+                and self._binary_response_callback is not None
+                and raw_decrypted is not None
+                and len(raw_decrypted) >= 4
+            ):
+                path_info = None
+                tag_bytes = raw_decrypted[:4]
+                response_data = raw_decrypted[4:]
+                # Path-return format (MeshCore createPathReturn): path_len(1), path(path_len), extra_type(1), extra
+                path_len = raw_decrypted[0]
+                if (
+                    path_len <= MAX_PATH_SIZE
+                    and len(raw_decrypted) >= 1 + path_len + 1 + 4
+                ):
+                    out_path = bytes(raw_decrypted[1 : 1 + path_len])
+                    extra_type = raw_decrypted[1 + path_len]
+                    extra = raw_decrypted[2 + path_len :]
+                    if extra_type == PAYLOAD_TYPE_RESPONSE and len(extra) >= 4:
+                        tag_bytes = extra[:4]
+                        response_data = extra[4:]
+                        in_path = bytes(pkt.path) if pkt.path else b""
+                        contact = self._find_contact_by_hash(src_hash)
+                        if contact:
+                            contact_pubkey = bytes.fromhex(contact.public_key)
+                            path_info = (out_path, in_path, contact_pubkey)
+                try:
+                    cb_result = self._binary_response_callback(
+                        tag_bytes, response_data, path_info
+                    )
+                    if asyncio.iscoroutine(cb_result):
+                        await cb_result
+                except Exception as e:
+                    self._log(f"[ProtocolResponse] Binary response callback error: {e}")
+                return
 
             # Call the waiting callback
             callback = self._response_callbacks[src_hash]
@@ -78,13 +124,13 @@ class ProtocolResponseHandler:
 
     async def _decrypt_protocol_response(
         self, pkt: Packet, src_hash: int
-    ) -> tuple[bool, str, Dict[str, Any]]:
-        """Decrypt and parse a protocol response packet."""
+    ) -> tuple[bool, str, Dict[str, Any], Optional[bytes]]:
+        """Decrypt and parse a protocol response packet. Returns (success, text, parsed_data, raw_decrypted)."""
         try:
             # Find the contact by hash
             contact = self._find_contact_by_hash(src_hash)
             if not contact:
-                return False, f"Unknown contact for hash 0x{src_hash:02X}", {}
+                return False, f"Unknown contact for hash 0x{src_hash:02X}", {}, None
 
             # Get encryption keys
             contact_pubkey = bytes.fromhex(contact.public_key)
@@ -101,11 +147,12 @@ class ProtocolResponseHandler:
             self._log(f"[ProtocolResponse] Successfully decrypted {len(decrypted)} bytes")
 
             # Parse based on content type
-            return self._parse_protocol_response(decrypted)
+            success, text, parsed = self._parse_protocol_response(decrypted)
+            return success, text, parsed, decrypted
 
         except Exception as e:
             self._log(f"[ProtocolResponse] Decryption failed: {e}")
-            return False, f"Decryption failed: {e}", {}
+            return False, f"Decryption failed: {e}", {}, None
 
     def _parse_protocol_response(self, data: bytes) -> tuple[bool, str, Dict[str, Any]]:
         """Parse decrypted protocol response data."""

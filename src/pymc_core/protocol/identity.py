@@ -100,17 +100,19 @@ class LocalIdentity(Identity):
         if seed and len(seed) == 64:
             from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-            # MeshCore format: [32-byte clamped scalar][32-byte nonce]
+            # MeshCore format: [32-byte scalar][32-byte nonce]; firmware clamps first 32 bytes for ECDH
             self._firmware_key = seed
             self.signing_key = None
 
-            # Derive public key from scalar
+            # Use X25519 clamping so ECDH matches firmware's ed25519_key_exchange()
             scalar = seed[:32]
-            ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(scalar)
+            clamped = CryptoUtils.x25519_clamp_scalar(scalar)
+            ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(clamped)
             self.verify_key = VerifyKey(ed25519_pub)
 
-            # Build ed25519_sk for X25519 conversion (use reconstructed format)
-            ed25519_sk = scalar + ed25519_pub
+            # Use clamped scalar directly for ECDH (firmware key_exchange.c uses first 32 bytes clamped)
+            self._x25519_private = clamped
+            self._x25519_public = CryptoUtils.scalarmult_base(clamped)
         else:
             # Standard 32-byte seed or None
             self._firmware_key = None
@@ -121,9 +123,9 @@ class LocalIdentity(Identity):
             ed25519_pub = self.verify_key.encode()
             ed25519_sk = self.signing_key.encode() + ed25519_pub
 
-        # X25519 keypair for ECDH
-        self._x25519_private = CryptoUtils.ed25519_sk_to_x25519(ed25519_sk)
-        self._x25519_public = CryptoUtils.scalarmult_base(self._x25519_private)
+            # X25519 keypair for ECDH (libsodium conversion)
+            self._x25519_private = CryptoUtils.ed25519_sk_to_x25519(ed25519_sk)
+            self._x25519_public = CryptoUtils.scalarmult_base(self._x25519_private)
 
         # Initialise base class with Ed25519 pubkey
         super().__init__(ed25519_pub)
