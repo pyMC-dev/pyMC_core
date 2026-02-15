@@ -150,11 +150,6 @@ class ProtocolResponseHandler:
             if src_hash not in self._response_callbacks and self._binary_response_callback is None:
                 return
 
-            self._log(
-                "[ProtocolResponse] Processing potential protocol response "
-                f"from 0x{src_hash:02X}, payload_len={len(pkt.payload)}"
-            )
-
             # Try to decrypt the response
             success, decoded_text, parsed_data, raw_decrypted = await self._decrypt_protocol_response(
                 pkt, src_hash
@@ -266,10 +261,6 @@ class ProtocolResponseHandler:
 
             # Determine the actual payload type from the incoming packet header.
             pkt_type = (pkt.header >> 2) & 0x0F
-            self._log(
-                f"[ProtocolResponse] Decrypted {len(decrypted)} bytes from "
-                f"pkt_type=0x{pkt_type:02X}, hex: {decrypted.hex()}"
-            )
 
             # Extract the actual response data based on packet type.
             response_data = decrypted
@@ -287,11 +278,7 @@ class ProtocolResponseHandler:
                         extra_type = decrypted[1 + path_len_byte] & 0x0F
                         if extra_type == PAYLOAD_TYPE_RESPONSE and len(decrypted) > inner_offset:
                             response_data = decrypted[inner_offset:]
-                            self._log(
-                                f"[ProtocolResponse] PATH format: extracted inner response "
-                                f"{len(response_data)} bytes (path_len={path_len_byte})"
-                            )
-                        else:
+                        elif extra_type != PAYLOAD_TYPE_RESPONSE:
                             self._log(
                                 f"[ProtocolResponse] PATH format: extra_type=0x{extra_type:02X}, "
                                 f"not RESPONSE"
@@ -315,11 +302,6 @@ class ProtocolResponseHandler:
         4. Binary fallback
         """
         try:
-            self._log(
-                f"[ProtocolResponse] _parse_protocol_response: {len(data)} bytes, "
-                f"first 16: {data[:16].hex() if len(data) >= 16 else data.hex()}"
-            )
-
             # 1. Check if this looks like a stats response (protocol 0x01)
             #    RepeaterStats is 48-56 bytes + 4-byte tag.  Older firmware
             #    omits n_recv_errors (52 B struct → 56 total); PATH-wrapped

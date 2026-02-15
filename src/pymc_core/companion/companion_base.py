@@ -517,7 +517,9 @@ class CompanionBase:
         tag_hex = tag_bytes.hex()
         info = self._pending_binary_requests.pop(tag_hex, None)
         if not info:
-            logger.debug(f"Binary response for unknown tag {tag_hex}")
+            # Skip log for small payloads (e.g. login response already handled by LoginResponseHandler)
+            if len(response_data) >= 20:
+                logger.debug(f"Binary response for unknown tag {tag_hex}")
             await self._fire_callbacks("binary_response", tag_bytes, response_data)
             return
         request_type = info["request_type"]
@@ -628,6 +630,7 @@ class CompanionBase:
             display_text,
             msg.timestamp,
             path_len,
+            channel_idx,
         )
 
     async def _fire_callbacks(self, event_name: str, *args: Any) -> None:

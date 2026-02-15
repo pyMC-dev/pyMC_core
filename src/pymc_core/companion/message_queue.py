@@ -34,6 +34,12 @@ class MessageQueue:
             return self._queue.popleft()
         return None
 
+    def pop_last(self) -> Optional[QueuedMessage]:
+        """Remove and return the most recently pushed message, or None if empty."""
+        if self._queue:
+            return self._queue.pop()
+        return None
+
     def peek(self) -> Optional[QueuedMessage]:
         """Return the oldest message without removing it, or None if empty."""
         if self._queue:
