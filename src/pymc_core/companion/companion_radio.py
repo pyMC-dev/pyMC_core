@@ -11,11 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Any, Callable, Optional
 
 from ..node.node import MeshNode
-from ..protocol import LocalIdentity, PacketBuilder
-from ..protocol.constants import ADVERT_FLAG_HAS_LOCATION, ADVERT_FLAG_HAS_NAME
+from ..protocol import LocalIdentity, Packet, PacketBuilder
+from ..protocol.constants import (
+    ADVERT_FLAG_HAS_LOCATION,
+    ADVERT_FLAG_HAS_NAME,
+    PAYLOAD_TYPE_CONTROL,
+    REQ_TYPE_GET_TELEMETRY_DATA,
+    TELEM_PERM_BASE,
+)
 from .companion_base import CompanionBase, adv_type_to_flags
 from .constants import (
     ADV_TYPE_CHAT,
@@ -83,6 +90,7 @@ class CompanionRadio(CompanionBase):
         )
         self._radio = radio
         self._dispatcher_task: Optional[asyncio.Task] = None
+        self._pending_discovery_tags: set[int] = set()
 
         self.node = MeshNode(
             radio=radio,
@@ -323,27 +331,84 @@ class CompanionRadio(CompanionBase):
             logger.error(f"Error sending trace: {e}")
             return False
 
+    async def send_trace_path_raw(
+        self,
+        tag: int,
+        auth_code: int,
+        flags: int,
+        path_bytes: bytes,
+    ) -> bool:
+        """Send a trace packet with an explicit path (e.g. from CMD_SEND_TRACE_PATH). Matches firmware behavior."""
+        try:
+            path_list = list(path_bytes)
+            pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path_list)
+            return await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Error sending trace (raw path): {e}")
+            return False
+
+    async def _try_handle_path_discovery(
+        self, tag_bytes: bytes, path_info: tuple
+    ) -> bool:
+        """If tag is pending path discovery, fire path_discovery_response and return True."""
+        out_path, in_path, contact_pubkey = path_info
+        tag_int = int.from_bytes(tag_bytes, "little")
+        if tag_int not in self._pending_discovery_tags:
+            return False
+        self._pending_discovery_tags.discard(tag_int)
+        await self._fire_callbacks(
+            "path_discovery_response",
+            tag_bytes,
+            contact_pubkey,
+            out_path,
+            in_path,
+        )
+        return True
+
     async def send_path_discovery(self, pub_key: bytes) -> bool:
+        """Legacy: send path discovery without returning tag. Prefer send_path_discovery_req."""
+        result = await self.send_path_discovery_req(pub_key)
+        return result.success
+
+    async def send_path_discovery_req(self, pub_key: bytes) -> SentResult:
+        """Send path discovery (flood telemetry request with tag). Returns SentResult for RESP_CODE_SENT.
+        When path return arrives with matching tag, path_discovery_response is fired (PUSH 0x8D)."""
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
-            return False
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        tag_int = random.randint(0, 0xFFFFFFFF)
+        tag_bytes = tag_int.to_bytes(4, "little")
+        inv_perm = 0xFF & ~TELEM_PERM_BASE
+        req_payload = tag_bytes + bytes(
+            [REQ_TYPE_GET_TELEMETRY_DATA, inv_perm, 0, 0, 0]
+        )
         old_path_len = contact.out_path_len
         old_path = contact.out_path
         contact.out_path_len = -1
         contact.out_path = b""
         self.contacts.update(contact)
         try:
-            result = await self.node.send_telemetry_request(
-                contact_name=contact.name,
-                want_base=False,
-                want_location=False,
-                want_environment=False,
-                timeout=5.0,
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
+                data=req_payload,
             )
-            return result.get("success", False)
+            success = await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
+            if success:
+                self._pending_discovery_tags.add(tag_int)
+            return SentResult(
+                success=success,
+                is_flood=True,
+                expected_ack=tag_int,
+                timeout_ms=10000,
+            )
         except Exception as e:
             logger.error(f"Error in path discovery: {e}")
-            return False
+            return SentResult(success=False)
         finally:
             current = self.contacts.get_by_key(pub_key)
             if current and current.out_path_len == -1:
@@ -428,7 +493,54 @@ class CompanionRadio(CompanionBase):
             logger.error(f"Telemetry request error: {e}")
             return {"success": False, "reason": str(e)}
 
+    async def send_binary_req(
+        self, pub_key: bytes, data: bytes, timeout_seconds: float = 15.0
+    ) -> SentResult:
+        """Send binary request (CMD_SEND_BINARY_REQ). data = request_type(1) + optional payload.
+        Returns SentResult with expected_ack (4-byte tag as int) and timeout_ms for RESP_CODE_SENT.
+        """
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        tag_int = random.randint(0, 0xFFFFFFFF)
+        tag_bytes = tag_int.to_bytes(4, "little")
+        tag_hex = tag_bytes.hex()
+        request_type = data[0] if len(data) >= 1 else 0
+        req_payload = tag_bytes + data
+        self.cleanup_expired_binary_requests()
+        self.register_binary_request(
+            tag_hex,
+            request_type=request_type,
+            timeout_seconds=timeout_seconds,
+            pubkey_prefix=pub_key[:6].hex(),
+        )
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=0x02,
+                data=req_payload,
+            )
+            success = await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Binary request send error: {e}")
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        if not success:
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        return SentResult(
+            success=True,
+            is_flood=contact.out_path_len <= 0,
+            expected_ack=tag_int,
+            timeout_ms=10000,
+        )
+
     async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
+        """Legacy: send binary request and wait for response via waiter. Prefer send_binary_req + on_binary_response."""
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return {"success": False, "reason": "Contact not found"}
@@ -456,13 +568,54 @@ class CompanionRadio(CompanionBase):
             logger.error(f"Anon request error: {e}")
             return {"success": False, "reason": str(e)}
 
+    async def send_repeater_command(
+        self, pub_key: bytes, command: str, parameters: Optional[str] = None
+    ) -> dict:
+        """Send a text-based command to a repeater and await response."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        try:
+            result = await self.node.send_repeater_command(
+                repeater_name=contact.name,
+                command=command,
+                parameters=parameters,
+            )
+            return {
+                "success": result.get("success", False),
+                "repeater": contact.name,
+                "command": command,
+                "response": result.get("response"),
+                "reason": (
+                    "Command successful" if result.get("success") else "No response"
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Repeater command error: {e}")
+            return {"success": False, "reason": str(e)}
+
     # -------------------------------------------------------------------------
     # Control Data
     # -------------------------------------------------------------------------
 
-    async def send_control_data(self, data: bytes) -> bool:
+    async def send_control_data(self, data: Optional[bytes] = None) -> bool:
+        """Send a CONTROL packet. If data is provided and valid (len 1-254, first byte has 0x80),
+        send it as raw control payload; otherwise send a default discovery request (backward compat)."""
+        if data and len(data) <= 254 and (data[0] & 0x80) != 0:
+            try:
+                pkt = Packet()
+                pkt.header = PacketBuilder._create_header(
+                    PAYLOAD_TYPE_CONTROL, route_type="direct"
+                )
+                pkt.path_len = 0
+                pkt.path = bytearray()
+                pkt.payload = bytearray(data)
+                pkt.payload_len = len(data)
+                return await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
+            except Exception as e:
+                logger.error(f"Error sending control data: {e}")
+                return False
         try:
-            import random
             tag = random.randint(0, 0xFFFFFFFF)
             pkt = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
             return await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
@@ -490,6 +643,10 @@ class CompanionRadio(CompanionBase):
         dispatcher = self.node.dispatcher
         dispatcher.set_packet_received_callback(self._on_packet_received)
         dispatcher.set_packet_sent_callback(self._on_packet_sent)
+        if hasattr(dispatcher, "protocol_response_handler") and dispatcher.protocol_response_handler:
+            dispatcher.protocol_response_handler.set_binary_response_callback(
+                self._on_binary_response
+            )
 
     async def _on_packet_received(self, pkt: Any) -> None:
         from ..protocol.constants import ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
