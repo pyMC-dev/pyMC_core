@@ -1,5 +1,7 @@
 """In-memory contact storage compatible with MeshNode's contacts interface."""
 
+from __future__ import annotations
+
 import time
 from typing import Iterable, Iterator, Optional
 
@@ -31,7 +33,7 @@ class ContactProxy:
         self.gps_lat = contact.gps_lat
         self.gps_lon = contact.gps_lon
 
-    def _sync_from_contact(self):
+    def _sync_from_contact(self) -> None:
         """Update proxy fields from the underlying Contact."""
         c = self._contact
         self.public_key = c.public_key.hex()
@@ -143,7 +145,7 @@ class ContactStore:
         """Check if the contact store is at capacity."""
         return len(self._contacts) >= self._max_contacts
 
-    def clear(self):
+    def clear(self) -> None:
         """Remove all contacts."""
         self._contacts.clear()
         self._proxies.clear()
@@ -152,7 +154,7 @@ class ContactStore:
     # Bulk loading from external sources
     # ------------------------------------------------------------------
 
-    def load_from(self, contacts: Iterable[Contact]):
+    def load_from(self, contacts: Iterable[Contact]) -> None:
         """Bulk-load contacts from any iterable of Contact objects.
 
         Replaces all existing contacts.
@@ -164,7 +166,7 @@ class ContactStore:
             self._contacts[contact.public_key] = contact
             self._proxies[contact.public_key] = ContactProxy(contact)
 
-    def load_from_dicts(self, records: Iterable[dict]):
+    def load_from_dicts(self, records: Iterable[dict]) -> None:
         """Bulk-load contacts from dicts.
 
         Each dict must have 'public_key' (hex string or bytes) and 'name' keys.

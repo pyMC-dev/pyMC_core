@@ -1,5 +1,7 @@
 """Parse binary response payloads by request type (BinaryReqType)."""
 
+from __future__ import annotations
+
 import struct
 from typing import Any, Optional
 

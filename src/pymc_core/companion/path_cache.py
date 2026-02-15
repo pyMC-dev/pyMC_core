@@ -1,5 +1,8 @@
 """Path cache for tracking recently heard advertiser paths."""
 
+from __future__ import annotations
+
+from collections import deque
 from typing import Optional
 
 from .models import AdvertPath
@@ -14,24 +17,25 @@ class PathCache:
     """
 
     def __init__(self, max_entries: int = 16):
-        self._paths: list[AdvertPath] = []
+        self._paths: deque[AdvertPath] = deque()
         self._max = max_entries
 
-    def update(self, advert_path: AdvertPath):
+    def update(self, advert_path: AdvertPath) -> None:
         """Add or update a path entry.
 
         If a path with the same public key prefix already exists, it is
-        replaced. If the cache is full, the oldest entry is evicted.
+        removed and the new entry is appended (LRU refresh). If the cache
+        is full, the oldest entry is evicted.
         """
-        # Check for existing entry with same prefix
-        for i, existing in enumerate(self._paths):
+        # Remove existing entry with same prefix (LRU refresh to tail)
+        for existing in self._paths:
             if existing.public_key_prefix == advert_path.public_key_prefix:
-                self._paths[i] = advert_path
-                return
+                self._paths.remove(existing)
+                break
 
-        # Add new entry, evicting oldest if full
+        # Evict oldest if full
         if len(self._paths) >= self._max:
-            self._paths.pop(0)
+            self._paths.popleft()
         self._paths.append(advert_path)
 
     def get_by_prefix(self, prefix: bytes) -> Optional[AdvertPath]:
@@ -50,6 +54,6 @@ class PathCache:
         """Return all cached paths."""
         return list(self._paths)
 
-    def clear(self):
+    def clear(self) -> None:
         """Remove all cached paths."""
         self._paths.clear()

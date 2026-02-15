@@ -1,5 +1,9 @@
 """Companion radio constants for application-layer mesh networking features."""
 
+from __future__ import annotations
+
+from enum import IntEnum
+
 # ---------------------------------------------------------------------------
 # ADV Types (contact/node classification)
 # ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ STATS_TYPE_PACKETS = 2
 # ---------------------------------------------------------------------------
 # Binary request types (CMD_SEND_BINARY_REQ / PUSH_CODE_BINARY_RESPONSE)
 # ---------------------------------------------------------------------------
-class BinaryReqType:
+class BinaryReqType(IntEnum):
     """Binary request type codes (companion frame protocol)."""
     STATUS = 0x01
     KEEP_ALIVE = 0x02
@@ -64,8 +68,16 @@ class BinaryReqType:
     NEIGHBOURS = 0x06
 
 # ---------------------------------------------------------------------------
+# Protocol Codes (used in create_protocol_request / send_protocol_request)
+# ---------------------------------------------------------------------------
+PROTOCOL_CODE_RAW_DATA = 0x00
+PROTOCOL_CODE_BINARY_REQ = 0x02
+PROTOCOL_CODE_ANON_REQ = 0x07
+
+# ---------------------------------------------------------------------------
 # Default configuration
 # ---------------------------------------------------------------------------
+DEFAULT_RESPONSE_TIMEOUT_MS = 10000
 DEFAULT_MAX_CONTACTS = 1000
 DEFAULT_OFFLINE_QUEUE_SIZE = 512
 DEFAULT_MAX_CHANNELS = 40

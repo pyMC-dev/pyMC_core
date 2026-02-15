@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 from typing import Any, Callable, Optional
 
-from ..node.events import EventService, EventSubscriber, MeshEvents
 from ..node.handlers import (
     AdvertHandler,
     GroupTextHandler,
@@ -27,8 +25,6 @@ from ..node.handlers.login_server import LoginServerHandler
 from ..protocol import LocalIdentity, PacketBuilder
 from ..protocol import Packet
 from ..protocol.constants import (
-    ADVERT_FLAG_HAS_LOCATION,
-    ADVERT_FLAG_HAS_NAME,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_ANON_REQ,
@@ -37,20 +33,23 @@ from ..protocol.constants import (
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TXT_MSG,
+    REQ_TYPE_GET_STATUS,
+    REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
 )
-from ..protocol.constants import REQ_TYPE_GET_STATUS, REQ_TYPE_GET_TELEMETRY_DATA, TELEM_PERM_BASE
-from .companion_base import CompanionBase, ResponseWaiter, adv_type_to_flags
+from .companion_base import CompanionBase, ResponseWaiter
 from .constants import (
     ADV_TYPE_CHAT,
-    ADVERT_LOC_SHARE,
     DEFAULT_MAX_CHANNELS,
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
+    PROTOCOL_CODE_ANON_REQ,
+    PROTOCOL_CODE_BINARY_REQ,
+    PROTOCOL_CODE_RAW_DATA,
     TXT_TYPE_PLAIN,
 )
-from .models import Contact, QueuedMessage, SentResult
+from .models import Contact, SentResult
 
 logger = logging.getLogger("CompanionBridge")
 
@@ -110,7 +109,7 @@ class CompanionBridge(CompanionBase):
         offline_queue_size: int = DEFAULT_OFFLINE_QUEUE_SIZE,
         radio_config: Optional[dict] = None,
         authenticate_callback: Optional[Callable[..., tuple[bool, int]]] = None,
-    ):
+    ) -> None:
         """Initialise the companion bridge."""
         self._init_companion_stores(
             identity=identity,
@@ -123,7 +122,7 @@ class CompanionBridge(CompanionBase):
         )
         self._packet_injector = packet_injector
 
-        async def _send_packet(pkt: Packet, wait_for_ack: bool = False) -> bool:
+        async def _handler_send_packet(pkt: Packet, wait_for_ack: bool = False) -> bool:
             return await self._packet_injector(pkt, wait_for_ack=wait_for_ack)
 
         def _login_send_callback(pkt: Packet, delay_ms: int) -> None:
@@ -132,10 +131,10 @@ class CompanionBridge(CompanionBase):
                 await self._packet_injector(pkt, wait_for_ack=False)
             asyncio.create_task(_delayed_send())
 
-        _log = lambda msg: logger.debug(f"[CompanionBridge] {msg}")
+        def _log(msg: str) -> None:
+            logger.debug(f"[CompanionBridge] {msg}")
 
         self._pending_ack_crcs: set[int] = set()
-        self._pending_discovery_tags: set[int] = set()
         ack_handler = _BridgeAckHandler(self)
         protocol_response_handler = ProtocolResponseHandler(
             _log, identity, self.contacts
@@ -167,7 +166,7 @@ class CompanionBridge(CompanionBase):
                 identity,
                 self.contacts,
                 _log,
-                _send_packet,
+                _handler_send_packet,
                 self._event_service,
                 self._radio_config,
             ),
@@ -180,7 +179,7 @@ class CompanionBridge(CompanionBase):
                 identity,
                 self.contacts,
                 _log,
-                _send_packet,
+                _handler_send_packet,
                 self.channels,
                 self._event_service,
                 node_name,
@@ -266,6 +265,16 @@ class CompanionBridge(CompanionBase):
             return None
 
     # -------------------------------------------------------------------------
+    # Abstract method implementations
+    # -------------------------------------------------------------------------
+
+    async def _send_packet(
+        self, pkt: Packet, wait_for_ack: bool = False
+    ) -> bool:
+        """Send a packet via the packet_injector."""
+        return await self._packet_injector(pkt, wait_for_ack=wait_for_ack)
+
+    # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
 
@@ -283,34 +292,6 @@ class CompanionBridge(CompanionBase):
     @property
     def is_running(self) -> bool:
         return self._running
-
-    # -------------------------------------------------------------------------
-    # Advertisement
-    # -------------------------------------------------------------------------
-
-    async def advertise(self, flood: bool = True) -> bool:
-        flags = adv_type_to_flags(self.prefs.adv_type)
-        flags |= ADVERT_FLAG_HAS_NAME
-        lat, lon = 0.0, 0.0
-        if self.prefs.advert_loc_policy == ADVERT_LOC_SHARE:
-            lat, lon = self.prefs.latitude, self.prefs.longitude
-            if lat != 0.0 or lon != 0.0:
-                flags |= ADVERT_FLAG_HAS_LOCATION
-        route = "flood" if flood else "direct"
-        pkt = PacketBuilder.create_advert(
-            local_identity=self._identity,
-            name=self.prefs.node_name,
-            lat=lat,
-            lon=lon,
-            flags=flags,
-            route_type=route,
-        )
-        success = await self._packet_injector(pkt, wait_for_ack=False)
-        if success:
-            self.stats.record_tx(is_flood=flood)
-        else:
-            self.stats.record_tx_error()
-        return success
 
     # -------------------------------------------------------------------------
     # Messaging
@@ -382,9 +363,6 @@ class CompanionBridge(CompanionBase):
             self.stats.record_tx_error()
             return False
 
-    def sync_next_message(self) -> Optional[QueuedMessage]:
-        return self.message_queue.pop()
-
     async def send_raw_data(
         self,
         dest_key: bytes,
@@ -401,7 +379,7 @@ class CompanionBridge(CompanionBase):
             pkt, _ = PacketBuilder.create_protocol_request(
                 contact=proxy,
                 local_identity=self._identity,
-                protocol_code=0x00,
+                protocol_code=PROTOCOL_CODE_RAW_DATA,
                 data=data,
             )
             success = await self._packet_injector(pkt, wait_for_ack=False)
@@ -409,26 +387,6 @@ class CompanionBridge(CompanionBase):
         except Exception as e:
             logger.error(f"Error sending raw data: {e}")
             return SentResult(success=False)
-
-    # -------------------------------------------------------------------------
-    # Contact Management (share_contact override)
-    # -------------------------------------------------------------------------
-
-    async def share_contact(self, pub_key: bytes) -> bool:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return False
-        try:
-            pkt = PacketBuilder.create_advert(
-                local_identity=self._identity,
-                name=contact.name,
-                flags=adv_type_to_flags(contact.adv_type) | ADVERT_FLAG_HAS_NAME,
-                route_type="direct",
-            )
-            return await self._packet_injector(pkt, wait_for_ack=False)
-        except Exception as e:
-            logger.error(f"Error sharing contact: {e}")
-            return False
 
     # -------------------------------------------------------------------------
     # Path & Routing
@@ -453,93 +411,6 @@ class CompanionBridge(CompanionBase):
         except Exception as e:
             logger.error(f"Error sending trace: {e}")
             return False
-
-    async def send_trace_path_raw(
-        self,
-        tag: int,
-        auth_code: int,
-        flags: int,
-        path_bytes: bytes,
-    ) -> bool:
-        """Send a trace packet with an explicit path (e.g. from CMD_SEND_TRACE_PATH). Matches firmware behavior."""
-        try:
-            path_list = list(path_bytes)
-            pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path_list)
-            return await self._packet_injector(pkt, wait_for_ack=False)
-        except Exception as e:
-            logger.error(f"Error sending trace (raw path): {e}")
-            return False
-
-    async def _try_handle_path_discovery(
-        self, tag_bytes: bytes, path_info: tuple
-    ) -> bool:
-        """If tag is pending path discovery, fire path_discovery_response and return True."""
-        out_path, in_path, contact_pubkey = path_info
-        tag_int = int.from_bytes(tag_bytes, "little")
-        if tag_int not in self._pending_discovery_tags:
-            return False
-        self._pending_discovery_tags.discard(tag_int)
-        await self._fire_callbacks(
-            "path_discovery_response",
-            tag_bytes,
-            contact_pubkey,
-            out_path,
-            in_path,
-        )
-        return True
-
-    async def send_path_discovery(self, pub_key: bytes) -> bool:
-        """Legacy: send path discovery without returning tag. Prefer send_path_discovery_req."""
-        result = await self.send_path_discovery_req(pub_key)
-        return result.success
-
-    async def send_path_discovery_req(self, pub_key: bytes) -> SentResult:
-        """Send path discovery (flood telemetry request with tag). Returns SentResult for RESP_CODE_SENT.
-        When path return arrives with matching tag, path_discovery_response is fired (PUSH 0x8D)."""
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return SentResult(success=False)
-        proxy = self.contacts.get_by_name(contact.name)
-        if not proxy:
-            return SentResult(success=False)
-        tag_int = random.randint(0, 0xFFFFFFFF)
-        tag_bytes = tag_int.to_bytes(4, "little")
-        # Firmware: REQ_TYPE_GET_TELEMETRY_DATA, ~TELEM_PERM_BASE, reserved(3), random(4) -> 9 bytes; tag is from sendRequest.
-        # We send tag(4) + type(1) + perm(1) + reserved(3) = 9 bytes so response echoes our tag.
-        inv_perm = 0xFF & ~TELEM_PERM_BASE
-        req_payload = tag_bytes + bytes(
-            [REQ_TYPE_GET_TELEMETRY_DATA, inv_perm, 0, 0, 0]
-        )
-        old_path_len = contact.out_path_len
-        old_path = contact.out_path
-        contact.out_path_len = -1
-        contact.out_path = b""
-        self.contacts.update(contact)
-        try:
-            pkt, _ = PacketBuilder.create_protocol_request(
-                contact=proxy,
-                local_identity=self._identity,
-                protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
-                data=req_payload,
-            )
-            success = await self._packet_injector(pkt, wait_for_ack=False)
-            if success:
-                self._pending_discovery_tags.add(tag_int)
-            return SentResult(
-                success=success,
-                is_flood=True,
-                expected_ack=tag_int,
-                timeout_ms=10000,
-            )
-        except Exception as e:
-            logger.error(f"Error in path discovery: {e}")
-            return SentResult(success=False)
-        finally:
-            current = self.contacts.get_by_key(pub_key)
-            if current and current.out_path_len == -1:
-                current.out_path_len = old_path_len
-                current.out_path = old_path
-                self.contacts.update(current)
 
     async def send_control_data(self, data: bytes) -> bool:
         """Send a CONTROL packet (e.g. discovery request). data = first byte flags/type (0x80 set for DISCOVER_REQ) + payload.
@@ -709,58 +580,12 @@ class CompanionBridge(CompanionBase):
         finally:
             self._protocol_response_handler.clear_response_callback(contact_hash)
 
-    async def send_binary_req(
-        self, pub_key: bytes, data: bytes, timeout_seconds: float = 15.0
-    ) -> SentResult:
-        """Send binary request (CMD_SEND_BINARY_REQ). data = request_type(1) + optional payload.
-        Returns SentResult with expected_ack (4-byte tag as int) and timeout_ms for RESP_CODE_SENT.
-        """
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return SentResult(success=False)
-        proxy = self.contacts.get_by_name(contact.name)
-        if not proxy:
-            return SentResult(success=False)
-        tag_int = random.randint(0, 0xFFFFFFFF)
-        tag_bytes = tag_int.to_bytes(4, "little")
-        tag_hex = tag_bytes.hex()
-        request_type = data[0] if len(data) >= 1 else 0
-        req_payload = tag_bytes + data
-        self.cleanup_expired_binary_requests()
-        self.register_binary_request(
-            tag_hex,
-            request_type=request_type,
-            timeout_seconds=timeout_seconds,
-            pubkey_prefix=pub_key[:6].hex(),
-        )
-        try:
-            pkt, _ = PacketBuilder.create_protocol_request(
-                contact=proxy,
-                local_identity=self._identity,
-                protocol_code=0x02,
-                data=req_payload,
-            )
-            success = await self._packet_injector(pkt, wait_for_ack=False)
-        except Exception as e:
-            logger.error(f"Binary request send error: {e}")
-            self._pending_binary_requests.pop(tag_hex, None)
-            return SentResult(success=False)
-        if not success:
-            self._pending_binary_requests.pop(tag_hex, None)
-            return SentResult(success=False)
-        return SentResult(
-            success=True,
-            is_flood=contact.out_path_len <= 0,
-            expected_ack=tag_int,
-            timeout_ms=10000,
-        )
-
     async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
         """Legacy: send binary request and wait for response via waiter. Prefer send_binary_req + on_binary_response."""
-        return await self._send_protocol_request(pub_key, 0x02, data)
+        return await self._send_protocol_request(pub_key, PROTOCOL_CODE_BINARY_REQ, data)
 
     async def send_anon_request(self, pub_key: bytes, data: bytes) -> dict:
-        return await self._send_protocol_request(pub_key, 0x07, data)
+        return await self._send_protocol_request(pub_key, PROTOCOL_CODE_ANON_REQ, data)
 
     async def _send_protocol_request(
         self, pub_key: bytes, protocol_code: int, data: bytes

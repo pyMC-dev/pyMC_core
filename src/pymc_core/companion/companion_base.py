@@ -10,18 +10,24 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import random
 import struct
 import time
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 from ..node.events import EventService, EventSubscriber, MeshEvents
-from ..protocol import LocalIdentity, PacketBuilder
+from ..protocol import LocalIdentity, Packet, PacketBuilder
 from ..protocol.constants import (
+    ADVERT_FLAG_HAS_LOCATION,
     ADVERT_FLAG_HAS_NAME,
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
+    ADVERT_FLAG_IS_SENSOR,
+    REQ_TYPE_GET_TELEMETRY_DATA,
+    TELEM_PERM_BASE,
 )
 from .channel_store import ChannelStore
 from .constants import (
@@ -33,14 +39,16 @@ from .constants import (
     DEFAULT_MAX_CHANNELS,
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
+    DEFAULT_RESPONSE_TIMEOUT_MS,
     MAX_SIGN_DATA_SIZE,
+    PROTOCOL_CODE_BINARY_REQ,
     STATS_TYPE_CORE,
     STATS_TYPE_PACKETS,
     STATS_TYPE_RADIO,
 )
 from .contact_store import ContactStore
 from .message_queue import MessageQueue
-from .models import AdvertPath, Channel, Contact, NodePrefs, QueuedMessage
+from .models import AdvertPath, Channel, Contact, NodePrefs, QueuedMessage, SentResult
 from .path_cache import PathCache
 from .stats_collector import StatsCollector
 
@@ -108,12 +116,12 @@ def adv_type_to_flags(adv_type: int) -> int:
     elif adv_type == ADV_TYPE_ROOM:
         return ADVERT_FLAG_IS_ROOM_SERVER
     elif adv_type == ADV_TYPE_SENSOR:
-        return 0x04
+        return ADVERT_FLAG_IS_SENSOR
     return ADVERT_FLAG_IS_CHAT_NODE
 
 
-class CompanionBase:
-    """Base class for companion implementations.
+class CompanionBase(ABC):
+    """Abstract base class for companion implementations.
 
     Provides shared stores, event handling, contact management, device config,
     and push callbacks. Subclasses implement TX (via node or packet_injector).
@@ -164,6 +172,8 @@ class CompanionBase:
 
         # Pending binary requests by tag (hex) for matching responses
         self._pending_binary_requests: dict[str, dict] = {}
+        # Pending path discovery tags for matching responses
+        self._pending_discovery_tags: set[int] = set()
 
         # GRP_TXT dedup by packet hash: match Mesh.cpp behavior (only process when !_tables->hasSeen(pkt)),
         # so companion queues one frame per logical message like the firmware.
@@ -180,26 +190,32 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def get_contacts(self, since: int = 0) -> list[Contact]:
+        """Return all contacts, optionally filtered by modification time."""
         return self.contacts.get_all(since=since)
 
     def get_contact_by_key(self, pub_key: bytes) -> Optional[Contact]:
+        """Look up a contact by its full 32-byte public key."""
         return self.contacts.get_by_key(pub_key)
 
     def get_contact_by_name(self, name: str) -> Optional[Contact]:
+        """Look up a contact by name, returning the full Contact or None."""
         proxy = self.contacts.get_by_name(name)
         if proxy:
             return self.contacts.get_by_key(bytes.fromhex(proxy.public_key))
         return None
 
     def add_update_contact(self, contact: Contact) -> bool:
+        """Add or update a contact, setting lastmod if unset."""
         if contact.lastmod == 0:
             contact.lastmod = int(time.time())
         return self.contacts.add(contact)
 
     def remove_contact(self, pub_key: bytes) -> bool:
+        """Remove a contact by public key."""
         return self.contacts.remove(pub_key)
 
     def export_contact(self, pub_key: Optional[bytes] = None) -> Optional[bytes]:
+        """Export a contact (or self) as a 73-byte binary packet."""
         if pub_key is None:
             key = self._identity.get_public_key()
             name = self.prefs.node_name.encode("utf-8")[:32]
@@ -231,6 +247,7 @@ class CompanionBase:
         )
 
     def import_contact(self, packet_data: bytes) -> bool:
+        """Import a contact from a 73-byte binary packet."""
         if len(packet_data) < 73:
             logger.warning(f"Import data too short: {len(packet_data)} bytes")
             return False
@@ -262,6 +279,7 @@ class CompanionBase:
         self.prefs.node_name = name[:31]
 
     def set_advert_latlon(self, lat: float, lon: float) -> None:
+        """Set the GPS coordinates included in advertisements."""
         if not (-90.0 <= lat <= 90.0):
             raise ValueError(f"Latitude out of range: {lat}")
         if not (-180.0 <= lon <= 180.0):
@@ -270,6 +288,7 @@ class CompanionBase:
         self.prefs.longitude = lon
 
     def set_radio_params(self, freq_hz: int, bw_hz: int, sf: int, cr: int) -> bool:
+        """Set radio parameters (frequency, bandwidth, SF, CR)."""
         if not (5 <= sf <= 12):
             raise ValueError(f"Spreading factor out of range: {sf}")
         if not (5 <= cr <= 8):
@@ -281,14 +300,17 @@ class CompanionBase:
         return True
 
     def set_tx_power(self, power_dbm: int) -> bool:
+        """Set the transmit power in dBm."""
         self.prefs.tx_power_dbm = power_dbm
         return True
 
     def set_tuning_params(self, rx_delay: float, airtime_factor: float) -> None:
+        """Set RX delay and airtime factor tuning parameters."""
         self.prefs.rx_delay_base = rx_delay
         self.prefs.airtime_factor = airtime_factor
 
     def get_tuning_params(self) -> tuple[float, float]:
+        """Return the current (rx_delay, airtime_factor) tuning parameters."""
         return (self.prefs.rx_delay_base, self.prefs.airtime_factor)
 
     def set_other_params(
@@ -298,6 +320,7 @@ class CompanionBase:
         advert_loc_policy: int,
         multi_acks: int,
     ) -> None:
+        """Set additional node parameters (manual add, telemetry, location, multi-acks)."""
         self.prefs.manual_add_contacts = manual_add
         self.prefs.telemetry_mode_base = telemetry_modes & 0x03
         self.prefs.telemetry_mode_location = (telemetry_modes >> 2) & 0x03
@@ -306,9 +329,11 @@ class CompanionBase:
         self.prefs.multi_acks = multi_acks
 
     def get_self_info(self) -> NodePrefs:
+        """Return a copy of the current node preferences."""
         return copy.copy(self.prefs)
 
     def get_public_key(self) -> bytes:
+        """Return this node's 32-byte Ed25519 public key."""
         return self._identity.get_public_key()
 
     # -------------------------------------------------------------------------
@@ -316,6 +341,7 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def reset_path(self, pub_key: bytes) -> bool:
+        """Reset the outbound routing path for a contact."""
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return False
@@ -325,6 +351,7 @@ class CompanionBase:
         return True
 
     def get_advert_path(self, pub_key_prefix: bytes) -> Optional[AdvertPath]:
+        """Look up a cached advert path by public key prefix."""
         return self.path_cache.get_by_prefix(pub_key_prefix)
 
     # -------------------------------------------------------------------------
@@ -332,9 +359,11 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def get_channel(self, idx: int) -> Optional[Channel]:
+        """Return the channel at the given index, or None."""
         return self.channels.get(idx)
 
     def set_channel(self, idx: int, name: str, secret: bytes) -> bool:
+        """Set a channel at the given index with name and 32-byte secret."""
         # MeshCore DataStore uses 32-byte secret; GroupTextHandler uses up to 32 for HMAC
         if len(secret) < 32:
             secret = secret + b"\x00" * (32 - len(secret))
@@ -347,10 +376,12 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def sign_start(self) -> int:
+        """Begin a signing session; returns the maximum sign buffer size."""
         self._sign_buffer = bytearray()
         return MAX_SIGN_DATA_SIZE
 
     def sign_data(self, data: bytes) -> bool:
+        """Append data to the signing buffer."""
         if self._sign_buffer is None:
             logger.warning("sign_data called without sign_start")
             return False
@@ -377,6 +408,7 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def export_private_key(self) -> bytes:
+        """Return the raw signing key bytes for backup/export."""
         return self._identity.get_signing_key_bytes()
 
     # -------------------------------------------------------------------------
@@ -384,6 +416,7 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def set_flood_scope(self, transport_key: Optional[bytes] = None) -> None:
+        """Set or clear the flood transport key for scoped flooding."""
         if transport_key and len(transport_key) >= 16:
             self._flood_transport_key = transport_key[:16]
         else:
@@ -394,6 +427,7 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def get_stats(self, stats_type: int = STATS_TYPE_PACKETS) -> dict:
+        """Return statistics of the requested type (core, radio, or packets)."""
         if stats_type == STATS_TYPE_CORE:
             return {
                 "uptime_secs": self.stats.get_uptime_secs(),
@@ -420,9 +454,11 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def get_custom_vars(self) -> dict[str, str]:
+        """Return a copy of all custom variables."""
         return dict(self._custom_vars)
 
     def set_custom_var(self, name: str, value: str) -> bool:
+        """Set a custom variable by name."""
         self._custom_vars[name] = value
         return True
 
@@ -431,9 +467,11 @@ class CompanionBase:
     # -------------------------------------------------------------------------
 
     def get_autoadd_config(self) -> int:
+        """Return the current auto-add configuration bitmask."""
         return self.prefs.autoadd_config
 
     def set_autoadd_config(self, config: int) -> None:
+        """Set the auto-add configuration bitmask."""
         self.prefs.autoadd_config = config
 
     # -------------------------------------------------------------------------
@@ -544,7 +582,265 @@ class CompanionBase:
     async def _try_handle_path_discovery(
         self, tag_bytes: bytes, path_info: tuple
     ) -> bool:
-        """If this tag is a pending path discovery, fire path_discovery_response and return True. Override in bridge."""
+        """If tag is pending path discovery, fire path_discovery_response and return True."""
+        out_path, in_path, contact_pubkey = path_info
+        tag_int = int.from_bytes(tag_bytes, "little")
+        if tag_int not in self._pending_discovery_tags:
+            return False
+        self._pending_discovery_tags.discard(tag_int)
+        await self._fire_callbacks(
+            "path_discovery_response",
+            tag_bytes,
+            contact_pubkey,
+            out_path,
+            in_path,
+        )
+        return True
+
+    # -------------------------------------------------------------------------
+    # Abstract methods (subclasses must implement)
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    async def _send_packet(
+        self, pkt: Packet, wait_for_ack: bool = False
+    ) -> bool:
+        """Send a packet via the subclass transport (radio or packet_injector)."""
+
+    @abstractmethod
+    async def start(self) -> None:
+        """Start the companion."""
+
+    @abstractmethod
+    async def stop(self) -> None:
+        """Stop the companion."""
+
+    @property
+    @abstractmethod
+    def is_running(self) -> bool:
+        """Return whether the companion is currently running."""
+
+    @abstractmethod
+    async def send_text_message(
+        self,
+        pub_key: bytes,
+        text: str,
+        txt_type: int = 0,
+        attempt: int = 1,
+    ) -> SentResult:
+        """Send a direct text message to a contact."""
+
+    @abstractmethod
+    async def send_channel_message(self, channel_idx: int, text: str) -> bool:
+        """Send a message to a channel."""
+
+    @abstractmethod
+    async def send_login(self, pub_key: bytes, password: str) -> dict:
+        """Send a login request to a repeater."""
+
+    @abstractmethod
+    async def send_trace_path(
+        self,
+        pub_key: bytes,
+        tag: int,
+        auth_code: int,
+        flags: int = 0,
+    ) -> bool:
+        """Send a trace path request to a contact."""
+
+    @abstractmethod
+    def import_private_key(self, key: bytes) -> bool:
+        """Import a private key and rebuild the identity."""
+
+    @abstractmethod
+    async def send_control_data(self, data: Any = None) -> bool:
+        """Send a control data packet."""
+
+    # -------------------------------------------------------------------------
+    # Unified TX methods (shared between Radio and Bridge)
+    # -------------------------------------------------------------------------
+
+    async def advertise(self, flood: bool = True) -> bool:
+        """Broadcast an advertisement packet."""
+        flags = adv_type_to_flags(self.prefs.adv_type)
+        flags |= ADVERT_FLAG_HAS_NAME
+        lat, lon = 0.0, 0.0
+        if self.prefs.advert_loc_policy == ADVERT_LOC_SHARE:
+            lat, lon = self.prefs.latitude, self.prefs.longitude
+            if lat != 0.0 or lon != 0.0:
+                flags |= ADVERT_FLAG_HAS_LOCATION
+        route = "flood" if flood else "direct"
+        pkt = PacketBuilder.create_advert(
+            local_identity=self._identity,
+            name=self.prefs.node_name,
+            lat=lat,
+            lon=lon,
+            flags=flags,
+            route_type=route,
+        )
+        success = await self._send_packet(pkt, wait_for_ack=False)
+        if success:
+            self.stats.record_tx(is_flood=flood)
+        else:
+            self.stats.record_tx_error()
+        return success
+
+    async def share_contact(self, pub_key: bytes) -> bool:
+        """Share a contact's advert to the mesh."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return False
+        try:
+            pkt = PacketBuilder.create_advert(
+                local_identity=self._identity,
+                name=contact.name,
+                flags=adv_type_to_flags(contact.adv_type) | ADVERT_FLAG_HAS_NAME,
+                route_type="direct",
+            )
+            return await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Error sharing contact: {e}")
+            return False
+
+    async def send_trace_path_raw(
+        self,
+        tag: int,
+        auth_code: int,
+        flags: int,
+        path_bytes: bytes,
+    ) -> bool:
+        """Send a trace packet with an explicit path."""
+        try:
+            path_list = list(path_bytes)
+            pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path_list)
+            return await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Error sending trace (raw path): {e}")
+            return False
+
+    async def send_binary_req(
+        self, pub_key: bytes, data: bytes, timeout_seconds: float = 15.0
+    ) -> SentResult:
+        """Send binary request (CMD_SEND_BINARY_REQ).
+
+        data = request_type(1) + optional payload.
+        Returns SentResult with expected_ack (4-byte tag as int) and timeout_ms.
+        """
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        tag_int = random.randint(0, 0xFFFFFFFF)
+        tag_bytes = tag_int.to_bytes(4, "little")
+        tag_hex = tag_bytes.hex()
+        request_type = data[0] if len(data) >= 1 else 0
+        req_payload = tag_bytes + data
+        self.cleanup_expired_binary_requests()
+        self.register_binary_request(
+            tag_hex,
+            request_type=request_type,
+            timeout_seconds=timeout_seconds,
+            pubkey_prefix=pub_key[:6].hex(),
+        )
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=PROTOCOL_CODE_BINARY_REQ,
+                data=req_payload,
+            )
+            success = await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Binary request send error: {e}")
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        if not success:
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        return SentResult(
+            success=True,
+            is_flood=contact.out_path_len <= 0,
+            expected_ack=tag_int,
+            timeout_ms=DEFAULT_RESPONSE_TIMEOUT_MS,
+        )
+
+    async def send_path_discovery(self, pub_key: bytes) -> bool:
+        """Legacy: send path discovery without returning tag. Prefer send_path_discovery_req."""
+        result = await self.send_path_discovery_req(pub_key)
+        return result.success
+
+    async def send_path_discovery_req(self, pub_key: bytes) -> SentResult:
+        """Send path discovery (flood telemetry request with tag).
+
+        Returns SentResult for RESP_CODE_SENT. When path return arrives with
+        matching tag, path_discovery_response is fired (PUSH 0x8D).
+        """
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        tag_int = random.randint(0, 0xFFFFFFFF)
+        tag_bytes = tag_int.to_bytes(4, "little")
+        inv_perm = 0xFF & ~TELEM_PERM_BASE
+        req_payload = tag_bytes + bytes(
+            [REQ_TYPE_GET_TELEMETRY_DATA, inv_perm, 0, 0, 0]
+        )
+        old_path_len = contact.out_path_len
+        old_path = contact.out_path
+        contact.out_path_len = -1
+        contact.out_path = b""
+        self.contacts.update(contact)
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
+                data=req_payload,
+            )
+            success = await self._send_packet(pkt, wait_for_ack=False)
+            if success:
+                self._pending_discovery_tags.add(tag_int)
+            return SentResult(
+                success=success,
+                is_flood=True,
+                expected_ack=tag_int,
+                timeout_ms=DEFAULT_RESPONSE_TIMEOUT_MS,
+            )
+        except Exception as e:
+            logger.error(f"Error in path discovery: {e}")
+            return SentResult(success=False)
+        finally:
+            current = self.contacts.get_by_key(pub_key)
+            if current and current.out_path_len == -1:
+                current.out_path_len = old_path_len
+                current.out_path = old_path
+                self.contacts.update(current)
+
+    def sync_next_message(self) -> Optional[QueuedMessage]:
+        """Pop and return the next queued message, or None."""
+        return self.message_queue.pop()
+
+    # -------------------------------------------------------------------------
+    # Dedup Helper
+    # -------------------------------------------------------------------------
+
+    def _check_dedup(
+        self, cache: OrderedDict, key: str, ttl: float, max_size: int
+    ) -> bool:
+        """Return True if *key* is a duplicate. Evicts expired entries."""
+        now = time.time()
+        if key in cache:
+            return True
+        expired = [k for k, ts in cache.items() if now - ts > ttl]
+        for k in expired:
+            del cache[k]
+        cache[key] = now
+        if len(cache) > max_size:
+            cache.popitem(last=False)
         return False
 
     # -------------------------------------------------------------------------
@@ -571,16 +867,10 @@ class CompanionBase:
     async def _handle_new_message(self, data: dict) -> None:
         # Deduplicate by packet hash so reconnects don't queue the same packet multiple times.
         pkt_hash = data.get("packet_hash")
-        if pkt_hash:
-            now = time.time()
-            if pkt_hash in self._seen_txt:
-                return
-            expired = [k for k, ts in self._seen_txt.items() if now - ts > self._seen_txt_ttl]
-            for k in expired:
-                del self._seen_txt[k]
-            self._seen_txt[pkt_hash] = now
-            if len(self._seen_txt) > self._seen_txt_max:
-                self._seen_txt.popitem(last=False)
+        if pkt_hash and self._check_dedup(
+            self._seen_txt, pkt_hash, self._seen_txt_ttl, self._seen_txt_max
+        ):
+            return
 
         sender_key_hex = data.get("contact_pubkey", "")
         sender_key = bytes.fromhex(sender_key_hex) if sender_key_hex else b""
@@ -601,22 +891,17 @@ class CompanionBase:
             message_text,
             msg.timestamp,
             msg.txt_type,
+            pkt_hash,
         )
 
     async def _handle_new_channel_message(self, data: dict) -> None:
         # Deduplicate by packet hash so we queue one frame per logical message, matching
         # firmware: Mesh.cpp only calls onChannelMessageRecv when !_tables->hasSeen(pkt).
         pkt_hash = data.get("packet_hash")
-        if pkt_hash:
-            now = time.time()
-            if pkt_hash in self._seen_grp_txt:
-                return
-            expired = [k for k, ts in self._seen_grp_txt.items() if now - ts > self._seen_grp_txt_ttl]
-            for k in expired:
-                del self._seen_grp_txt[k]
-            self._seen_grp_txt[pkt_hash] = now
-            if len(self._seen_grp_txt) > self._seen_grp_txt_max:
-                self._seen_grp_txt.popitem(last=False)
+        if pkt_hash and self._check_dedup(
+            self._seen_grp_txt, pkt_hash, self._seen_grp_txt_ttl, self._seen_grp_txt_max
+        ):
+            return
 
         path_len = data.get("path_len", 0)
         channel_name = data.get("channel_name", "")
@@ -648,6 +933,7 @@ class CompanionBase:
             msg.timestamp,
             path_len,
             channel_idx,
+            pkt_hash,
         )
 
     async def _fire_callbacks(self, event_name: str, *args: Any) -> None:

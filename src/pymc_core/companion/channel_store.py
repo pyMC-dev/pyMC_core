@@ -1,5 +1,7 @@
 """In-memory channel storage compatible with MeshNode's channel_db interface."""
 
+from __future__ import annotations
+
 from typing import Optional
 
 from .constants import DEFAULT_MAX_CHANNELS
@@ -78,6 +80,6 @@ class ChannelStore:
         """Return the number of configured channels."""
         return sum(1 for ch in self._channels if ch is not None)
 
-    def clear(self):
+    def clear(self) -> None:
         """Remove all channels."""
         self._channels = [None] * self._max_channels

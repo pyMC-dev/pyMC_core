@@ -13,6 +13,7 @@ from pymc_core.protocol.constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
+    ADVERT_FLAG_IS_SENSOR,
 )
 
 
@@ -70,7 +71,7 @@ class TestAdvTypeToFlags:
         assert adv_type_to_flags(ADV_TYPE_ROOM) == ADVERT_FLAG_IS_ROOM_SERVER
 
     def test_sensor(self):
-        assert adv_type_to_flags(ADV_TYPE_SENSOR) == 0x04
+        assert adv_type_to_flags(ADV_TYPE_SENSOR) == ADVERT_FLAG_IS_SENSOR
 
     def test_unknown_defaults_to_chat(self):
         assert adv_type_to_flags(99) == ADVERT_FLAG_IS_CHAT_NODE

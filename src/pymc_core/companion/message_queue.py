@@ -1,5 +1,7 @@
 """Fixed-size offline message queue for companion radio."""
 
+from __future__ import annotations
+
 from collections import deque
 from typing import Optional
 
@@ -59,6 +61,6 @@ class MessageQueue:
         """Return the number of messages in the queue."""
         return len(self._queue)
 
-    def clear(self):
+    def clear(self) -> None:
         """Remove all messages from the queue."""
         self._queue.clear()

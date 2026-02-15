@@ -1,5 +1,7 @@
 """Packet and radio statistics collector for companion radio."""
 
+from __future__ import annotations
+
 import time
 
 from .models import PacketStats
@@ -12,25 +14,25 @@ class StatsCollector:
     Matches the firmware's statistics reporting via CMD_GET_STATS.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.packets = PacketStats()
         self._start_time = time.time()
 
-    def record_tx(self, is_flood: bool):
+    def record_tx(self, is_flood: bool) -> None:
         """Record a successful transmission."""
         if is_flood:
             self.packets.flood_tx += 1
         else:
             self.packets.direct_tx += 1
 
-    def record_rx(self, is_flood: bool):
+    def record_rx(self, is_flood: bool) -> None:
         """Record a successful reception."""
         if is_flood:
             self.packets.flood_rx += 1
         else:
             self.packets.direct_rx += 1
 
-    def record_tx_error(self):
+    def record_tx_error(self) -> None:
         """Record a transmission error."""
         self.packets.tx_errors += 1
 
@@ -51,7 +53,7 @@ class StatsCollector:
             "uptime_secs": self.get_uptime_secs(),
         }
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset all counters and restart uptime."""
         self.packets = PacketStats()
         self._start_time = time.time()
