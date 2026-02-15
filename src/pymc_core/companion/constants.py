@@ -67,7 +67,7 @@ class BinaryReqType:
 # Default configuration
 # ---------------------------------------------------------------------------
 DEFAULT_MAX_CONTACTS = 1000
-DEFAULT_OFFLINE_QUEUE_SIZE = 16
+DEFAULT_OFFLINE_QUEUE_SIZE = 512
 DEFAULT_MAX_CHANNELS = 40
 CONTACT_NAME_SIZE = 32
 MAX_SIGN_DATA_SIZE = 8192  # 8KB signing buffer (matches firmware)

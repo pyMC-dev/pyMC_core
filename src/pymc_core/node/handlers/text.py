@@ -202,6 +202,7 @@ class TextMessageHandler(BaseHandler):
                     },
                     "sender_name": matched_contact.name,
                     "is_read": False,
+                    "packet_hash": packet.calculate_packet_hash().hex().upper(),
                 }
 
                 # Publish new message event for app to handle database storage

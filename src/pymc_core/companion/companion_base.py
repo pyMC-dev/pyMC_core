@@ -170,6 +170,10 @@ class CompanionBase:
         self._seen_grp_txt: OrderedDict[str, float] = OrderedDict()
         self._seen_grp_txt_ttl = 300
         self._seen_grp_txt_max = 1000
+        # TXT_MSG (direct) dedup by packet hash so reconnects don't queue the same packet multiple times.
+        self._seen_txt: OrderedDict[str, float] = OrderedDict()
+        self._seen_txt_ttl = 300
+        self._seen_txt_max = 1000
 
     # -------------------------------------------------------------------------
     # Contact Management
@@ -565,6 +569,19 @@ class CompanionBase:
             logger.error(f"Error handling mesh event {event_type}: {e}")
 
     async def _handle_new_message(self, data: dict) -> None:
+        # Deduplicate by packet hash so reconnects don't queue the same packet multiple times.
+        pkt_hash = data.get("packet_hash")
+        if pkt_hash:
+            now = time.time()
+            if pkt_hash in self._seen_txt:
+                return
+            expired = [k for k, ts in self._seen_txt.items() if now - ts > self._seen_txt_ttl]
+            for k in expired:
+                del self._seen_txt[k]
+            self._seen_txt[pkt_hash] = now
+            if len(self._seen_txt) > self._seen_txt_max:
+                self._seen_txt.popitem(last=False)
+
         sender_key_hex = data.get("contact_pubkey", "")
         sender_key = bytes.fromhex(sender_key_hex) if sender_key_hex else b""
         # Handler publishes "message_text"; accept "text" for compatibility

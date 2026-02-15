@@ -4,6 +4,7 @@ import pytest
 
 from pymc_core.companion import CompanionBridge
 from pymc_core.companion.models import Contact
+from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import LocalIdentity, Packet
 from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ADVERT,
@@ -243,3 +244,32 @@ class TestCompanionBridgeBinaryReq:
         assert result.success is True
         assert result.expected_ack is not None
         assert len(injector.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deduplication (direct messages by packet_hash)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeDeduplication:
+    async def test_direct_message_deduplicated_by_packet_hash(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        key_hex = LocalIdentity().get_public_key().hex()
+        same_hash = "A1B2C3D4E5F6"
+        data = {
+            "contact_pubkey": key_hex,
+            "message_text": "Hello",
+            "timestamp": 1000,
+            "txt_type": 0,
+            "packet_hash": same_hash,
+        }
+        await bridge._handle_mesh_event(MeshEvents.NEW_MESSAGE, data)
+        await bridge._handle_mesh_event(MeshEvents.NEW_MESSAGE, data)
+        await bridge._handle_mesh_event(MeshEvents.NEW_MESSAGE, data)
+        assert bridge.message_queue.count == 1
+        msg = bridge.sync_next_message()
+        assert msg is not None
+        assert msg.text == "Hello"
+        assert bridge.sync_next_message() is None
