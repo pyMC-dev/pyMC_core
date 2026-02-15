@@ -1,0 +1,245 @@
+"""Tests for CompanionBridge (repeater-integrated companion with packet_injector)."""
+
+import pytest
+
+from pymc_core.companion import CompanionBridge
+from pymc_core.companion.models import Contact
+from pymc_core.protocol import LocalIdentity, Packet
+from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_TXT_MSG,
+    ROUTE_TYPE_FLOOD,
+)
+
+
+def _make_peer_contact(name: str) -> Contact:
+    """Return a contact with a valid Ed25519 public key (required for packet encryption)."""
+    peer = LocalIdentity()
+    return Contact(public_key=peer.get_public_key(), name=name)
+
+
+class MockPacketInjector:
+    """Records injected packets and returns True by default."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def __call__(self, pkt: Packet, wait_for_ack: bool = False) -> bool:
+        self.calls.append((pkt, wait_for_ack))
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Init
+# ---------------------------------------------------------------------------
+
+
+class TestCompanionBridgeInit:
+    def test_init_creates_stores(self):
+        injector = MockPacketInjector()
+        identity = LocalIdentity()
+        bridge = CompanionBridge(identity, injector, node_name="BridgeNode")
+        assert bridge.contacts is not None
+        assert bridge.contacts.get_count() == 0
+        assert bridge.channels is not None
+        assert bridge.stats is not None
+        assert bridge.prefs.node_name == "BridgeNode"
+        assert bridge.get_public_key() == identity.get_public_key()
+        assert injector.calls == []
+
+    def test_init_with_authenticate_callback(self):
+        def auth_cb(*args, **kwargs):
+            return (True, 0)
+
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(
+            LocalIdentity(),
+            injector,
+            authenticate_callback=auth_cb,
+        )
+        assert bridge._handlers is not None
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeLifecycle:
+    async def test_start_stop(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        assert bridge.is_running is False
+        await bridge.start()
+        assert bridge.is_running is True
+        await bridge.stop()
+        assert bridge.is_running is False
+
+
+# ---------------------------------------------------------------------------
+# process_received_packet
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeProcessReceivedPacket:
+    async def test_process_packet_records_rx_stats(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        await bridge.start()
+        pkt = Packet()
+        pkt.header = (ROUTE_TYPE_FLOOD << 0) | (PAYLOAD_TYPE_ADVERT << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray()
+        pkt.payload_len = 0
+        await bridge.process_received_packet(pkt)
+        tot = bridge.stats.get_totals()
+        assert tot["flood_rx"] == 1
+        await bridge.stop()
+
+    async def test_process_unknown_type_no_crash(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        pkt = Packet()
+        pkt.header = (ROUTE_TYPE_FLOOD << 0) | (15 << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray()
+        pkt.payload_len = 0
+        await bridge.process_received_packet(pkt)
+        assert True
+
+
+# ---------------------------------------------------------------------------
+# Advertise
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeAdvertise:
+    async def test_advertise_injects_packet(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.advertise(flood=True)
+        assert result is True
+        assert len(injector.calls) == 1
+        pkt, wait_for_ack = injector.calls[0]
+        assert pkt is not None
+        assert (pkt.header >> 2) & 0x0F == PAYLOAD_TYPE_ADVERT
+        assert wait_for_ack is False
+        assert bridge.stats.get_totals()["flood_tx"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Send text, share contact
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeSendAndShare:
+    async def test_send_text_message_no_contact(self, caplog):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_text_message(b"\x00" * 32, "Hi")
+        assert result.success is False
+        assert len(injector.calls) == 0
+
+    async def test_send_text_message_with_contact_injects_packet(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        contact = _make_peer_contact("Alice")
+        bridge.contacts.add(contact)
+        result = await bridge.send_text_message(contact.public_key, "Hello")
+        assert len(injector.calls) >= 1
+        pkt, _ = injector.calls[0]
+        assert (pkt.header >> 2) & 0x0F == PAYLOAD_TYPE_TXT_MSG
+
+    async def test_share_contact_not_found(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.share_contact(b"\x00" * 32)
+        assert result is False
+        assert len(injector.calls) == 0
+
+    async def test_share_contact_success(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        key = b"\x22" * 32
+        bridge.contacts.add(Contact(public_key=key, name="Bob"))
+        result = await bridge.share_contact(key)
+        assert result is True
+        assert len(injector.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Path discovery, trace, control data
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgePathAndControl:
+    async def test_send_path_discovery_req_no_contact(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_path_discovery_req(b"\x00" * 32)
+        assert result.success is False
+
+    async def test_send_path_discovery_req_success(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        contact = _make_peer_contact("Target")
+        bridge.contacts.add(contact)
+        result = await bridge.send_path_discovery_req(contact.public_key)
+        assert result.success is True
+        assert len(injector.calls) == 1
+        assert result.timeout_ms == 10000
+
+    async def test_send_trace_path_raw(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_trace_path_raw(0x12345678, 0xABCD, 0, bytes([0x01, 0x02]))
+        assert result is True
+        assert len(injector.calls) == 1
+
+    async def test_send_control_data_valid_payload(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_control_data(bytes([0x80, 0x01]))
+        assert result is True
+        assert len(injector.calls) == 1
+        pkt, _ = injector.calls[0]
+        assert pkt.payload_len == 2
+        assert list(pkt.payload) == [0x80, 0x01]
+
+    async def test_send_control_data_rejects_no_high_bit(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_control_data(bytes([0x00, 0x01]))
+        assert result is False
+        assert len(injector.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Binary request
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeBinaryReq:
+    async def test_send_binary_req_no_contact(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        result = await bridge.send_binary_req(b"\x00" * 32, bytes([0x01]))
+        assert result.success is False
+
+    async def test_send_binary_req_with_contact(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        contact = _make_peer_contact("Rpt")
+        bridge.contacts.add(contact)
+        result = await bridge.send_binary_req(contact.public_key, bytes([0x01]), timeout_seconds=5.0)
+        assert result.success is True
+        assert result.expected_ack is not None
+        assert len(injector.calls) == 1
