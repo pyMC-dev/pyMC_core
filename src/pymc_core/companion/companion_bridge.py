@@ -40,7 +40,7 @@ from ..protocol.constants import (
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
 )
-from ..protocol.constants import REQ_TYPE_GET_TELEMETRY_DATA, TELEM_PERM_BASE
+from ..protocol.constants import REQ_TYPE_GET_STATUS, REQ_TYPE_GET_TELEMETRY_DATA, TELEM_PERM_BASE
 from .companion_base import CompanionBase, ResponseWaiter, adv_type_to_flags
 from .constants import (
     ADV_TYPE_CHAT,
@@ -331,16 +331,18 @@ class CompanionBridge(CompanionBase):
         if not proxy:
             return SentResult(success=False)
         try:
+            is_flood = proxy.out_path_len < 0
+            msg_type = "flood" if is_flood else "direct"
             pkt, ack_crc = PacketBuilder.create_text_message(
                 contact=proxy,
                 local_identity=self._identity,
                 message=text,
                 attempt=attempt,
+                message_type=msg_type,
             )
             if len(self._pending_ack_crcs) < MAX_PENDING_ACK_CRCS:
                 self._pending_ack_crcs.add(ack_crc)
             success = await self._packet_injector(pkt, wait_for_ack=True)
-            is_flood = contact.out_path_len <= 0
             if success:
                 self.stats.record_tx(is_flood=is_flood)
             else:
@@ -621,8 +623,47 @@ class CompanionBridge(CompanionBase):
             self._login_response_handler.set_login_callback(None)
             self._login_response_handler.clear_login_password(dest_hash)
 
-    async def send_status_request(self, pub_key: bytes) -> dict:
-        return await self.send_repeater_command(pub_key, "status")
+    async def send_status_request(self, pub_key: bytes, timeout: float = 15.0) -> dict:
+        """Send a protocol request for repeater stats (REQ_TYPE_GET_STATUS).
+
+        The firmware handles CMD_SEND_STATUS_REQ by calling
+        ``sendRequest(*recipient, REQ_TYPE_GET_STATUS, tag, est_timeout)``
+        which creates a PAYLOAD_TYPE_REQ packet.  The remote repeater replies
+        with a PAYLOAD_TYPE_RESPONSE containing ``reflected_timestamp(4) +
+        RepeaterStats(48)``.
+        """
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        contact_hash = bytes.fromhex(proxy.public_key)[0]
+        waiter = ResponseWaiter()
+        self._protocol_response_handler.set_response_callback(
+            contact_hash, waiter.callback
+        )
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_STATUS,
+                data=b"",
+            )
+            await self._packet_injector(pkt, wait_for_ack=False)
+            result = await waiter.wait(timeout)
+            return {
+                "success": result.get("success", False),
+                "repeater": contact.name,
+                "stats": result.get("parsed", {}),
+                "response_text": result.get("text"),
+                "reason": "Stats received" if result.get("success") else "Stats request failed",
+            }
+        except Exception as e:
+            logger.error(f"Status request error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            self._protocol_response_handler.clear_response_callback(contact_hash)
 
     async def send_telemetry_request(
         self,
@@ -778,12 +819,13 @@ class CompanionBridge(CompanionBase):
 
         self._text_handler.set_command_response_callback(_response_cb)
         try:
+            msg_type = "flood" if proxy.out_path_len < 0 else "direct"
             pkt, ack_crc = PacketBuilder.create_text_message(
                 contact=proxy,
                 local_identity=self._identity,
                 message=full_command,
                 attempt=1,
-                message_type="command",
+                message_type=msg_type,
             )
             await self._packet_injector(pkt, wait_for_ack=True)
             try:

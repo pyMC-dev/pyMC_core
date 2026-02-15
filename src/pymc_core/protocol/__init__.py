@@ -42,6 +42,7 @@ from .constants import (
     PH_VER_MASK,
     PH_VER_SHIFT,
     PUB_KEY_SIZE,
+    REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_DIRECT,
     ROUTE_TYPE_FLOOD,
@@ -148,7 +149,8 @@ __all__ = [
     "CONTACT_TYPE_REPEATER",
     "CONTACT_TYPE_ROOM_SERVER",
     "CONTACT_TYPE_HYBRID",
-    # Telemetry
+    # Protocol request types
+    "REQ_TYPE_GET_STATUS",
     "REQ_TYPE_GET_TELEMETRY_DATA",
     "TELEM_PERM_BASE",
     "TELEM_PERM_LOCATION",

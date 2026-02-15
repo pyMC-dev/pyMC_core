@@ -107,9 +107,9 @@ CONTACT_TYPE_ROOM_SERVER = 3  # Equivalent to C++ ADV_TYPE_ROOM
 CONTACT_TYPE_HYBRID = 4
 
 
-# Telemetry Permissions
-
-REQ_TYPE_GET_TELEMETRY_DATA = 0x03
+# Protocol Request Types
+REQ_TYPE_GET_STATUS = 0x01          # Get repeater stats (RepeaterStats struct)
+REQ_TYPE_GET_TELEMETRY_DATA = 0x03  # Get telemetry data (CayenneLPP)
 TELEM_PERM_BASE = 0x01
 TELEM_PERM_LOCATION = 0x02
 TELEM_PERM_ENVIRONMENT = 0x04

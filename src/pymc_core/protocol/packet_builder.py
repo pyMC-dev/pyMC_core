@@ -469,9 +469,24 @@ class PacketBuilder:
         contact_identity = Identity(contact_pubkey)
         shared_secret = contact_identity.calc_shared_secret(local_identity.get_private_key())
 
-        return PacketBuilder.create_anon_req(
-            contact_identity, local_identity, shared_secret, plaintext, "direct"
+        out_path_len = getattr(contact, "out_path_len", -1)
+        if out_path_len < 0:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        pkt = PacketBuilder.create_anon_req(
+            contact_identity, local_identity, shared_secret, plaintext, route_type
         )
+
+        if route_type == "direct" and out_path_len > 0:
+            out_path = getattr(contact, "out_path", b"")
+            if out_path:
+                path_bytes = out_path[:MAX_PATH_SIZE]
+                pkt.path = bytearray(path_bytes)
+                pkt.path_len = len(pkt.path)
+
+        return pkt
 
     @staticmethod
     def create_group_datagram(
@@ -807,8 +822,22 @@ class PacketBuilder:
             contact, local_identity, plaintext
         )
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ)
+        out_path_len = getattr(contact, "out_path_len", -1)
+        if out_path_len < 0:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ, route_type)
         packet = PacketBuilder._create_packet(header, payload)
+
+        if route_type == "direct" and out_path_len > 0:
+            out_path = getattr(contact, "out_path", b"")
+            if out_path:
+                path_bytes = out_path[:MAX_PATH_SIZE]
+                packet.path = bytearray(path_bytes)
+                packet.path_len = len(packet.path)
+
         return packet, timestamp
 
     @staticmethod

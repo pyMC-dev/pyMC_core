@@ -3,7 +3,7 @@ import struct
 from typing import Callable, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet
-from ...protocol.constants import PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_RESPONSE
+from ...protocol.constants import MAX_PATH_SIZE, PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE
 from .base import BaseHandler
 
 # Response codes from C++ server
@@ -147,7 +147,25 @@ class LoginResponseHandler(BaseHandler):
             aes_key = shared_secret[:16]
             plaintext = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_data)
 
-            if not plaintext or len(plaintext) < 12:
+            if not plaintext:
+                return None
+
+            # If this is a PATH packet, unwrap the path-return envelope to get
+            # the inner response.  PATH format after decryption:
+            #   path_len(1) + path(N) + extra_type(1) + extra_data(M)
+            pkt_type = (packet.header >> 2) & 0x0F
+            if pkt_type == PAYLOAD_TYPE_PATH and len(plaintext) >= 2:
+                path_len_byte = plaintext[0]
+                inner_offset = 1 + path_len_byte + 1  # skip path_len + path + extra_type
+                if (
+                    path_len_byte <= MAX_PATH_SIZE
+                    and len(plaintext) >= inner_offset
+                ):
+                    extra_type = plaintext[1 + path_len_byte] & 0x0F
+                    if extra_type == PAYLOAD_TYPE_RESPONSE and len(plaintext) > inner_offset:
+                        plaintext = plaintext[inner_offset:]
+
+            if len(plaintext) < 12:
                 return None
 
             # Parse the C++ response format:
