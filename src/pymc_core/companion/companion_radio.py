@@ -223,6 +223,20 @@ class CompanionRadio(CompanionBase):
             return SentResult(success=False)
 
     # -------------------------------------------------------------------------
+    # Flood Scope (sync to dispatcher)
+    # -------------------------------------------------------------------------
+
+    def set_flood_scope(self, transport_key: Optional[bytes] = None) -> None:
+        """Set or clear flood scope and propagate to the dispatcher."""
+        super().set_flood_scope(transport_key)
+        self.node.dispatcher.flood_transport_key = self._flood_transport_key
+
+    def set_flood_region(self, region_name: Optional[str] = None) -> None:
+        """Set flood region and propagate to the dispatcher."""
+        super().set_flood_region(region_name)
+        self.node.dispatcher.flood_transport_key = self._flood_transport_key
+
+    # -------------------------------------------------------------------------
     # Device Configuration (overrides for radio hardware)
     # -------------------------------------------------------------------------
 

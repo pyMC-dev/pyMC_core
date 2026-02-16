@@ -10,7 +10,10 @@ from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PH_TYPE_SHIFT,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
 )
+from ..protocol.transport_keys import calc_transport_code
 from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
 
 # Import handler classes
@@ -84,6 +87,11 @@ class Dispatcher:
 
         # Contact book for decrypting messages (set by the node later)
         self.contact_book = None
+
+        # Flood scope: 16-byte transport key for region-scoped flooding.
+        # When set, flood packets are tagged with a transport code and sent
+        # as ROUTE_TYPE_TRANSPORT_FLOOD.  Set via companion set_flood_scope().
+        self.flood_transport_key: Optional[bytes] = None
 
         self._logger = logging.getLogger("Dispatcher")
         self._current_expected_crc: Optional[int] = None
@@ -452,6 +460,23 @@ class Dispatcher:
     # Public interface - sending and receiving packets
     # ------------------------------------------------------------------
 
+    def _apply_flood_scope(self, pkt: Packet) -> None:
+        """Apply flood scope transport codes to a packet in-place.
+
+        If ``flood_transport_key`` is set and the packet uses flood routing,
+        calculates the transport code, attaches it to the packet, and
+        switches the route type to ``ROUTE_TYPE_TRANSPORT_FLOOD``.
+        """
+        if self.flood_transport_key is None:
+            return
+        route_type = pkt.get_route_type()
+        if route_type != ROUTE_TYPE_FLOOD:
+            return
+        code = calc_transport_code(self.flood_transport_key, pkt)
+        pkt.transport_codes[0] = code
+        pkt.transport_codes[1] = 0  # reserved for home region
+        pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_TRANSPORT_FLOOD
+
     async def send_packet(
         self,
         packet: Packet,
@@ -468,6 +493,7 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        self._apply_flood_scope(packet)
         async with self._tx_lock:  # Wait our turn
             return await self._send_packet_immediate(packet, wait_for_ack, expected_crc)
 

@@ -264,6 +264,30 @@ companion.set_other_params(
 prefs = companion.get_self_info()   # -> NodePrefs
 ```
 
+### Flood Scope (Regions)
+
+Constrain flood packets to a specific region using transport key scoping.
+Nodes outside the region will ignore scoped flood packets.
+
+```python
+from pymc_core.protocol.transport_keys import get_auto_key_for
+
+# Set region by name (auto-derives transport key via SHA-256)
+companion.set_flood_region("usa")       # '#' prefix added automatically
+companion.set_flood_region("#europe")   # explicit '#' also works
+
+# Or set directly with a raw 16-byte transport key
+key = get_auto_key_for("#usa")
+companion.set_flood_scope(key)
+
+# Clear scope (flood to all nodes)
+companion.set_flood_region(None)
+```
+
+When a flood scope is active, all flood packets are tagged with a 16-bit transport code
+(HMAC-SHA256 derived) and sent as `ROUTE_TYPE_TRANSPORT_FLOOD`. Direct-routed packets
+are unaffected.
+
 ### Cryptographic Signing
 
 ```python
@@ -605,24 +629,13 @@ DEFAULT_RESPONSE_TIMEOUT_MS = 10000
 
 ## Unimplemented MeshCore Companion Features
 
-The following features from the MeshCore companion radio firmware (`examples/companion_radio/`) are **not yet implemented** in pyMC_core:
+The following protocol-level features from the MeshCore companion radio firmware (`examples/companion_radio/`) are **not yet implemented** in pyMC_core:
 
-| Feature | Firmware Command | Description |
+| Feature | Firmware Reference | Description |
 |---|---|---|
-| Device query | `CMD_DEVICE_QUERY` (0x16) | Hardware capability & firmware version handshake |
-| App start handshake | `CMD_APP_START` (0x01) | Initial BLE/serial session setup with self-info response |
-| Device time get/set | `CMD_GET_DEVICE_TIME` / `CMD_SET_DEVICE_TIME` | RTC clock synchronisation |
-| Reboot | `CMD_REBOOT` (0x13) | Remote device reboot (with confirmation string) |
-| Factory reset | `CMD_FACTORY_RESET` (0x33) | Erase all data and reset to defaults |
-| BLE PIN | `CMD_SET_DEVICE_PIN` (0x25) | Set BLE pairing PIN |
-| Battery & storage | `CMD_GET_BATT_AND_STORAGE` (0x14) | Battery voltage and flash storage info |
-| Logout | `CMD_LOGOUT` (0x1D) | Disconnect from a server/repeater session |
+| Logout | `CMD_LOGOUT` (0x1D) | Disconnect from a repeater/server session |
 | Has connection | `CMD_HAS_CONNECTION` (0x1C) | Check if active connection exists to a contact |
-| Contact-by-key lookup (protocol) | `CMD_GET_CONTACT_BY_KEY` (0x1E) | Protocol-level single-contact fetch (available in-memory via `get_contact_by_key`) |
-| GPS configuration | GPS enable/interval | GPS hardware control and periodic fix interval |
-| Data persistence | File I/O (`/contacts3`, `/channels2`, `/new_prefs`) | Automatic save/load of contacts, channels, and preferences to flash storage |
 | Push: contact deleted | `PUSH_CODE_CONTACT_DELETED` (0x8F) | Notification when a contact is overwritten by auto-add |
 | Push: contacts full | `PUSH_CODE_CONTACTS_FULL` (0x90) | Notification when contact storage is full |
 | Push: RX data log | `PUSH_CODE_LOG_RX_DATA` (0x88) | Raw received packet logging for diagnostics |
 | Keep-alive mechanism | Server-driven keep-alive | Periodic keep-alive packets for active server connections |
-| Firmware version reporting | `FIRMWARE_VER_CODE` / `FIRMWARE_BUILD_DATE` | Version and build metadata in device info response |

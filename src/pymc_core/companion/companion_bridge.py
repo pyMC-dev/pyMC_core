@@ -321,6 +321,7 @@ class CompanionBridge(CompanionBase):
                 attempt=attempt,
                 message_type=msg_type,
             )
+            self._apply_flood_scope(pkt)
             if len(self._pending_ack_crcs) < MAX_PENDING_ACK_CRCS:
                 self._pending_ack_crcs.add(ack_crc)
             success = await self._packet_injector(pkt, wait_for_ack=True)
@@ -352,6 +353,7 @@ class CompanionBridge(CompanionBase):
                 sender_name=self.prefs.node_name,
                 channels_config=self.channels.get_channels(),
             )
+            self._apply_flood_scope(pkt)
             success = await self._packet_injector(pkt, wait_for_ack=False)
             if success:
                 self.stats.record_tx(is_flood=True)

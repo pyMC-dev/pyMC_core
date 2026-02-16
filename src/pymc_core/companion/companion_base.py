@@ -27,8 +27,11 @@ from ..protocol.constants import (
     ADVERT_FLAG_IS_ROOM_SERVER,
     ADVERT_FLAG_IS_SENSOR,
     REQ_TYPE_GET_TELEMETRY_DATA,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
     TELEM_PERM_BASE,
 )
+from ..protocol.transport_keys import calc_transport_code, get_auto_key_for
 from .channel_store import ChannelStore
 from .constants import (
     ADV_TYPE_CHAT,
@@ -422,6 +425,40 @@ class CompanionBase(ABC):
         else:
             self._flood_transport_key = None
 
+    def set_flood_region(self, region_name: Optional[str] = None) -> None:
+        """Set flood scope from a region name (e.g., ``'#usa'``) or clear it.
+
+        Derives the 16-byte transport key automatically via SHA-256 of the
+        region name.  A leading ``#`` is added if not already present.
+        Pass ``None`` to clear the scope (flood to all).
+        """
+        if region_name:
+            if not region_name.startswith("#"):
+                region_name = f"#{region_name}"
+            self._flood_transport_key = get_auto_key_for(region_name)
+        else:
+            self._flood_transport_key = None
+
+    def _apply_flood_scope(self, pkt: Packet) -> None:
+        """Apply flood scope transport codes to a packet in-place.
+
+        If ``_flood_transport_key`` is set and the packet uses flood routing,
+        calculates the transport code, attaches it to the packet, and changes
+        the route type to ``ROUTE_TYPE_TRANSPORT_FLOOD``.
+
+        Matches firmware ``sendFloodScoped()`` in ``BaseChatMesh.cpp``.
+        """
+        if self._flood_transport_key is None:
+            return
+        route_type = pkt.get_route_type()
+        if route_type != ROUTE_TYPE_FLOOD:
+            return  # only scope flood packets, not direct
+        code = calc_transport_code(self._flood_transport_key, pkt)
+        pkt.transport_codes[0] = code
+        pkt.transport_codes[1] = 0  # reserved for home region (firmware TODO)
+        # Switch route type from FLOOD -> TRANSPORT_FLOOD
+        pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_TRANSPORT_FLOOD
+
     # -------------------------------------------------------------------------
     # Statistics (subclasses may override _get_radio_stats for STATS_TYPE_RADIO)
     # -------------------------------------------------------------------------
@@ -678,6 +715,7 @@ class CompanionBase(ABC):
             flags=flags,
             route_type=route,
         )
+        self._apply_flood_scope(pkt)
         success = await self._send_packet(pkt, wait_for_ack=False)
         if success:
             self.stats.record_tx(is_flood=flood)
@@ -697,6 +735,7 @@ class CompanionBase(ABC):
                 flags=adv_type_to_flags(contact.adv_type) | ADVERT_FLAG_HAS_NAME,
                 route_type="direct",
             )
+            self._apply_flood_scope(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sharing contact: {e}")
@@ -713,6 +752,7 @@ class CompanionBase(ABC):
         try:
             path_list = list(path_bytes)
             pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path_list)
+            self._apply_flood_scope(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sending trace (raw path): {e}")
@@ -751,6 +791,7 @@ class CompanionBase(ABC):
                 protocol_code=PROTOCOL_CODE_BINARY_REQ,
                 data=req_payload,
             )
+            self._apply_flood_scope(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Binary request send error: {e}")
@@ -801,6 +842,7 @@ class CompanionBase(ABC):
                 protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
                 data=req_payload,
             )
+            self._apply_flood_scope(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self._pending_discovery_tags.add(tag_int)
