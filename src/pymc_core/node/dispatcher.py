@@ -312,11 +312,10 @@ class Dispatcher:
         """Set callback for raw packet data (includes both parsed packet and raw bytes)."""
         self.raw_packet_callback = callback
 
-    def add_raw_packet_subscriber(
-        self, callback: Callable[..., Any]
-    ) -> None:
-        """Subscribe to every incoming raw packet. Callback receives (pkt, data) or (pkt, data, analysis).
-        Use this to forward raw RX to clients (e.g. PUSH_CODE_LOG_RX_DATA) so they can track repeats by packet hash."""
+    def add_raw_packet_subscriber(self, callback: Callable[..., Any]) -> None:
+        """Subscribe to every raw packet. Callback (pkt, data) or (pkt, data, analysis).
+        Forward raw RX to clients to track repeats by packet hash.
+        """
         if callback not in self._raw_packet_subscribers:
             self._raw_packet_subscribers.append(callback)
 
@@ -331,7 +330,8 @@ class Dispatcher:
         self, callback: Callable[[bytes, int, float], Awaitable[None] | None]
     ) -> None:
         """Subscribe to every incoming raw RX. Callback receives (data, rssi, snr).
-        Called before duplicate/blacklist so clients get every repeat (e.g. PUSH_CODE_LOG_RX_DATA)."""
+        Called before duplicate/blacklist so clients get every repeat.
+        """
         if callback not in self._raw_rx_subscribers:
             self._raw_rx_subscribers.append(callback)
 
@@ -361,10 +361,10 @@ class Dispatcher:
         rssi: Optional[int] = None,
         snr: Optional[float] = None,
     ) -> None:
-        """Process a received packet from the radio callback. rssi/snr are per-packet when provided."""
+        """Process received packet. rssi/snr are per-packet when provided."""
         self._log(f"[RX DEBUG] Processing packet: {len(data)} bytes, data: {data.hex()[:32]}...")
 
-        # Notify raw RX subscribers first (every reception, including duplicates) so clients can track repeats
+        # Notify raw RX subscribers so clients can track repeats
         if rssi is not None:
             rssi_val = rssi
         elif hasattr(self.radio, "get_last_rssi"):

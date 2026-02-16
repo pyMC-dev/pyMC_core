@@ -1,11 +1,7 @@
 from typing import Optional
 
 from ...protocol import Packet
-from ...protocol.constants import (
-    PAYLOAD_TYPE_GRP_TXT,
-    ROUTE_TYPE_FLOOD,
-    ROUTE_TYPE_TRANSPORT_FLOOD,
-)
+from ...protocol.constants import PAYLOAD_TYPE_GRP_TXT, ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
 from ...protocol.crypto import CryptoUtils
 from .base import BaseHandler
 
@@ -127,7 +123,7 @@ class GroupTextHandler(BaseHandler):
         try:
             timestamp = int.from_bytes(plaintext[:4], "little")
             flags = plaintext[4]
-            # Decode and strip trailing null/padding (AES decrypt returns block-aligned data with zero padding)
+            # Decode and strip trailing null (AES decrypt is block-aligned)
             raw = plaintext[5:].decode("utf-8", errors="replace")
             message_content = raw.rstrip("\x00")
 
@@ -308,7 +304,7 @@ class GroupTextHandler(BaseHandler):
                         },
                     }
 
-                    # Publish channel message event (await so message is queued and MSG_WAITING sent before return)
+                    # Publish channel message event (await so queued and MSG_WAITING sent)
                     await self.event_service.publish(MeshEvents.NEW_CHANNEL_MESSAGE, message_data)
                     self.log("Published group message event")
                 except Exception as publish_error:

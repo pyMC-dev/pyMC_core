@@ -8,7 +8,6 @@ from ...protocol.constants import (
     PAYLOAD_TYPE_ADVERT,
     PUB_KEY_SIZE,
     SIGNATURE_SIZE,
-    TIMESTAMP_SIZE,
     describe_advert_flags,
 )
 from ...protocol.utils import determine_contact_type_from_flags, get_contact_type_name
@@ -80,7 +79,8 @@ class AdvertHandler(BaseHandler):
             appdata = parsed["appdata"]
             if len(appdata) > MAX_ADVERT_DATA_SIZE:
                 self.log(
-                    f"Advert appdata too large ({len(appdata)} bytes), truncating to {MAX_ADVERT_DATA_SIZE}"
+                    f"Advert appdata too large ({len(appdata)} bytes), "
+                    f"truncating to {MAX_ADVERT_DATA_SIZE}"
                 )
                 appdata = appdata[:MAX_ADVERT_DATA_SIZE]
 

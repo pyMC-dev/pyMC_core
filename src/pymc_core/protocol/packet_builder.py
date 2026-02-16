@@ -538,9 +538,13 @@ class PacketBuilder:
         secret_bytes = (
             bytes.fromhex(channel["secret"])
             if isinstance(channel["secret"], str)
-            else (channel["secret"] if isinstance(channel["secret"], bytes) else channel["secret"].encode("utf-8"))
+            else (
+                channel["secret"]
+                if isinstance(channel["secret"], bytes)
+                else channel["secret"].encode("utf-8")
+            )
         )
-        # Use same channel hash derivation as GroupTextHandler (firmware: hash first 16 bytes when 32-byte key has second 16 zero)
+        # Same channel hash as GroupTextHandler (hash first 16 when key has second 16 zero)
         hash_input = (
             secret_bytes[:16]
             if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16

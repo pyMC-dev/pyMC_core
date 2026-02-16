@@ -22,8 +22,7 @@ from ..node.handlers import (
     TextMessageHandler,
 )
 from ..node.handlers.login_server import LoginServerHandler
-from ..protocol import LocalIdentity, PacketBuilder
-from ..protocol import Packet
+from ..protocol import LocalIdentity, Packet, PacketBuilder
 from ..protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -62,7 +61,7 @@ MAX_PENDING_ACK_CRCS = 64
 
 
 class _BridgeAckHandler:
-    """Handles discrete ACK packets and PathHandler stub. Fires send_confirmed when ACK CRC matches a pending send."""
+    """Handles ACK packets. Fires send_confirmed when ACK CRC matches."""
 
     def __init__(self, bridge: "CompanionBridge") -> None:
         self._bridge = bridge
@@ -129,6 +128,7 @@ class CompanionBridge(CompanionBase):
             async def _delayed_send() -> None:
                 await asyncio.sleep(delay_ms / 1000.0)
                 await self._packet_injector(pkt, wait_for_ack=False)
+
             asyncio.create_task(_delayed_send())
 
         def _log(msg: str) -> None:
@@ -136,23 +136,19 @@ class CompanionBridge(CompanionBase):
 
         self._pending_ack_crcs: set[int] = set()
         ack_handler = _BridgeAckHandler(self)
-        protocol_response_handler = ProtocolResponseHandler(
-            _log, identity, self.contacts
-        )
-        login_response_handler = LoginResponseHandler(
-            identity, self.contacts, _log
-        )
-        login_response_handler.set_protocol_response_handler(
-            protocol_response_handler
-        )
+        protocol_response_handler = ProtocolResponseHandler(_log, identity, self.contacts)
+        login_response_handler = LoginResponseHandler(identity, self.contacts, _log)
+        login_response_handler.set_protocol_response_handler(protocol_response_handler)
         path_handler = PathHandler(
             _log, ack_handler, protocol_response_handler, login_response_handler
         )
 
         auth_cb = authenticate_callback
         if auth_cb is None:
+
             def _reject_all(*args, **kwargs) -> tuple[bool, int]:
                 return (False, 0)
+
             auth_cb = _reject_all
 
         login_server_handler = LoginServerHandler(
@@ -170,9 +166,7 @@ class CompanionBridge(CompanionBase):
                 self._event_service,
                 self._radio_config,
             ),
-            PAYLOAD_TYPE_ADVERT: AdvertHandler(
-                _log, event_service=self._event_service
-            ),
+            PAYLOAD_TYPE_ADVERT: AdvertHandler(_log, event_service=self._event_service),
             PAYLOAD_TYPE_PATH: path_handler,
             PAYLOAD_TYPE_ANON_REQ: login_server_handler,
             PAYLOAD_TYPE_GRP_TXT: GroupTextHandler(
@@ -225,8 +219,8 @@ class CompanionBridge(CompanionBase):
             name = advert_data.get("name", "")
             if not name:
                 return None
-            # Inbound path: route the advert took to reach us (for discovery list / advert path display).
-            # Stored in path_cache only; contact.out_path is separate and set elsewhere (e.g. path discovery).
+            # Inbound path: route the advert took (discovery list / advert path display).
+            # Stored in path_cache only; contact.out_path is separate (e.g. path discovery).
             path_len = getattr(packet, "path_len", 0) or 0
             path = getattr(packet, "path", bytearray()) or bytearray()
             effective_len = path_len if path_len > 0 else len(path)
@@ -235,7 +229,7 @@ class CompanionBridge(CompanionBase):
             last_advert_ts = advert_data.get("advert_timestamp", 0)
             if last_advert_ts > now:
                 last_advert_ts = now
-            # Contact: out_path is for sending to this contact; leave unknown (-1) until set by path update.
+            # Contact: out_path is for sending; leave unknown (-1) until set by path update.
             contact = Contact(
                 public_key=pub_key,
                 name=name,
@@ -249,7 +243,7 @@ class CompanionBridge(CompanionBase):
             )
             self.contacts.add(contact)
 
-            # Path cache: store inbound path (path advert took to get here) for discovery list display.
+            # Path cache: store inbound path for discovery list display.
             self.path_cache.update(
                 AdvertPath(
                     public_key_prefix=pub_key[:7],
@@ -268,9 +262,7 @@ class CompanionBridge(CompanionBase):
     # Abstract method implementations
     # -------------------------------------------------------------------------
 
-    async def _send_packet(
-        self, pkt: Packet, wait_for_ack: bool = False
-    ) -> bool:
+    async def _send_packet(self, pkt: Packet, wait_for_ack: bool = False) -> bool:
         """Send a packet via the packet_injector."""
         return await self._packet_injector(pkt, wait_for_ack=wait_for_ack)
 
@@ -415,8 +407,9 @@ class CompanionBridge(CompanionBase):
             return False
 
     async def send_control_data(self, data: bytes) -> bool:
-        """Send a CONTROL packet (e.g. discovery request). data = first byte flags/type (0x80 set for DISCOVER_REQ) + payload.
-        Firmware: (cmd_frame[1] & 0x80) != 0, createControlData(&cmd_frame[1], len-1), sendZeroHop(resp). Returns True if sent."""
+        """Send CONTROL packet (e.g. discovery). data = flags (0x80 for DISCOVER_REQ) + payload.
+        Returns True if sent.
+        """
         if not data or len(data) > 254:
             return False
         if (data[0] & 0x80) == 0:
@@ -440,9 +433,7 @@ class CompanionBridge(CompanionBase):
     def import_private_key(self, key: bytes) -> bool:
         try:
             self._identity = LocalIdentity(seed=key)
-            logger.info(
-                f"Imported new identity: {self._identity.get_public_key().hex()[:16]}..."
-            )
+            logger.info(f"Imported new identity: {self._identity.get_public_key().hex()[:16]}...")
             return True
         except Exception as e:
             logger.error(f"Error importing private key: {e}")
@@ -513,9 +504,7 @@ class CompanionBridge(CompanionBase):
             return {"success": False, "reason": "Contact not found"}
         contact_hash = bytes.fromhex(proxy.public_key)[0]
         waiter = ResponseWaiter()
-        self._protocol_response_handler.set_response_callback(
-            contact_hash, waiter.callback
-        )
+        self._protocol_response_handler.set_response_callback(contact_hash, waiter.callback)
         try:
             pkt, _ = PacketBuilder.create_protocol_request(
                 contact=proxy,
@@ -554,9 +543,7 @@ class CompanionBridge(CompanionBase):
             return {"success": False, "reason": "Contact not found"}
         contact_hash = bytes.fromhex(proxy.public_key)[0]
         waiter = ResponseWaiter()
-        self._protocol_response_handler.set_response_callback(
-            contact_hash, waiter.callback
-        )
+        self._protocol_response_handler.set_response_callback(contact_hash, waiter.callback)
         try:
             inv = PacketBuilder._compute_inverse_perm_mask(
                 want_base, want_location, want_environment
@@ -583,15 +570,13 @@ class CompanionBridge(CompanionBase):
             self._protocol_response_handler.clear_response_callback(contact_hash)
 
     async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
-        """Legacy: send binary request and wait for response via waiter. Prefer send_binary_req + on_binary_response."""
+        """Legacy: send binary request and wait. Prefer send_binary_req + on_binary_response."""
         return await self._send_protocol_request(pub_key, PROTOCOL_CODE_BINARY_REQ, data)
 
     async def send_anon_request(self, pub_key: bytes, data: bytes) -> dict:
         return await self._send_protocol_request(pub_key, PROTOCOL_CODE_ANON_REQ, data)
 
-    async def _send_protocol_request(
-        self, pub_key: bytes, protocol_code: int, data: bytes
-    ) -> dict:
+    async def _send_protocol_request(self, pub_key: bytes, protocol_code: int, data: bytes) -> dict:
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return {"success": False, "reason": "Contact not found"}
@@ -600,9 +585,7 @@ class CompanionBridge(CompanionBase):
             return {"success": False, "reason": "Contact not found"}
         contact_hash = bytes.fromhex(proxy.public_key)[0]
         waiter = ResponseWaiter()
-        self._protocol_response_handler.set_response_callback(
-            contact_hash, waiter.callback
-        )
+        self._protocol_response_handler.set_response_callback(contact_hash, waiter.callback)
         try:
             pkt, _ = PacketBuilder.create_protocol_request(
                 contact=proxy,
@@ -671,4 +654,3 @@ class CompanionBridge(CompanionBase):
             return {"success": False, "reason": str(e)}
         finally:
             self._text_handler.set_command_response_callback(None)
-

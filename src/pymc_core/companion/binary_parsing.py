@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import struct
-from typing import Any, Optional
+from typing import Optional
 
 from .constants import BinaryReqType
 
@@ -63,12 +62,15 @@ def _parse_status(data: bytes, pubkey_prefix: Optional[str] = None, offset: int 
 
 
 def _parse_telemetry(data: bytes) -> dict:
-    """Telemetry: Cayenne LPP or raw. Return dict with raw_hex; optional LPP if cayennelpp available."""
+    """Telemetry: Cayenne LPP or raw. Dict has raw_hex; optional LPP if cayennelpp available."""
     out: dict = {"raw_hex": data.hex()}
     try:
         from cayennelpp import LppFrame
+
         frame = LppFrame.from_bytes(data)
-        out["lpp"] = [{"channel": d.channel, "type": d.type_id, "value": d.data} for d in frame.data]
+        out["lpp"] = [
+            {"channel": d.channel, "type": d.type_id, "value": d.data} for d in frame.data
+        ]
     except Exception:
         pass
     return out
@@ -79,6 +81,7 @@ def _parse_mma(data: bytes) -> dict:
     out: dict = {"raw_hex": data.hex()}
     try:
         from cayennelpp import LppFrame
+
         frame = LppFrame.from_bytes(data)
         out["mma"] = [{"channel": d.channel, "type": d.type_id, "data": d.data} for d in frame.data]
     except Exception:

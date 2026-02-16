@@ -25,28 +25,28 @@ _LPP_TYPES: Dict[int, tuple] = {
     0x02: ("Analog Input", 2, 100, True),
     0x03: ("Analog Output", 2, 100, True),
     # --- Extended types (from CayenneLPP.h) ---
-    0x64: ("Generic Sensor", 4, 1, False),   # LPP_GENERIC_SENSOR  = 100
-    0x65: ("Illuminance", 2, 1, False),      # LPP_LUMINOSITY      = 101
-    0x66: ("Presence", 1, 1, False),         # LPP_PRESENCE        = 102
-    0x67: ("Temperature", 2, 10, True),      # LPP_TEMPERATURE     = 103
-    0x68: ("Humidity", 1, 2, False),         # LPP_RELATIVE_HUMIDITY = 104
+    0x64: ("Generic Sensor", 4, 1, False),  # LPP_GENERIC_SENSOR  = 100
+    0x65: ("Illuminance", 2, 1, False),  # LPP_LUMINOSITY      = 101
+    0x66: ("Presence", 1, 1, False),  # LPP_PRESENCE        = 102
+    0x67: ("Temperature", 2, 10, True),  # LPP_TEMPERATURE     = 103
+    0x68: ("Humidity", 1, 2, False),  # LPP_RELATIVE_HUMIDITY = 104
     0x71: ("Accelerometer", 6, 1000, True),  # LPP_ACCELEROMETER   = 113, 3×int16
-    0x73: ("Barometer", 2, 10, False),       # LPP_BAROMETRIC_PRESSURE = 115
-    0x74: ("Voltage", 2, 100, False),        # LPP_VOLTAGE         = 116, 0.01V
-    0x75: ("Current", 2, 1000, False),       # LPP_CURRENT         = 117, 0.001A
-    0x76: ("Frequency", 4, 1, False),        # LPP_FREQUENCY       = 118, 1Hz
-    0x78: ("Percentage", 1, 1, False),       # LPP_PERCENTAGE      = 120, 1-100%
-    0x79: ("Altitude", 2, 1, True),          # LPP_ALTITUDE        = 121, 1m signed
-    0x7D: ("Concentration", 2, 1, False),    # LPP_CONCENTRATION   = 125, 1ppm
-    0x80: ("Power", 2, 1, False),            # LPP_POWER           = 128, 1W
-    0x82: ("Distance", 4, 1000, False),      # LPP_DISTANCE        = 130, 0.001m
-    0x83: ("Energy", 4, 1000, False),        # LPP_ENERGY          = 131, 0.001kWh
-    0x84: ("Direction", 2, 1, False),        # LPP_DIRECTION       = 132, 1deg
-    0x85: ("Unix Time", 4, 1, False),        # LPP_UNIXTIME        = 133
-    0x86: ("Gyroscope", 6, 100, True),       # LPP_GYROMETER       = 134, 3×int16
-    0x87: ("Colour", 3, 1, False),           # LPP_COLOUR          = 135, RGB
-    0x88: ("GPS", 9, 1, True),               # LPP_GPS             = 136, lat(3)+lon(3)+alt(3)
-    0x8E: ("Switch", 1, 1, False),           # LPP_SWITCH          = 142, 0/1
+    0x73: ("Barometer", 2, 10, False),  # LPP_BAROMETRIC_PRESSURE = 115
+    0x74: ("Voltage", 2, 100, False),  # LPP_VOLTAGE         = 116, 0.01V
+    0x75: ("Current", 2, 1000, False),  # LPP_CURRENT         = 117, 0.001A
+    0x76: ("Frequency", 4, 1, False),  # LPP_FREQUENCY       = 118, 1Hz
+    0x78: ("Percentage", 1, 1, False),  # LPP_PERCENTAGE      = 120, 1-100%
+    0x79: ("Altitude", 2, 1, True),  # LPP_ALTITUDE        = 121, 1m signed
+    0x7D: ("Concentration", 2, 1, False),  # LPP_CONCENTRATION   = 125, 1ppm
+    0x80: ("Power", 2, 1, False),  # LPP_POWER           = 128, 1W
+    0x82: ("Distance", 4, 1000, False),  # LPP_DISTANCE        = 130, 0.001m
+    0x83: ("Energy", 4, 1000, False),  # LPP_ENERGY          = 131, 0.001kWh
+    0x84: ("Direction", 2, 1, False),  # LPP_DIRECTION       = 132, 1deg
+    0x85: ("Unix Time", 4, 1, False),  # LPP_UNIXTIME        = 133
+    0x86: ("Gyroscope", 6, 100, True),  # LPP_GYROMETER       = 134, 3×int16
+    0x87: ("Colour", 3, 1, False),  # LPP_COLOUR          = 135, RGB
+    0x88: ("GPS", 9, 1, True),  # LPP_GPS             = 136, lat(3)+lon(3)+alt(3)
+    0x8E: ("Switch", 1, 1, False),  # LPP_SWITCH          = 142, 0/1
 }
 
 
@@ -72,27 +72,51 @@ def _decode_cayenne_lpp(data: bytes) -> list:
             lat = int.from_bytes(raw[0:3], "big", signed=True) / 10000
             lon = int.from_bytes(raw[3:6], "big", signed=True) / 10000
             alt = int.from_bytes(raw[6:9], "big", signed=True) / 100
-            sensors.append({"channel": channel, "type": name, "type_id": type_id,
-                            "value": {"latitude": lat, "longitude": lon, "altitude": alt},
-                            "raw_value": raw.hex()})
+            sensors.append(
+                {
+                    "channel": channel,
+                    "type": name,
+                    "type_id": type_id,
+                    "value": {"latitude": lat, "longitude": lon, "altitude": alt},
+                    "raw_value": raw.hex(),
+                }
+            )
         elif size == 6 and type_id in (0x71, 0x86):
             # 3-axis: x(2) + y(2) + z(2), all signed
             x = int.from_bytes(raw[0:2], "big", signed=True) / divisor
             y = int.from_bytes(raw[2:4], "big", signed=True) / divisor
             z = int.from_bytes(raw[4:6], "big", signed=True) / divisor
-            sensors.append({"channel": channel, "type": name, "type_id": type_id,
-                            "value": {"x": x, "y": y, "z": z},
-                            "raw_value": raw.hex()})
+            sensors.append(
+                {
+                    "channel": channel,
+                    "type": name,
+                    "type_id": type_id,
+                    "value": {"x": x, "y": y, "z": z},
+                    "raw_value": raw.hex(),
+                }
+            )
         elif type_id == 0x87:
             # Colour: R(1) + G(1) + B(1)
-            sensors.append({"channel": channel, "type": name, "type_id": type_id,
-                            "value": {"r": raw[0], "g": raw[1], "b": raw[2]},
-                            "raw_value": raw.hex()})
+            sensors.append(
+                {
+                    "channel": channel,
+                    "type": name,
+                    "type_id": type_id,
+                    "value": {"r": raw[0], "g": raw[1], "b": raw[2]},
+                    "raw_value": raw.hex(),
+                }
+            )
         else:
             val = int.from_bytes(raw, "big", signed=signed)
-            sensors.append({"channel": channel, "type": name, "type_id": type_id,
-                            "value": val / divisor if divisor != 1 else val,
-                            "raw_value": raw.hex()})
+            sensors.append(
+                {
+                    "channel": channel,
+                    "type": name,
+                    "type_id": type_id,
+                    "value": val / divisor if divisor != 1 else val,
+                    "raw_value": raw.hex(),
+                }
+            )
     return sensors
 
 
@@ -112,8 +136,8 @@ class ProtocolResponseHandler:
 
         # Callbacks for protocol responses
         self._response_callbacks: Dict[int, Callable[[bool, str, Dict[str, Any]], None]] = {}
-        # Optional: when set, decrypted payloads with tag+data (and optional path) are passed as binary response
-        # Signature: (tag_bytes, response_data, path_info=None). path_info = (out_path, in_path, contact_pubkey).
+        # Optional: decrypted payloads with tag+data (and optional path) passed as binary response.
+        # Signature: (tag_bytes, response_data, path_info=None).
         self._binary_response_callback: Optional[Callable[..., Any]] = None
 
     @staticmethod
@@ -131,8 +155,8 @@ class ProtocolResponseHandler:
         self._response_callbacks.pop(contact_hash, None)
 
     def set_binary_response_callback(self, callback: Callable[..., Any]) -> None:
-        """Set callback for binary responses. Called with (tag_bytes, response_data, path_info=None).
-        path_info when present is (out_path, in_path, contact_pubkey) for path-return format."""
+        """Set callback for binary responses. (tag_bytes, response_data, path_info=None).
+        path_info = (out_path, in_path, contact_pubkey) for path-return format."""
         self._binary_response_callback = callback
 
     async def __call__(self, pkt: Packet) -> None:
@@ -151,9 +175,12 @@ class ProtocolResponseHandler:
                 return
 
             # Try to decrypt the response
-            success, decoded_text, parsed_data, raw_decrypted = await self._decrypt_protocol_response(
-                pkt, src_hash
-            )
+            (
+                success,
+                decoded_text,
+                parsed_data,
+                raw_decrypted,
+            ) = await self._decrypt_protocol_response(pkt, src_hash)
 
             # If an explicit response callback is waiting for this source (e.g. telemetry,
             # stats, repeater command), deliver there first.  The binary/path-discovery
@@ -178,7 +205,7 @@ class ProtocolResponseHandler:
                     callback(success, decoded_text, parsed_data)
                 return
 
-            # If binary response callback is set, parse and invoke (plain tag+data or path-return format)
+            # If binary response callback set, parse and invoke (tag+data or path-return)
             if (
                 success
                 and self._binary_response_callback is not None
@@ -193,10 +220,7 @@ class ProtocolResponseHandler:
                     # Extract inner response from path-return structure
                     path_len_byte = raw_decrypted[0]
                     inner_offset = 1 + path_len_byte + 1
-                    if (
-                        path_len_byte <= MAX_PATH_SIZE
-                        and len(raw_decrypted) >= inner_offset + 4
-                    ):
+                    if path_len_byte <= MAX_PATH_SIZE and len(raw_decrypted) >= inner_offset + 4:
                         out_path = bytes(raw_decrypted[1 : 1 + path_len_byte])
                         extra_type = raw_decrypted[1 + path_len_byte] & 0x0F
                         extra = raw_decrypted[inner_offset:]
@@ -220,9 +244,7 @@ class ProtocolResponseHandler:
                     response_data = raw_decrypted[4:]
 
                 try:
-                    cb_result = self._binary_response_callback(
-                        tag_bytes, response_data, path_info
-                    )
+                    cb_result = self._binary_response_callback(tag_bytes, response_data, path_info)
                     if asyncio.iscoroutine(cb_result):
                         await cb_result
                 except Exception as e:
@@ -235,11 +257,11 @@ class ProtocolResponseHandler:
     async def _decrypt_protocol_response(
         self, pkt: Packet, src_hash: int
     ) -> tuple[bool, str, Dict[str, Any], Optional[bytes]]:
-        """Decrypt and parse a protocol response packet. Returns (success, text, parsed_data, raw_decrypted).
+        """Decrypt and parse protocol response. Returns (success, text, parsed_data, raw_decrypted).
 
-        Handles both packet types by inspecting the actual packet header:
-        - PAYLOAD_TYPE_RESPONSE (0x01): direct datagram → decrypted = tag(4)+data
-        - PAYLOAD_TYPE_PATH (0x08): path return → decrypted = path_len(1)+path(N)+extra_type(1)+extra
+        Handles both packet types:
+        - RESPONSE (0x01): direct → tag(4)+data
+        - PATH (0x08): path_len+path(N)+extra_type+extra
         """
         try:
             # Find the contact by hash
@@ -271,10 +293,7 @@ class ProtocolResponseHandler:
                 if len(decrypted) >= 2:  # need at least path_len + extra_type
                     path_len_byte = decrypted[0]
                     inner_offset = 1 + path_len_byte + 1  # path_len + path + extra_type
-                    if (
-                        path_len_byte <= MAX_PATH_SIZE
-                        and len(decrypted) >= inner_offset
-                    ):
+                    if path_len_byte <= MAX_PATH_SIZE and len(decrypted) >= inner_offset:
                         extra_type = decrypted[1 + path_len_byte] & 0x0F
                         if extra_type == PAYLOAD_TYPE_RESPONSE and len(decrypted) > inner_offset:
                             response_data = decrypted[inner_offset:]
@@ -315,9 +334,9 @@ class ProtocolResponseHandler:
                     result_dict["type"] = "stats"
                     result_dict["raw_bytes"] = stats_result["raw_bytes"]
                     self._log(
-                        f"[ProtocolResponse] Parsed as STATS: batt={result_dict['batt_milli_volts']}mV, "
+                        f"[ProtocolResponse] STATS: batt={result_dict['batt_milli_volts']}mV, "
                         f"rssi={result_dict['last_rssi']}, snr={result_dict['last_snr']}, "
-                        f"raw_bytes={len(result_dict['raw_bytes'])}B"
+                        f"raw={len(result_dict['raw_bytes'])}B"
                     )
                     return True, stats_result["formatted"], result_dict
 
@@ -394,24 +413,24 @@ class ProtocolResponseHandler:
 
             # Parse with correct field types matching C++ struct
             (
-                batt_milli_volts,   # uint16  offset 0
+                batt_milli_volts,  # uint16  offset 0
                 curr_tx_queue_len,  # uint16  offset 2
-                noise_floor,        # int16   offset 4
-                last_rssi,          # int16   offset 6
-                n_packets_recv,     # uint32  offset 8
-                n_packets_sent,     # uint32  offset 12
-                total_air_time_secs,# uint32  offset 16
-                total_up_time_secs, # uint32  offset 20
-                n_sent_flood,       # uint32  offset 24
-                n_sent_direct,      # uint32  offset 28
-                n_recv_flood,       # uint32  offset 32
-                n_recv_direct,      # uint32  offset 36
-                err_events,         # uint16  offset 40
-                last_snr_raw,       # int16   offset 42
-                n_direct_dups,      # uint16  offset 44
-                n_flood_dups,       # uint16  offset 46
+                noise_floor,  # int16   offset 4
+                last_rssi,  # int16   offset 6
+                n_packets_recv,  # uint32  offset 8
+                n_packets_sent,  # uint32  offset 12
+                total_air_time_secs,  # uint32  offset 16
+                total_up_time_secs,  # uint32  offset 20
+                n_sent_flood,  # uint32  offset 24
+                n_sent_direct,  # uint32  offset 28
+                n_recv_flood,  # uint32  offset 32
+                n_recv_direct,  # uint32  offset 36
+                err_events,  # uint16  offset 40
+                last_snr_raw,  # int16   offset 42
+                n_direct_dups,  # uint16  offset 44
+                n_flood_dups,  # uint16  offset 46
                 total_rx_air_time_secs,  # uint32  offset 48
-                n_recv_errors,      # uint32  offset 52
+                n_recv_errors,  # uint32  offset 52
             ) = struct.unpack("<HHhhIIIIIIIIHhHHII", stats_data[:56])
 
             raw_stats = {
@@ -497,10 +516,7 @@ class ProtocolResponseHandler:
             )
             return {
                 "type": "telemetry",
-                "formatted": (
-                    f"Telemetry ({len(sensors)} sensors, "
-                    f"ts:{reflected_timestamp})"
-                ),
+                "formatted": (f"Telemetry ({len(sensors)} sensors, " f"ts:{reflected_timestamp})"),
                 "reflected_timestamp": reflected_timestamp,
                 "sensor_count": len(sensors),
                 "sensors": sensors,

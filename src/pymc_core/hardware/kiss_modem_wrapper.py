@@ -18,6 +18,10 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional, Union
 
+import serial
+
+from .base import LoRaRadio
+
 # RX callback: (data) for backward compat, or (data, rssi, snr) for per-packet metrics
 RxCallback = Union[
     Callable[[bytes], None],
@@ -42,9 +46,6 @@ def _invoke_rx_callback(
     else:
         callback(data)
 
-import serial
-
-from .base import LoRaRadio
 
 # KISS Protocol Constants (shared with standard KISS)
 KISS_FEND = 0xC0  # Frame End
@@ -701,9 +702,7 @@ class KissModemWrapper(LoRaRadio):
             self._pending_response = None
 
         # SetHardware frame: type 0x06, payload = sub_cmd (1 byte) + data
-        kiss_frame = self._encode_kiss_frame(
-            KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data
-        )
+        kiss_frame = self._encode_kiss_frame(KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data)
 
         if not self._write_frame(kiss_frame):
             logger.warning("SetHardware frame write failed")
@@ -1168,8 +1167,12 @@ class KissModemWrapper(LoRaRadio):
         status: Dict[str, Any] = {
             "initialized": self.is_connected,
             "frequency": cfg["frequency"] if cfg else self.radio_config.get("frequency", 0),
-            "tx_power": tx_power if tx_power is not None else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
-            "spreading_factor": cfg["spreading_factor"] if cfg else self.radio_config.get("spreading_factor", 0),
+            "tx_power": tx_power
+            if tx_power is not None
+            else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
+            "spreading_factor": cfg["spreading_factor"]
+            if cfg
+            else self.radio_config.get("spreading_factor", 0),
             "bandwidth": cfg["bandwidth"] if cfg else self.radio_config.get("bandwidth", 0),
             "coding_rate": cfg["coding_rate"] if cfg else self.radio_config.get("coding_rate", 0),
             "last_rssi": self.stats.get("last_rssi", -999),
@@ -1247,9 +1250,7 @@ class KissModemWrapper(LoRaRadio):
                 if len(self.rx_frame_buffer) >= MAX_FRAME_SIZE:
                     # Frame too long (e.g. lost FEND); reset and resync at next FEND
                     self.stats["frame_errors"] += 1
-                    logger.warning(
-                        "KISS frame exceeded max size (%d), resyncing", MAX_FRAME_SIZE
-                    )
+                    logger.warning("KISS frame exceeded max size (%d), resyncing", MAX_FRAME_SIZE)
                     self.rx_frame_buffer.clear()
                     self.in_frame = False
                 else:

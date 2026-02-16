@@ -9,14 +9,14 @@ Compares:
 - Encryption/decryption
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from pymc_core.hardware.kiss_modem_wrapper import KissModemWrapper
-from pymc_core.protocol.identity import Identity, LocalIdentity
-from pymc_core.protocol.crypto import CryptoUtils
+from pymc_core.hardware.kiss_modem_wrapper import KissModemWrapper  # noqa: E402
+from pymc_core.protocol.crypto import CryptoUtils  # noqa: E402
+from pymc_core.protocol.identity import Identity, LocalIdentity  # noqa: E402
 
 
 def test_modem_crypto(port: str = "/dev/cu.usbmodem1101"):
@@ -149,7 +149,7 @@ def test_modem_crypto(port: str = "/dev/cu.usbmodem1101"):
             modem_decrypted = modem.decrypt_data(key, mac, ciphertext)
             if modem_decrypted:
                 # Trim padding (modem pads to block size)
-                modem_decrypted = modem_decrypted[:len(plaintext)]
+                modem_decrypted = modem_decrypted[: len(plaintext)]
                 print(f"Modem decrypted: {modem_decrypted}")
 
                 if modem_decrypted == plaintext:
@@ -178,7 +178,7 @@ def test_modem_crypto(port: str = "/dev/cu.usbmodem1101"):
         # Decrypt with modem
         modem_decrypted2 = modem.decrypt_data(key, python_mac, python_ciphertext)
         if modem_decrypted2:
-            modem_decrypted2 = modem_decrypted2[:len(plaintext)]
+            modem_decrypted2 = modem_decrypted2[: len(plaintext)]
             print(f"Modem decrypted Python ciphertext: {modem_decrypted2}")
 
             if modem_decrypted2 == plaintext:

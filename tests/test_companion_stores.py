@@ -1,25 +1,14 @@
-"""Tests for companion stores and models: ContactStore, ChannelStore, MessageQueue, PathCache, StatsCollector."""
+"""Tests for companion stores and models: ContactStore, ChannelStore, MessageQueue, PathCache."""
 
-import pytest
-
-from pymc_core.companion import (
-    ContactStore,
-    ChannelStore,
-    MessageQueue,
-    PathCache,
-    StatsCollector,
-)
-from pymc_core.companion.constants import DEFAULT_MAX_CONTACTS, DEFAULT_MAX_CHANNELS
+from pymc_core.companion import ChannelStore, ContactStore, MessageQueue, PathCache, StatsCollector
 from pymc_core.companion.models import (
     AdvertPath,
     Channel,
     Contact,
     NodePrefs,
-    PacketStats,
     QueuedMessage,
     SentResult,
 )
-
 
 # ---------------------------------------------------------------------------
 # Models
@@ -199,19 +188,19 @@ class TestContactStore:
 
     def test_load_from(self):
         store = ContactStore(max_contacts=10)
-        contacts = [
-            Contact(public_key=bytes([i] * 32), name=f"C{i}") for i in range(3)
-        ]
+        contacts = [Contact(public_key=bytes([i] * 32), name=f"C{i}") for i in range(3)]
         store.load_from(contacts)
         assert store.get_count() == 3
         assert store.get_by_name("C1").name == "C1"
 
     def test_load_from_dicts(self):
         store = ContactStore(max_contacts=10)
-        store.load_from_dicts([
-            {"public_key": "a1" * 32, "name": "DictAlice"},
-            {"public_key": "b2" * 32, "name": "DictBob"},
-        ])
+        store.load_from_dicts(
+            [
+                {"public_key": "a1" * 32, "name": "DictAlice"},
+                {"public_key": "b2" * 32, "name": "DictBob"},
+            ]
+        )
         assert store.get_count() == 2
         assert store.get_by_name("DictAlice") is not None
         assert store.get_by_name("DictBob") is not None

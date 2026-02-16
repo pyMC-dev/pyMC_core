@@ -65,9 +65,11 @@ class PathHandler:
 
             # Optional PATH packet analysis if analyzer is available
             try:
-                if hasattr(self, "_dispatcher") and hasattr(
-                    self._dispatcher, "packet_analysis_callback"
-                ) and self._dispatcher.packet_analysis_callback:
+                if (
+                    hasattr(self, "_dispatcher")
+                    and hasattr(self._dispatcher, "packet_analysis_callback")
+                    and self._dispatcher.packet_analysis_callback
+                ):
                     self._dispatcher.packet_analysis_callback(pkt)
             except Exception as e:
                 self._log(f"PATH packet analysis failed: {e}")

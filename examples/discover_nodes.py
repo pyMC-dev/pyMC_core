@@ -177,9 +177,7 @@ def main():
     if args.radio_type == "kiss-tnc":
         print(f"Serial port: {args.serial_port}")
 
-    asyncio.run(
-        discover_nodes(args.radio_type, args.serial_port, args.timeout, args.filter)
-    )
+    asyncio.run(discover_nodes(args.radio_type, args.serial_port, args.timeout, args.filter))
 
 
 if __name__ == "__main__":

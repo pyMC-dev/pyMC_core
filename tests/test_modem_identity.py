@@ -12,7 +12,6 @@ from nacl.signing import SigningKey
 
 from pymc_core.protocol.modem_identity import ModemIdentity
 
-
 # Generate a valid Ed25519 keypair for testing
 _TEST_SIGNING_KEY = SigningKey.generate()
 _TEST_PUBKEY = bytes(_TEST_SIGNING_KEY.verify_key)

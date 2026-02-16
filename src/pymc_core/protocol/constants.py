@@ -109,7 +109,7 @@ CONTACT_TYPE_HYBRID = 4
 
 
 # Protocol Request Types
-REQ_TYPE_GET_STATUS = 0x01          # Get repeater stats (RepeaterStats struct)
+REQ_TYPE_GET_STATUS = 0x01  # Get repeater stats (RepeaterStats struct)
 REQ_TYPE_GET_TELEMETRY_DATA = 0x03  # Get telemetry data (CayenneLPP)
 TELEM_PERM_BASE = 0x01
 TELEM_PERM_LOCATION = 0x02

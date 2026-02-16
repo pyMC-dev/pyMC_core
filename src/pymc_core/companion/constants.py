@@ -55,17 +55,20 @@ STATS_TYPE_CORE = 0
 STATS_TYPE_RADIO = 1
 STATS_TYPE_PACKETS = 2
 
+
 # ---------------------------------------------------------------------------
 # Binary request types (CMD_SEND_BINARY_REQ / PUSH_CODE_BINARY_RESPONSE)
 # ---------------------------------------------------------------------------
 class BinaryReqType(IntEnum):
     """Binary request type codes (companion frame protocol)."""
+
     STATUS = 0x01
     KEEP_ALIVE = 0x02
     TELEMETRY = 0x03
     MMA = 0x04
     ACL = 0x05
     NEIGHBOURS = 0x06
+
 
 # ---------------------------------------------------------------------------
 # Protocol Codes (used in create_protocol_request / send_protocol_request)

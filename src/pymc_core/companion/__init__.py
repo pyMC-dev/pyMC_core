@@ -6,13 +6,9 @@ broadcasting, channel management, path tracking, signing, telemetry,
 statistics, and device configuration on top of MeshNode.
 """
 
-from .companion_radio import CompanionRadio
-from .companion_bridge import CompanionBridge
 from .channel_store import ChannelStore
-from .contact_store import ContactStore
-from .message_queue import MessageQueue
-from .path_cache import PathCache
-from .stats_collector import StatsCollector
+from .companion_bridge import CompanionBridge
+from .companion_radio import CompanionRadio
 from .constants import (
     ADV_TYPE_CHAT,
     ADV_TYPE_REPEATER,
@@ -25,7 +21,6 @@ from .constants import (
     AUTOADD_REPEATER,
     AUTOADD_ROOM,
     AUTOADD_SENSOR,
-    BinaryReqType,
     DEFAULT_MAX_CHANNELS,
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
@@ -41,16 +36,13 @@ from .constants import (
     TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
     TXT_TYPE_SIGNED_PLAIN,
+    BinaryReqType,
 )
-from .models import (
-    AdvertPath,
-    Channel,
-    Contact,
-    NodePrefs,
-    PacketStats,
-    QueuedMessage,
-    SentResult,
-)
+from .contact_store import ContactStore
+from .message_queue import MessageQueue
+from .models import AdvertPath, Channel, Contact, NodePrefs, PacketStats, QueuedMessage, SentResult
+from .path_cache import PathCache
+from .stats_collector import StatsCollector
 
 __all__ = [
     # Main classes

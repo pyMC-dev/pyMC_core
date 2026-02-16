@@ -16,9 +16,7 @@ from typing import Any, Optional
 
 from ..node.node import MeshNode
 from ..protocol import LocalIdentity, Packet, PacketBuilder
-from ..protocol.constants import (
-    PAYLOAD_TYPE_CONTROL,
-)
+from ..protocol.constants import PAYLOAD_TYPE_CONTROL
 from .companion_base import CompanionBase
 from .constants import (
     ADV_TYPE_CHAT,
@@ -105,9 +103,7 @@ class CompanionRadio(CompanionBase):
     # Abstract method implementations
     # -------------------------------------------------------------------------
 
-    async def _send_packet(
-        self, pkt: Packet, wait_for_ack: bool = False
-    ) -> bool:
+    async def _send_packet(self, pkt: Packet, wait_for_ack: bool = False) -> bool:
         """Send a packet via the MeshNode dispatcher."""
         return await self.node.dispatcher.send_packet(pkt, wait_for_ack=wait_for_ack)
 
@@ -317,9 +313,7 @@ class CompanionRadio(CompanionBase):
                 event_service=self._event_service,
             )
             self._setup_packet_callbacks()
-            logger.info(
-                f"Imported new identity: {self._identity.get_public_key().hex()[:16]}..."
-            )
+            logger.info(f"Imported new identity: {self._identity.get_public_key().hex()[:16]}...")
             return True
         except Exception as e:
             logger.error(f"Error importing private key: {e}")
@@ -376,7 +370,7 @@ class CompanionRadio(CompanionBase):
             return {"success": False, "reason": str(e)}
 
     async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
-        """Legacy: send binary request and wait for response via waiter. Prefer send_binary_req + on_binary_response."""
+        """Legacy: send binary request and wait. Prefer send_binary_req + on_binary_response."""
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return {"success": False, "reason": "Contact not found"}
@@ -417,14 +411,13 @@ class CompanionRadio(CompanionBase):
                 command=command,
                 parameters=parameters,
             )
+            reason = "Command successful" if result.get("success") else "No response"
             return {
                 "success": result.get("success", False),
                 "repeater": contact.name,
                 "command": command,
                 "response": result.get("response"),
-                "reason": (
-                    "Command successful" if result.get("success") else "No response"
-                ),
+                "reason": reason,
             }
         except Exception as e:
             logger.error(f"Repeater command error: {e}")
@@ -435,14 +428,13 @@ class CompanionRadio(CompanionBase):
     # -------------------------------------------------------------------------
 
     async def send_control_data(self, data: Optional[bytes] = None) -> bool:
-        """Send a CONTROL packet. If data is provided and valid (len 1-254, first byte has 0x80),
-        send it as raw control payload; otherwise send a default discovery request (backward compat)."""
+        """Send CONTROL packet. If data valid (len 1-254, byte0 0x80), send as control payload;
+        else send default discovery request (backward compat).
+        """
         if data and len(data) <= 254 and (data[0] & 0x80) != 0:
             try:
                 pkt = Packet()
-                pkt.header = PacketBuilder._create_header(
-                    PAYLOAD_TYPE_CONTROL, route_type="direct"
-                )
+                pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
                 pkt.path_len = 0
                 pkt.path = bytearray()
                 pkt.payload = bytearray(data)
@@ -479,13 +471,17 @@ class CompanionRadio(CompanionBase):
         dispatcher = self.node.dispatcher
         dispatcher.set_packet_received_callback(self._on_packet_received)
         dispatcher.set_packet_sent_callback(self._on_packet_sent)
-        if hasattr(dispatcher, "protocol_response_handler") and dispatcher.protocol_response_handler:
+        if (
+            hasattr(dispatcher, "protocol_response_handler")
+            and dispatcher.protocol_response_handler
+        ):
             dispatcher.protocol_response_handler.set_binary_response_callback(
                 self._on_binary_response
             )
 
     async def _on_packet_received(self, pkt: Any) -> None:
         from ..protocol.constants import ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
+
         route_type = pkt.get_route_type()
         is_flood = route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD)
         self.stats.record_rx(is_flood=is_flood)

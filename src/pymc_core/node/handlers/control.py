@@ -49,9 +49,7 @@ class ControlHandler:
     def payload_type() -> int:
         return PAYLOAD_TYPE_CONTROL
 
-    def set_response_callback(
-        self, tag: int, callback: Callable[[Dict[str, Any]], None]
-    ) -> None:
+    def set_response_callback(self, tag: int, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Set callback for discovery responses with a specific tag."""
         self._response_callbacks[tag] = callback
 
@@ -59,9 +57,7 @@ class ControlHandler:
         """Clear callback for discovery responses with a specific tag."""
         self._response_callbacks.pop(tag, None)
 
-    def set_request_callback(
-        self, callback: Callable[[Dict[str, Any]], None]
-    ) -> None:
+    def set_request_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Set callback for discovery requests (for logging/monitoring)."""
         self._request_callbacks[0] = callback
 
@@ -78,9 +74,7 @@ class ControlHandler:
 
             # Check if this is a zero-hop packet (path_len must be 0)
             if pkt.path_len != 0:
-                self._log(
-                    f"[ControlHandler] Non-zero path length ({pkt.path_len}), ignoring"
-                )
+                self._log(f"[ControlHandler] Non-zero path length ({pkt.path_len}), ignoring")
                 return None
 
             # Extract control type (upper 4 bits of first byte)
@@ -91,9 +85,7 @@ class ControlHandler:
             elif control_type == CTL_TYPE_NODE_DISCOVER_RESP:
                 return await self._handle_discovery_response(pkt)
             else:
-                self._log(
-                    f"[ControlHandler] Unknown control type: 0x{control_type:02X}"
-                )
+                self._log(f"[ControlHandler] Unknown control type: 0x{control_type:02X}")
                 return None
 
         except Exception as e:
@@ -102,7 +94,7 @@ class ControlHandler:
 
     async def _handle_discovery_request(self, pkt: Packet) -> Optional[Dict[str, Any]]:
         """Handle node discovery request packet and return parsed data.
-        
+
         Expected format:
         - byte 0: type (0x80) + flags (bit 0: prefix_only)
         - byte 1: filter (bitfield of node types to respond)
@@ -156,7 +148,7 @@ class ControlHandler:
 
     async def _handle_discovery_response(self, pkt: Packet) -> Optional[Dict[str, Any]]:
         """Handle node discovery response packet and return parsed data.
-        
+
         Response format:
         - byte 0: type (0x90) + node_type (lower 4 bits)
         - byte 1: SNR of our request (int8_t, multiplied by 4)
@@ -188,8 +180,8 @@ class ControlHandler:
                 "tag": tag,
                 "node_type": node_type,
                 "inbound_snr": inbound_snr,  # SNR of our request at their end
-                "response_snr": pkt._snr,    # SNR of their response at our end
-                "rssi": pkt._rssi,           # RSSI of their response at our end
+                "response_snr": pkt._snr,  # SNR of their response at our end
+                "rssi": pkt._rssi,  # RSSI of their response at our end
                 "pub_key": pub_key.hex(),
                 "pub_key_bytes": bytes(pub_key),
                 "timestamp": time.time(),
@@ -205,9 +197,7 @@ class ControlHandler:
                         f"[ControlHandler] Called response callback for tag 0x{tag:08X}"
                     )
             else:
-                self._debug_log(
-                    f"[ControlHandler] No callback waiting for tag 0x{tag:08X}"
-                )
+                self._debug_log(f"[ControlHandler] No callback waiting for tag 0x{tag:08X}")
 
             return response_data
 

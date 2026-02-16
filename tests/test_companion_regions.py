@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from pymc_core.companion import CompanionRadio
-from pymc_core.companion.constants import ADV_TYPE_CHAT
 from pymc_core.companion.models import Contact
 from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
@@ -14,7 +13,6 @@ from pymc_core.protocol.constants import (
     ROUTE_TYPE_TRANSPORT_FLOOD,
 )
 from pymc_core.protocol.transport_keys import calc_transport_code, get_auto_key_for
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -215,9 +213,7 @@ class TestAdvertiseWithFloodScope:
     async def test_advertise_flood_with_scope_sends_transport_flood(self):
         radio = MockRadio()
         identity = LocalIdentity()
-        companion = CompanionRadio(
-            radio=radio, identity=identity, node_name="scoped"
-        )
+        companion = CompanionRadio(radio=radio, identity=identity, node_name="scoped")
         companion.set_flood_region("usa")
 
         await companion.start()
@@ -239,9 +235,7 @@ class TestAdvertiseWithFloodScope:
     async def test_advertise_flood_without_scope_sends_normal_flood(self):
         radio = MockRadio()
         identity = LocalIdentity()
-        companion = CompanionRadio(
-            radio=radio, identity=identity, node_name="noscope"
-        )
+        companion = CompanionRadio(radio=radio, identity=identity, node_name="noscope")
         # No flood scope set
 
         await companion.start()

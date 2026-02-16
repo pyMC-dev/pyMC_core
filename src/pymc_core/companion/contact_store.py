@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import Iterable, Iterator, Optional
 
 from .constants import DEFAULT_MAX_CONTACTS
@@ -195,7 +194,9 @@ class ContactStore:
                 name=rec.get("name", ""),
                 adv_type=rec.get("adv_type", 0),
                 flags=rec.get("flags", 0),
-                out_path_len=-1 if rec.get("out_path_len", -1) in (-1, 255) else rec.get("out_path_len", -1),
+                out_path_len=-1
+                if rec.get("out_path_len", -1) in (-1, 255)
+                else rec.get("out_path_len", -1),
                 out_path=out_path,
                 last_advert_timestamp=rec.get("last_advert_timestamp", 0),
                 lastmod=rec.get("lastmod", 0),

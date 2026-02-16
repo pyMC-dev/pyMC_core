@@ -100,7 +100,7 @@ class LocalIdentity(Identity):
         if seed and len(seed) == 64:
             from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-            # MeshCore format: [32-byte scalar][32-byte nonce]; firmware clamps first 32 bytes for ECDH
+            # MeshCore format: [32-byte scalar][32-byte nonce]; firmware clamps first 32 for ECDH
             self._firmware_key = seed
             self.signing_key = None
 
@@ -110,7 +110,7 @@ class LocalIdentity(Identity):
             ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(clamped)
             self.verify_key = VerifyKey(ed25519_pub)
 
-            # Use clamped scalar directly for ECDH (firmware key_exchange.c uses first 32 bytes clamped)
+            # Use clamped scalar for ECDH (firmware key_exchange.c uses first 32 bytes clamped)
             self._x25519_private = clamped
             self._x25519_public = CryptoUtils.scalarmult_base(clamped)
         else:
@@ -161,10 +161,10 @@ class LocalIdentity(Identity):
     def get_signing_key_bytes(self) -> bytes:
         """
         Get the signing key bytes for this identity.
-        
+
         For standard keys, returns the 32-byte Ed25519 seed.
         For firmware keys, returns the 64-byte expanded key format [scalar||nonce].
-        
+
         Returns:
             The signing key bytes (32 or 64 bytes depending on key type).
         """

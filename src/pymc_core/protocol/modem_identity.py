@@ -188,8 +188,7 @@ class ModemIdentity:
             RuntimeError: Always, as signing key is not accessible
         """
         raise RuntimeError(
-            "ModemIdentity does not expose signing keys. "
-            "Use sign() for signing operations."
+            "ModemIdentity does not expose signing keys. " "Use sign() for signing operations."
         )
 
     # Additional modem-specific methods

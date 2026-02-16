@@ -169,21 +169,19 @@ class CompanionBase(ABC):
         self._event_subscriber = _CompanionEventSubscriber(self)
         self._event_service.subscribe_all(self._event_subscriber)
 
-        self._push_callbacks: dict[str, list[Callable]] = {
-            k: [] for k in PUSH_CALLBACK_KEYS
-        }
+        self._push_callbacks: dict[str, list[Callable]] = {k: [] for k in PUSH_CALLBACK_KEYS}
 
         # Pending binary requests by tag (hex) for matching responses
         self._pending_binary_requests: dict[str, dict] = {}
         # Pending path discovery tags for matching responses
         self._pending_discovery_tags: set[int] = set()
 
-        # GRP_TXT dedup by packet hash: match Mesh.cpp behavior (only process when !_tables->hasSeen(pkt)),
-        # so companion queues one frame per logical message like the firmware.
+        # GRP_TXT dedup by packet hash: match Mesh.cpp (!_tables->hasSeen(pkt));
+        # companion queues one frame per logical message like the firmware.
         self._seen_grp_txt: OrderedDict[str, float] = OrderedDict()
         self._seen_grp_txt_ttl = 300
         self._seen_grp_txt_max = 1000
-        # TXT_MSG (direct) dedup by packet hash so reconnects don't queue the same packet multiple times.
+        # TXT_MSG (direct) dedup by packet hash so reconnects don't re-queue same packet.
         self._seen_txt: OrderedDict[str, float] = OrderedDict()
         self._seen_txt_ttl = 300
         self._seen_txt_max = 1000
@@ -549,11 +547,11 @@ class CompanionBase(ABC):
         self._push_callbacks["raw_data_received"].append(callback)
 
     def on_binary_response(self, callback: Callable) -> None:
-        """Register callback for PUSH_CODE_BINARY_RESPONSE (0x8C). Callback(tag_bytes, response_data, ...)."""
+        """Register callback for PUSH 0x8C. Callback(tag_bytes, response_data)."""
         self._push_callbacks["binary_response"].append(callback)
 
     def on_path_discovery_response(self, callback: Callable) -> None:
-        """Register callback for path discovery response (PUSH 0x8D). Callback(tag_bytes, contact_pubkey, out_path, in_path)."""
+        """Register callback for path discovery 0x8D. (tag_bytes, pubkey, out_path, in_path)."""
         self._push_callbacks["path_discovery_response"].append(callback)
 
     def register_binary_request(
@@ -564,7 +562,7 @@ class CompanionBase(ABC):
         pubkey_prefix: str = "",
         context: Optional[dict] = None,
     ) -> None:
-        """Register a pending binary request for matching responses. Call cleanup_expired_requests first."""
+        """Register a pending binary request. Call cleanup_expired_requests first."""
         self._pending_binary_requests[tag_hex] = {
             "request_type": request_type,
             "pubkey_prefix": pubkey_prefix,
@@ -576,8 +574,7 @@ class CompanionBase(ABC):
         """Remove expired entries from _pending_binary_requests."""
         now = time.time()
         expired = [
-            tag for tag, info in self._pending_binary_requests.items()
-            if now > info["expires_at"]
+            tag for tag, info in self._pending_binary_requests.items() if now > info["expires_at"]
         ]
         for tag in expired:
             del self._pending_binary_requests[tag]
@@ -588,7 +585,7 @@ class CompanionBase(ABC):
         response_data: bytes,
         path_info: Optional[tuple] = None,
     ) -> None:
-        """Called by ProtocolResponseHandler when a binary response (tag + data, optional path) is received."""
+        """Called when binary response (tag + data, optional path) received."""
         if path_info is not None:
             if await self._try_handle_path_discovery(tag_bytes, path_info):
                 return
@@ -596,7 +593,7 @@ class CompanionBase(ABC):
         tag_hex = tag_bytes.hex()
         info = self._pending_binary_requests.pop(tag_hex, None)
         if not info:
-            # Skip log for small payloads (e.g. login response already handled by LoginResponseHandler)
+            # Skip log for small payloads (e.g. login response handled elsewhere)
             if len(response_data) >= 20:
                 logger.debug(f"Binary response for unknown tag {tag_hex}")
             await self._fire_callbacks("binary_response", tag_bytes, response_data)
@@ -607,6 +604,7 @@ class CompanionBase(ABC):
         parsed = None
         try:
             from . import binary_parsing
+
             parsed = binary_parsing.parse_binary_response(
                 request_type, response_data, pubkey_prefix=pubkey_prefix, context=context
             )
@@ -616,9 +614,7 @@ class CompanionBase(ABC):
             "binary_response", tag_bytes, response_data, parsed, request_type
         )
 
-    async def _try_handle_path_discovery(
-        self, tag_bytes: bytes, path_info: tuple
-    ) -> bool:
+    async def _try_handle_path_discovery(self, tag_bytes: bytes, path_info: tuple) -> bool:
         """If tag is pending path discovery, fire path_discovery_response and return True."""
         out_path, in_path, contact_pubkey = path_info
         tag_int = int.from_bytes(tag_bytes, "little")
@@ -639,9 +635,7 @@ class CompanionBase(ABC):
     # -------------------------------------------------------------------------
 
     @abstractmethod
-    async def _send_packet(
-        self, pkt: Packet, wait_for_ack: bool = False
-    ) -> bool:
+    async def _send_packet(self, pkt: Packet, wait_for_ack: bool = False) -> bool:
         """Send a packet via the subclass transport (radio or packet_injector)."""
 
     @abstractmethod
@@ -827,9 +821,7 @@ class CompanionBase(ABC):
         tag_int = random.randint(0, 0xFFFFFFFF)
         tag_bytes = tag_int.to_bytes(4, "little")
         inv_perm = 0xFF & ~TELEM_PERM_BASE
-        req_payload = tag_bytes + bytes(
-            [REQ_TYPE_GET_TELEMETRY_DATA, inv_perm, 0, 0, 0]
-        )
+        req_payload = tag_bytes + bytes([REQ_TYPE_GET_TELEMETRY_DATA, inv_perm, 0, 0, 0])
         old_path_len = contact.out_path_len
         old_path = contact.out_path
         contact.out_path_len = -1
@@ -870,9 +862,7 @@ class CompanionBase(ABC):
     # Dedup Helper
     # -------------------------------------------------------------------------
 
-    def _check_dedup(
-        self, cache: OrderedDict, key: str, ttl: float, max_size: int
-    ) -> bool:
+    def _check_dedup(self, cache: OrderedDict, key: str, ttl: float, max_size: int) -> bool:
         """Return True if *key* is a duplicate. Evicts expired entries."""
         now = time.time()
         if key in cache:

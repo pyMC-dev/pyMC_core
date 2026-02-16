@@ -6,11 +6,7 @@ from pymc_core.companion import CompanionBridge
 from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import LocalIdentity, Packet
-from pymc_core.protocol.constants import (
-    PAYLOAD_TYPE_ADVERT,
-    PAYLOAD_TYPE_TXT_MSG,
-    ROUTE_TYPE_FLOOD,
-)
+from pymc_core.protocol.constants import PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD
 
 
 def _make_peer_contact(name: str) -> Contact:
@@ -152,7 +148,7 @@ class TestCompanionBridgeSendAndShare:
         bridge = CompanionBridge(LocalIdentity(), injector)
         contact = _make_peer_contact("Alice")
         bridge.contacts.add(contact)
-        result = await bridge.send_text_message(contact.public_key, "Hello")
+        await bridge.send_text_message(contact.public_key, "Hello")
         assert len(injector.calls) >= 1
         pkt, _ = injector.calls[0]
         assert (pkt.header >> 2) & 0x0F == PAYLOAD_TYPE_TXT_MSG
@@ -240,7 +236,9 @@ class TestCompanionBridgeBinaryReq:
         bridge = CompanionBridge(LocalIdentity(), injector)
         contact = _make_peer_contact("Rpt")
         bridge.contacts.add(contact)
-        result = await bridge.send_binary_req(contact.public_key, bytes([0x01]), timeout_seconds=5.0)
+        result = await bridge.send_binary_req(
+            contact.public_key, bytes([0x01]), timeout_seconds=5.0
+        )
         assert result.success is True
         assert result.expected_ack is not None
         assert len(injector.calls) == 1

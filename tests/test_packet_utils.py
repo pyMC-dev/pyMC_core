@@ -149,7 +149,9 @@ class TestPacketHashingUtils:
     def test_hash_string_returns_full_uppercase_hex(self):
         payload_type = 0x05
         path_len = 0
-        payload = bytes.fromhex("D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D")
+        payload = bytes.fromhex(
+            "D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D"
+        )
 
         expected_hex = "887B9BE6056D0B0517AF3A04AC2478EDFC2AB731936DEA525041500E7ADE74D3"
 
@@ -166,7 +168,9 @@ class TestPacketHashingUtils:
     def test_hash_string_truncates_to_requested_length(self):
         payload_type = 0x05
         path_len = 1
-        payload = bytes.fromhex("D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D")
+        payload = bytes.fromhex(
+            "D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D"
+        )
 
         expected_hex = "887B9BE6056D0B05"
 

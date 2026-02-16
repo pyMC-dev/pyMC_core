@@ -87,8 +87,8 @@ class TextMessageHandler(BaseHandler):
         # Skip ACK for TXT_TYPE_CLI_DATA (0x01) - CLI commands don't need ACKs
         # Following C++ pattern: only TXT_TYPE_PLAIN (0x00) gets ACKs
         TXT_TYPE_PLAIN = 0x00
-        TXT_TYPE_CLI_DATA = 0x01
-        send_ack = (txt_type == TXT_TYPE_PLAIN)
+        TXT_TYPE_CLI_DATA = 0x01  # noqa: F841
+        send_ack = txt_type == TXT_TYPE_PLAIN
 
         if send_ack:
             # Create appropriate ACK response

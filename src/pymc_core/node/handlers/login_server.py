@@ -144,22 +144,28 @@ class LoginServerHandler(BaseHandler):
                     self.log("[LoginServer] Room server packet too short for sync_since field")
                     return
                 sync_since = struct.unpack("<I", plaintext[4:8])[0]
-                
+
                 # Find null terminator AFTER sync_since field (starting from byte 8)
                 null_idx = plaintext.find(b"\x00", 8)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[8:null_idx]
-                self.log(f"[LoginServer] Room server format: sync_since={sync_since}, password from byte 8 to {null_idx}")
-                self.log(f"[LoginServer] Password bytes hex: {password_bytes.hex() if len(password_bytes) > 0 else '(empty)'}")
+                self.log(
+                    f"[LoginServer] Room server: sync_since={sync_since}, "
+                    f"password from byte 8 to {null_idx}"
+                )
+                self.log(
+                    f"[LoginServer] Password hex: "
+                    f"{password_bytes.hex() if password_bytes else '(empty)'}"
+                )
             else:
                 # Repeater format: password only
                 # Find null terminator after timestamp (starting from byte 4)
                 null_idx = plaintext.find(b"\x00", 4)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[4:null_idx]
                 self.log(f"[LoginServer] Repeater format: password from byte 4 to {null_idx}")
 
