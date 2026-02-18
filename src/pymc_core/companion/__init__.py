@@ -39,6 +39,7 @@ from .constants import (
     BinaryReqType,
 )
 from .contact_store import ContactStore
+from .frame_server import CompanionFrameServer
 from .message_queue import MessageQueue
 from .models import AdvertPath, Channel, Contact, NodePrefs, PacketStats, QueuedMessage, SentResult
 from .path_cache import PathCache
@@ -48,6 +49,7 @@ __all__ = [
     # Main classes
     "CompanionRadio",
     "CompanionBridge",
+    "CompanionFrameServer",
     # Stores
     "ContactStore",
     "ChannelStore",
