@@ -22,13 +22,18 @@ from .constants import (
     CMD_ADD_UPDATE_CONTACT,
     CMD_APP_START,
     CMD_DEVICE_QUERY,
+    CMD_EXPORT_CONTACT,
     CMD_GET_ADVERT_PATH,
+    CMD_GET_AUTOADD_CONFIG,
     CMD_GET_BATT_AND_STORAGE,
     CMD_GET_CHANNEL,
     CMD_GET_CONTACT_BY_KEY,
     CMD_GET_CONTACTS,
+    CMD_GET_CUSTOM_VARS,
+    CMD_GET_DEVICE_TIME,
     CMD_GET_STATS,
     CMD_IMPORT_CONTACT,
+    CMD_LOGOUT,
     CMD_REMOVE_CONTACT,
     CMD_RESET_PATH,
     CMD_SEND_BINARY_REQ,
@@ -43,8 +48,15 @@ from .constants import (
     CMD_SEND_TXT_MSG,
     CMD_SET_ADVERT_LATLON,
     CMD_SET_ADVERT_NAME,
+    CMD_SET_AUTOADD_CONFIG,
     CMD_SET_CHANNEL,
+    CMD_SET_CUSTOM_VAR,
+    CMD_SET_DEVICE_TIME,
     CMD_SET_FLOOD_SCOPE,
+    CMD_SET_RADIO_PARAMS,
+    CMD_SET_RADIO_TX_POWER,
+    CMD_SET_TUNING_PARAMS,
+    CMD_SHARE_CONTACT,
     CMD_SYNC_NEXT_MESSAGE,
     ERR_CODE_BAD_STATE,
     ERR_CODE_ILLEGAL_ARG,
@@ -71,6 +83,7 @@ from .constants import (
     PUSH_CODE_TELEMETRY_RESPONSE,
     PUSH_CODE_TRACE_DATA,
     RESP_CODE_ADVERT_PATH,
+    RESP_CODE_AUTOADD_CONFIG,
     RESP_CODE_BATT_AND_STORAGE,
     RESP_CODE_CHANNEL_INFO,
     RESP_CODE_CHANNEL_MSG_RECV,
@@ -79,9 +92,12 @@ from .constants import (
     RESP_CODE_CONTACT_MSG_RECV,
     RESP_CODE_CONTACT_MSG_RECV_V3,
     RESP_CODE_CONTACTS_START,
+    RESP_CODE_CURR_TIME,
+    RESP_CODE_CUSTOM_VARS,
     RESP_CODE_DEVICE_INFO,
     RESP_CODE_END_OF_CONTACTS,
     RESP_CODE_ERR,
+    RESP_CODE_EXPORT_CONTACT,
     RESP_CODE_NO_MORE_MESSAGES,
     RESP_CODE_OK,
     RESP_CODE_SELF_INFO,
@@ -652,6 +668,30 @@ class CompanionFrameServer:
                 await self._cmd_send_trace_path(data)
             elif cmd == CMD_SET_FLOOD_SCOPE:
                 await self._cmd_set_flood_scope(data)
+            elif cmd == CMD_GET_DEVICE_TIME:
+                await self._cmd_get_device_time(data)
+            elif cmd == CMD_SET_DEVICE_TIME:
+                await self._cmd_set_device_time(data)
+            elif cmd == CMD_SET_RADIO_PARAMS:
+                await self._cmd_set_radio_params(data)
+            elif cmd == CMD_SET_RADIO_TX_POWER:
+                await self._cmd_set_tx_power(data)
+            elif cmd == CMD_SHARE_CONTACT:
+                await self._cmd_share_contact(data)
+            elif cmd == CMD_EXPORT_CONTACT:
+                await self._cmd_export_contact(data)
+            elif cmd == CMD_SET_TUNING_PARAMS:
+                await self._cmd_set_tuning_params(data)
+            elif cmd == CMD_LOGOUT:
+                await self._cmd_logout(data)
+            elif cmd == CMD_GET_CUSTOM_VARS:
+                await self._cmd_get_custom_vars(data)
+            elif cmd == CMD_SET_CUSTOM_VAR:
+                await self._cmd_set_custom_var(data)
+            elif cmd == CMD_SET_AUTOADD_CONFIG:
+                await self._cmd_set_autoadd_config(data)
+            elif cmd == CMD_GET_AUTOADD_CONFIG:
+                await self._cmd_get_autoadd_config(data)
             else:
                 logger.warning(
                     "Companion unsupported cmd 0x%02x (%s) len=%s",
@@ -1379,3 +1419,118 @@ class CompanionFrameServer:
         else:
             self.bridge.set_flood_scope(None)
         self._write_ok()
+
+    # -------------------------------------------------------------------------
+    # Time, radio, tuning, share/export, logout, custom vars, autoadd
+    # -------------------------------------------------------------------------
+
+    async def _cmd_get_device_time(self, data: bytes) -> None:
+        now = self.bridge.get_time()
+        self._write_frame(bytes([RESP_CODE_CURR_TIME]) + struct.pack("<I", now))
+
+    async def _cmd_set_device_time(self, data: bytes) -> None:
+        if len(data) < 4:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        secs = struct.unpack("<I", data[:4])[0]
+        if self.bridge.set_time(secs):
+            self._write_ok()
+        else:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+
+    async def _cmd_set_radio_params(self, data: bytes) -> None:
+        if len(data) < 10:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        freq = struct.unpack_from("<I", data, 0)[0]
+        bw = struct.unpack_from("<I", data, 4)[0]
+        sf = data[8]
+        cr = data[9]
+        if not (300000 <= freq <= 2500000):
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        if not (7000 <= bw <= 500000):
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        if not (5 <= sf <= 12) or not (5 <= cr <= 8):
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        self.bridge.set_radio_params(freq, bw, sf, cr)
+        self._write_ok()
+
+    async def _cmd_set_tx_power(self, data: bytes) -> None:
+        if len(data) < 1:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        power = struct.unpack_from("<b", data, 0)[0]
+        if power < -9 or power > 20:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        self.bridge.set_tx_power(power)
+        self._write_ok()
+
+    async def _cmd_share_contact(self, data: bytes) -> None:
+        if len(data) < PUB_KEY_SIZE:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        pubkey = data[:PUB_KEY_SIZE]
+        ok = await self.bridge.share_contact(pubkey)
+        self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
+
+    async def _cmd_export_contact(self, data: bytes) -> None:
+        if len(data) < PUB_KEY_SIZE:
+            raw = self.bridge.export_contact(None)
+        else:
+            raw = self.bridge.export_contact(data[:PUB_KEY_SIZE])
+        if raw is None:
+            self._write_err(ERR_CODE_NOT_FOUND)
+            return
+        self._write_frame(bytes([RESP_CODE_EXPORT_CONTACT]) + raw)
+
+    async def _cmd_set_tuning_params(self, data: bytes) -> None:
+        if len(data) < 8:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        rx_ms = struct.unpack_from("<I", data, 0)[0]
+        af_ms = struct.unpack_from("<I", data, 4)[0]
+        self.bridge.set_tuning_params(rx_ms / 1000.0, af_ms / 1000.0)
+        self._write_ok()
+
+    async def _cmd_logout(self, data: bytes) -> None:
+        if len(data) < PUB_KEY_SIZE:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        pubkey = data[:PUB_KEY_SIZE]
+        await self.bridge.send_logout(pubkey)
+        self._write_ok()
+
+    async def _cmd_get_custom_vars(self, data: bytes) -> None:
+        custom_vars = self.bridge.get_custom_vars()
+        parts = [f"{k}:{v}" for k, v in custom_vars.items()]
+        csv = ",".join(parts)[:140]
+        self._write_frame(bytes([RESP_CODE_CUSTOM_VARS]) + csv.encode("utf-8", errors="replace"))
+
+    async def _cmd_set_custom_var(self, data: bytes) -> None:
+        if len(data) < 3:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        text = data.split(b"\x00")[0].decode("utf-8", errors="replace")
+        sep = text.find(":")
+        if sep < 1:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        name = text[:sep]
+        value = text[sep + 1 :]
+        ok = self.bridge.set_custom_var(name, value)
+        self._write_ok() if ok else self._write_err(ERR_CODE_ILLEGAL_ARG)
+
+    async def _cmd_set_autoadd_config(self, data: bytes) -> None:
+        if len(data) < 1:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        self.bridge.set_autoadd_config(data[0])
+        self._write_ok()
+
+    async def _cmd_get_autoadd_config(self, data: bytes) -> None:
+        config = self.bridge.get_autoadd_config()
+        self._write_frame(bytes([RESP_CODE_AUTOADD_CONFIG, config & 0xFF]))

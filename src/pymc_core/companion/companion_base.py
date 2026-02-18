@@ -169,6 +169,7 @@ class CompanionBase(ABC):
         self._custom_vars: dict[str, str] = {}
         self._sign_buffer: Optional[bytearray] = None
         self._flood_transport_key: Optional[bytes] = None
+        self._time_offset: float = 0.0
 
         self._event_service = EventService()
         self._event_subscriber = _CompanionEventSubscriber(self)
@@ -190,6 +191,35 @@ class CompanionBase(ABC):
         self._seen_txt: OrderedDict[str, float] = OrderedDict()
         self._seen_txt_ttl = 300
         self._seen_txt_max = 1000
+
+        # Allow subclasses to restore persisted preferences on startup.
+        self._load_prefs()
+
+    # -------------------------------------------------------------------------
+    # Preference Persistence Hooks
+    # -------------------------------------------------------------------------
+
+    def _save_prefs(self) -> None:
+        """Hook: persist the current :attr:`prefs` to stable storage.
+
+        The default implementation is a no-op — preferences live only in
+        memory.  Subclasses that need persistence (e.g. backed by SQLite or
+        a JSON file) should override this method.
+
+        Called automatically after any preference-mutating method
+        (``set_radio_params``, ``set_tx_power``, ``set_tuning_params``,
+        ``set_autoadd_config``, ``set_other_params``,
+        ``set_advert_name``, ``set_advert_latlon``).
+        """
+
+    def _load_prefs(self) -> None:
+        """Hook: restore :attr:`prefs` from stable storage on startup.
+
+        The default implementation is a no-op.  Subclasses should override
+        to populate :attr:`self.prefs` fields from their persistence layer.
+
+        Called once at the end of :meth:`_init_companion_stores`.
+        """
 
     # -------------------------------------------------------------------------
     # Contact Management
@@ -283,6 +313,7 @@ class CompanionBase(ABC):
     def set_advert_name(self, name: str) -> None:
         """Set the node's advertised name (max 31 chars)."""
         self.prefs.node_name = name[:31]
+        self._save_prefs()
 
     def set_advert_latlon(self, lat: float, lon: float) -> None:
         """Set the GPS coordinates included in advertisements."""
@@ -292,6 +323,7 @@ class CompanionBase(ABC):
             raise ValueError(f"Longitude out of range: {lon}")
         self.prefs.latitude = lat
         self.prefs.longitude = lon
+        self._save_prefs()
 
     def set_radio_params(self, freq_hz: int, bw_hz: int, sf: int, cr: int) -> bool:
         """Set radio parameters (frequency, bandwidth, SF, CR)."""
@@ -303,21 +335,36 @@ class CompanionBase(ABC):
         self.prefs.bandwidth_hz = bw_hz
         self.prefs.spreading_factor = sf
         self.prefs.coding_rate = cr
+        self._save_prefs()
         return True
 
     def set_tx_power(self, power_dbm: int) -> bool:
         """Set the transmit power in dBm."""
         self.prefs.tx_power_dbm = power_dbm
+        self._save_prefs()
         return True
 
     def set_tuning_params(self, rx_delay: float, airtime_factor: float) -> None:
         """Set RX delay and airtime factor tuning parameters."""
         self.prefs.rx_delay_base = rx_delay
         self.prefs.airtime_factor = airtime_factor
+        self._save_prefs()
 
     def get_tuning_params(self) -> tuple[float, float]:
         """Return the current (rx_delay, airtime_factor) tuning parameters."""
         return (self.prefs.rx_delay_base, self.prefs.airtime_factor)
+
+    def get_time(self) -> int:
+        """Return the current device time as a Unix timestamp."""
+        return int(time.time() + self._time_offset)
+
+    def set_time(self, secs: int) -> bool:
+        """Set the device time.  Returns False if *secs* is in the past."""
+        current = self.get_time()
+        if secs < current:
+            return False
+        self._time_offset = secs - time.time()
+        return True
 
     def set_other_params(
         self,
@@ -333,6 +380,7 @@ class CompanionBase(ABC):
         self.prefs.telemetry_mode_environment = (telemetry_modes >> 4) & 0x03
         self.prefs.advert_loc_policy = advert_loc_policy
         self.prefs.multi_acks = multi_acks
+        self._save_prefs()
 
     def get_self_info(self) -> NodePrefs:
         """Return a copy of the current node preferences."""
@@ -513,6 +561,7 @@ class CompanionBase(ABC):
     def set_autoadd_config(self, config: int) -> None:
         """Set the auto-add configuration bitmask."""
         self.prefs.autoadd_config = config
+        self._save_prefs()
 
     # -------------------------------------------------------------------------
     # Push Callbacks
@@ -1036,6 +1085,21 @@ class CompanionBase(ABC):
         finally:
             login_handler.set_login_callback(None)
             login_handler.clear_login_password(dest_hash)
+
+    async def send_logout(self, pub_key: bytes) -> bool:
+        """Send a logout / disconnect to a repeater contact."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return False
+        try:
+            pkt, _ = PacketBuilder.create_logout_packet(
+                contact=contact, local_identity=self._identity
+            )
+            await self._send_packet(pkt, wait_for_ack=False)
+            return True
+        except Exception as e:
+            logger.error(f"Logout error: {e}")
+            return False
 
     async def send_status_request(self, pub_key: bytes, timeout: float = 15.0) -> dict:
         """Send a protocol request for repeater status/stats."""
