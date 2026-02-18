@@ -26,6 +26,8 @@ from ..protocol.constants import (
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
     ADVERT_FLAG_IS_SENSOR,
+    PAYLOAD_TYPE_CONTROL,
+    REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
@@ -44,10 +46,13 @@ from .constants import (
     DEFAULT_OFFLINE_QUEUE_SIZE,
     DEFAULT_RESPONSE_TIMEOUT_MS,
     MAX_SIGN_DATA_SIZE,
+    PROTOCOL_CODE_ANON_REQ,
     PROTOCOL_CODE_BINARY_REQ,
+    PROTOCOL_CODE_RAW_DATA,
     STATS_TYPE_CORE,
     STATS_TYPE_PACKETS,
     STATS_TYPE_RADIO,
+    TXT_TYPE_PLAIN,
 )
 from .contact_store import ContactStore
 from .message_queue import MessageQueue
@@ -652,40 +657,24 @@ class CompanionBase(ABC):
         """Return whether the companion is currently running."""
 
     @abstractmethod
-    async def send_text_message(
-        self,
-        pub_key: bytes,
-        text: str,
-        txt_type: int = 0,
-        attempt: int = 1,
-    ) -> SentResult:
-        """Send a direct text message to a contact."""
-
-    @abstractmethod
-    async def send_channel_message(self, channel_idx: int, text: str) -> bool:
-        """Send a message to a channel."""
-
-    @abstractmethod
-    async def send_login(self, pub_key: bytes, password: str) -> dict:
-        """Send a login request to a repeater."""
-
-    @abstractmethod
-    async def send_trace_path(
-        self,
-        pub_key: bytes,
-        tag: int,
-        auth_code: int,
-        flags: int = 0,
-    ) -> bool:
-        """Send a trace path request to a contact."""
-
-    @abstractmethod
     def import_private_key(self, key: bytes) -> bool:
         """Import a private key and rebuild the identity."""
 
-    @abstractmethod
-    async def send_control_data(self, data: Any = None) -> bool:
-        """Send a control data packet."""
+    def _get_protocol_response_handler(self) -> Any:
+        """Return the protocol response handler, or ``None``.
+
+        Subclasses that support request/response methods (telemetry, status,
+        binary request, etc.) must override this to return their handler.
+        """
+        return None
+
+    def _get_login_response_handler(self) -> Any:
+        """Return the login response handler, or ``None``."""
+        return None
+
+    def _get_text_handler(self) -> Any:
+        """Return the text message handler, or ``None``."""
+        return None
 
     # -------------------------------------------------------------------------
     # Unified TX methods (shared between Radio and Bridge)
@@ -853,6 +842,383 @@ class CompanionBase(ABC):
                 current.out_path_len = old_path_len
                 current.out_path = old_path
                 self.contacts.update(current)
+
+    async def send_text_message(
+        self,
+        pub_key: bytes,
+        text: str,
+        txt_type: int = TXT_TYPE_PLAIN,
+        attempt: int = 1,
+    ) -> SentResult:
+        """Send a direct text message to a contact."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            logger.warning(f"Contact not found for key {pub_key.hex()[:12]}...")
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        try:
+            is_flood = proxy.out_path_len < 0
+            msg_type = "flood" if is_flood else "direct"
+            pkt, ack_crc = PacketBuilder.create_text_message(
+                contact=proxy,
+                local_identity=self._identity,
+                message=text,
+                attempt=attempt,
+                message_type=msg_type,
+            )
+            self._apply_flood_scope(pkt)
+            self._track_pending_ack(ack_crc)
+            success = await self._send_packet(pkt, wait_for_ack=True)
+            if success:
+                self.stats.record_tx(is_flood=is_flood)
+            else:
+                self.stats.record_tx_error()
+            return SentResult(
+                success=success,
+                is_flood=is_flood,
+                expected_ack=ack_crc,
+                timeout_ms=None,
+            )
+        except Exception as e:
+            logger.error(f"Error sending text message: {e}")
+            self.stats.record_tx_error()
+            return SentResult(success=False)
+
+    async def send_channel_message(self, channel_idx: int, text: str) -> bool:
+        """Send a message to a channel."""
+        channel = self.channels.get(channel_idx)
+        if not channel:
+            logger.warning(f"Channel {channel_idx} not found")
+            return False
+        try:
+            pkt = PacketBuilder.create_group_datagram(
+                group_name=channel.name,
+                local_identity=self._identity,
+                message=text,
+                sender_name=self.prefs.node_name,
+                channels_config=self.channels.get_channels(),
+            )
+            self._apply_flood_scope(pkt)
+            success = await self._send_packet(pkt, wait_for_ack=False)
+            if success:
+                self.stats.record_tx(is_flood=True)
+            else:
+                self.stats.record_tx_error()
+            return success
+        except Exception as e:
+            logger.error(f"Error sending channel message: {e}")
+            self.stats.record_tx_error()
+            return False
+
+    async def send_raw_data(
+        self,
+        dest_key: bytes,
+        data: bytes,
+        path: Optional[bytes] = None,
+    ) -> SentResult:
+        """Send raw data to a contact via a protocol request."""
+        contact = self.contacts.get_by_key(dest_key)
+        if not contact:
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=PROTOCOL_CODE_RAW_DATA,
+                data=data,
+            )
+            success = await self._send_packet(pkt, wait_for_ack=False)
+            return SentResult(success=success)
+        except Exception as e:
+            logger.error(f"Error sending raw data: {e}")
+            return SentResult(success=False)
+
+    async def send_trace_path(
+        self,
+        pub_key: bytes,
+        tag: int,
+        auth_code: int,
+        flags: int = 0,
+    ) -> bool:
+        """Send a trace path request to a contact."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return False
+        path = list(contact.out_path) if contact.out_path else []
+        if not path:
+            path = [contact.public_key[0]]
+        try:
+            pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path)
+            return await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Error sending trace: {e}")
+            return False
+
+    async def send_control_data(self, data: Any = None) -> bool:
+        """Send a CONTROL packet (e.g. discovery request).
+
+        If *data* is provided it must be 1-254 bytes with the first byte having
+        the 0x80 bit set (e.g. ``DISCOVER_REQ``).  Returns ``False`` for
+        invalid payloads.
+
+        When called with no *data* (or ``None``), a default discovery request
+        is sent for backward compatibility.
+        """
+        try:
+            if data and len(data) <= 254 and (data[0] & 0x80) != 0:
+                pkt = Packet()
+                pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
+                pkt.path_len = 0
+                pkt.path = bytearray()
+                pkt.payload = bytearray(data)
+                pkt.payload_len = len(data)
+                return await self._send_packet(pkt, wait_for_ack=False)
+            elif data is not None:
+                # data was provided but invalid
+                return False
+            # No data: send default discovery request
+            tag = random.randint(0, 0xFFFFFFFF)
+            pkt = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
+            return await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Error sending control data: {e}")
+            return False
+
+    async def send_login(self, pub_key: bytes, password: str) -> dict:
+        """Send a login request to a repeater and wait for the response."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        login_handler = self._get_login_response_handler()
+        if not login_handler:
+            return {"success": False, "reason": "Login handler not available"}
+        dest_hash = bytes.fromhex(proxy.public_key)[0]
+        login_handler.store_login_password(dest_hash, password)
+        login_result: dict = {"success": False, "data": {}}
+        login_event = asyncio.Event()
+
+        def _login_cb(success: bool, data: dict) -> None:
+            login_result["success"] = success
+            login_result["data"] = data
+            login_event.set()
+
+        login_handler.set_login_callback(_login_cb)
+        try:
+            pkt = PacketBuilder.create_login_packet(
+                contact=proxy, local_identity=self._identity, password=password
+            )
+            await self._send_packet(pkt, wait_for_ack=False)
+            try:
+                await asyncio.wait_for(login_event.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                return {"success": False, "reason": "Login response timeout"}
+            data = login_result["data"]
+            return {
+                "success": login_result["success"],
+                "repeater": contact.name,
+                "is_admin": data.get("is_admin", False),
+                "keep_alive_interval": data.get("keep_alive_interval", 0),
+                "tag": data.get("timestamp", 0),
+                "acl_permissions": data.get("reserved", data.get("permissions", 0)),
+                "reason": "Login successful" if login_result["success"] else "Login failed",
+            }
+        except Exception as e:
+            logger.error(f"Login error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            login_handler.set_login_callback(None)
+            login_handler.clear_login_password(dest_hash)
+
+    async def send_status_request(self, pub_key: bytes, timeout: float = 15.0) -> dict:
+        """Send a protocol request for repeater status/stats."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        proto_handler = self._get_protocol_response_handler()
+        if not proto_handler:
+            return {"success": False, "reason": "Protocol handler not available"}
+        contact_hash = bytes.fromhex(proxy.public_key)[0]
+        waiter = ResponseWaiter()
+        proto_handler.set_response_callback(contact_hash, waiter.callback)
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_STATUS,
+                data=b"",
+            )
+            await self._send_packet(pkt, wait_for_ack=False)
+            result = await waiter.wait(timeout)
+            return {
+                "success": result.get("success", False),
+                "repeater": contact.name,
+                "stats": result.get("parsed", {}),
+                "response_text": result.get("text"),
+                "reason": "Stats received" if result.get("success") else "Stats request failed",
+            }
+        except Exception as e:
+            logger.error(f"Status request error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            proto_handler.clear_response_callback(contact_hash)
+
+    async def send_telemetry_request(
+        self,
+        pub_key: bytes,
+        want_base: bool = True,
+        want_location: bool = True,
+        want_environment: bool = True,
+        timeout: float = 10.0,
+    ) -> dict:
+        """Send a telemetry request to a contact and wait for the response."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        proto_handler = self._get_protocol_response_handler()
+        if not proto_handler:
+            return {"success": False, "reason": "Protocol handler not available"}
+        contact_hash = bytes.fromhex(proxy.public_key)[0]
+        waiter = ResponseWaiter()
+        proto_handler.set_response_callback(contact_hash, waiter.callback)
+        try:
+            inv = PacketBuilder._compute_inverse_perm_mask(
+                want_base, want_location, want_environment
+            )
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
+                data=bytes([inv]),
+            )
+            await self._send_packet(pkt, wait_for_ack=False)
+            result = await waiter.wait(timeout)
+            return {
+                "success": result.get("success", False),
+                "contact": contact.name,
+                "telemetry_data": result.get("parsed", {}),
+                "response_text": result.get("text"),
+                "reason": ("Telemetry received" if result.get("success") else "Telemetry failed"),
+            }
+        except Exception as e:
+            logger.error(f"Telemetry error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            proto_handler.clear_response_callback(contact_hash)
+
+    async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
+        """Legacy: send binary request and wait.
+
+        Prefer ``send_binary_req`` + ``on_binary_response``.
+        """
+        return await self._send_protocol_request(pub_key, PROTOCOL_CODE_BINARY_REQ, data)
+
+    async def send_anon_request(self, pub_key: bytes, data: bytes) -> dict:
+        """Send an anonymous request to a contact and wait for the response."""
+        return await self._send_protocol_request(pub_key, PROTOCOL_CODE_ANON_REQ, data)
+
+    async def _send_protocol_request(self, pub_key: bytes, protocol_code: int, data: bytes) -> dict:
+        """Build and send a protocol request, waiting for the response."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        proto_handler = self._get_protocol_response_handler()
+        if not proto_handler:
+            return {"success": False, "reason": "Protocol handler not available"}
+        contact_hash = bytes.fromhex(proxy.public_key)[0]
+        waiter = ResponseWaiter()
+        proto_handler.set_response_callback(contact_hash, waiter.callback)
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=protocol_code,
+                data=data,
+            )
+            await self._send_packet(pkt, wait_for_ack=False)
+            result = await waiter.wait(10.0)
+            return {
+                "success": result.get("success", False),
+                "response": result.get("text"),
+                "parsed_data": result.get("parsed", {}),
+                "reason": "Success" if result.get("success") else "Failed",
+            }
+        except Exception as e:
+            logger.error(f"Protocol request error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            proto_handler.clear_response_callback(contact_hash)
+
+    async def send_repeater_command(
+        self, pub_key: bytes, command: str, parameters: Optional[str] = None
+    ) -> dict:
+        """Send a text-based command to a repeater and wait for the response."""
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return {"success": False, "reason": "Contact not found"}
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return {"success": False, "reason": "Contact not found"}
+        text_handler = self._get_text_handler()
+        if not text_handler:
+            return {"success": False, "reason": "Text handler not available"}
+        full_command = command
+        if parameters:
+            full_command += f" {parameters}"
+        response_data: dict = {"text": None, "success": False}
+        response_event = asyncio.Event()
+
+        def _response_cb(message_text: str, sender_contact: Any) -> None:
+            response_data["text"] = message_text
+            response_data["success"] = True
+            response_event.set()
+
+        text_handler.set_command_response_callback(_response_cb)
+        try:
+            msg_type = "flood" if proxy.out_path_len < 0 else "direct"
+            pkt, ack_crc = PacketBuilder.create_text_message(
+                contact=proxy,
+                local_identity=self._identity,
+                message=full_command,
+                attempt=1,
+                message_type=msg_type,
+            )
+            await self._send_packet(pkt, wait_for_ack=True)
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=15.0)
+            except asyncio.TimeoutError:
+                pass
+            return {
+                "success": response_data["success"],
+                "repeater": contact.name,
+                "command": command,
+                "response": response_data["text"],
+                "reason": ("Command successful" if response_data["success"] else "No response"),
+            }
+        except Exception as e:
+            logger.error(f"Repeater command error: {e}")
+            return {"success": False, "reason": str(e)}
+        finally:
+            text_handler.set_command_response_callback(None)
+
+    def _track_pending_ack(self, ack_crc: int) -> None:
+        """Hook for subclasses to track pending ACK CRCs. Default is a no-op."""
 
     def sync_next_message(self) -> Optional[QueuedMessage]:
         """Pop and return the next queued message, or None."""

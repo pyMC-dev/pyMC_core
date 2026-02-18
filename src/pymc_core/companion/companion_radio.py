@@ -11,24 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from typing import Any, Optional
 
 from ..node.node import MeshNode
-from ..protocol import LocalIdentity, Packet, PacketBuilder
-from ..protocol.constants import PAYLOAD_TYPE_CONTROL
+from ..protocol import LocalIdentity, Packet
+from ..protocol.constants import ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
 from .companion_base import CompanionBase
 from .constants import (
     ADV_TYPE_CHAT,
     DEFAULT_MAX_CHANNELS,
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
-    PROTOCOL_CODE_ANON_REQ,
-    PROTOCOL_CODE_BINARY_REQ,
-    PROTOCOL_CODE_RAW_DATA,
-    TXT_TYPE_PLAIN,
 )
-from .models import SentResult
 
 logger = logging.getLogger("CompanionRadio")
 
@@ -108,6 +102,19 @@ class CompanionRadio(CompanionBase):
         return await self.node.dispatcher.send_packet(pkt, wait_for_ack=wait_for_ack)
 
     # -------------------------------------------------------------------------
+    # Handler accessors (used by CompanionBase concrete send methods)
+    # -------------------------------------------------------------------------
+
+    def _get_protocol_response_handler(self) -> Any:
+        return getattr(self.node.dispatcher, "protocol_response_handler", None)
+
+    def _get_login_response_handler(self) -> Any:
+        return getattr(self.node.dispatcher, "login_response_handler", None)
+
+    def _get_text_handler(self) -> Any:
+        return getattr(self.node.dispatcher, "text_message_handler", None)
+
+    # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
 
@@ -137,86 +144,6 @@ class CompanionRadio(CompanionBase):
     @property
     def is_running(self) -> bool:
         return self._running
-
-    # -------------------------------------------------------------------------
-    # Messaging
-    # -------------------------------------------------------------------------
-
-    async def send_text_message(
-        self,
-        pub_key: bytes,
-        text: str,
-        txt_type: int = TXT_TYPE_PLAIN,
-        attempt: int = 1,
-    ) -> SentResult:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            logger.warning(f"Contact not found for key {pub_key.hex()[:12]}...")
-            return SentResult(success=False)
-        try:
-            result = await self.node.send_text(
-                contact_name=contact.name,
-                message=text,
-                attempt=attempt,
-            )
-            success = result.get("success", False)
-            is_flood = contact.out_path_len <= 0
-            if success:
-                self.stats.record_tx(is_flood=is_flood)
-            else:
-                self.stats.record_tx_error()
-            return SentResult(
-                success=success,
-                is_flood=is_flood,
-                expected_ack=result.get("crc"),
-                timeout_ms=None,
-            )
-        except Exception as e:
-            logger.error(f"Error sending text message: {e}")
-            self.stats.record_tx_error()
-            return SentResult(success=False)
-
-    async def send_channel_message(self, channel_idx: int, text: str) -> bool:
-        channel = self.channels.get(channel_idx)
-        if not channel:
-            logger.warning(f"Channel {channel_idx} not found")
-            return False
-        try:
-            result = await self.node.send_group_text(
-                group_name=channel.name,
-                message=text,
-            )
-            success = result.get("success", False)
-            if success:
-                self.stats.record_tx(is_flood=True)
-            else:
-                self.stats.record_tx_error()
-            return success
-        except Exception as e:
-            logger.error(f"Error sending channel message: {e}")
-            self.stats.record_tx_error()
-            return False
-
-    async def send_raw_data(
-        self,
-        dest_key: bytes,
-        data: bytes,
-        path: Optional[bytes] = None,
-    ) -> SentResult:
-        contact = self.contacts.get_by_key(dest_key)
-        if not contact:
-            logger.warning(f"Contact not found for raw data send: {dest_key.hex()[:12]}")
-            return SentResult(success=False)
-        try:
-            result = await self.node.send_protocol_request(
-                repeater_name=contact.name,
-                protocol_code=PROTOCOL_CODE_RAW_DATA,
-                data=data,
-            )
-            return SentResult(success=result.get("success", False))
-        except Exception as e:
-            logger.error(f"Error sending raw data: {e}")
-            return SentResult(success=False)
 
     # -------------------------------------------------------------------------
     # Flood Scope (sync to dispatcher)
@@ -268,33 +195,6 @@ class CompanionRadio(CompanionBase):
         return True
 
     # -------------------------------------------------------------------------
-    # Path & Routing
-    # -------------------------------------------------------------------------
-
-    async def send_trace_path(
-        self,
-        pub_key: bytes,
-        tag: int,
-        auth_code: int,
-        flags: int = 0,
-    ) -> bool:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            logger.warning(f"Contact not found for trace: {pub_key.hex()[:12]}")
-            return False
-        try:
-            result = await self.node.send_trace_packet(
-                contact_name=contact.name,
-                tag=tag,
-                auth_code=auth_code,
-                flags=flags,
-            )
-            return result.get("success", False)
-        except Exception as e:
-            logger.error(f"Error sending trace: {e}")
-            return False
-
-    # -------------------------------------------------------------------------
     # Key Management
     # -------------------------------------------------------------------------
 
@@ -317,138 +217,6 @@ class CompanionRadio(CompanionBase):
             return True
         except Exception as e:
             logger.error(f"Error importing private key: {e}")
-            return False
-
-    # -------------------------------------------------------------------------
-    # Requests
-    # -------------------------------------------------------------------------
-
-    async def send_login(self, pub_key: bytes, password: str) -> dict:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            return await self.node.send_login(
-                repeater_name=contact.name,
-                password=password,
-            )
-        except Exception as e:
-            logger.error(f"Login error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    async def send_status_request(self, pub_key: bytes) -> dict:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            return await self.node.send_status_request(repeater_name=contact.name)
-        except Exception as e:
-            logger.error(f"Status request error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    async def send_telemetry_request(
-        self,
-        pub_key: bytes,
-        want_base: bool = True,
-        want_location: bool = True,
-        want_environment: bool = True,
-        timeout: float = 10.0,
-    ) -> dict:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            return await self.node.send_telemetry_request(
-                contact_name=contact.name,
-                want_base=want_base,
-                want_location=want_location,
-                want_environment=want_environment,
-                timeout=timeout,
-            )
-        except Exception as e:
-            logger.error(f"Telemetry request error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    async def send_binary_request(self, pub_key: bytes, data: bytes) -> dict:
-        """Legacy: send binary request and wait. Prefer send_binary_req + on_binary_response."""
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            return await self.node.send_protocol_request(
-                repeater_name=contact.name,
-                protocol_code=PROTOCOL_CODE_BINARY_REQ,
-                data=data,
-            )
-        except Exception as e:
-            logger.error(f"Binary request error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    async def send_anon_request(self, pub_key: bytes, data: bytes) -> dict:
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            return await self.node.send_protocol_request(
-                repeater_name=contact.name,
-                protocol_code=PROTOCOL_CODE_ANON_REQ,
-                data=data,
-            )
-        except Exception as e:
-            logger.error(f"Anon request error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    async def send_repeater_command(
-        self, pub_key: bytes, command: str, parameters: Optional[str] = None
-    ) -> dict:
-        """Send a text-based command to a repeater and await response."""
-        contact = self.contacts.get_by_key(pub_key)
-        if not contact:
-            return {"success": False, "reason": "Contact not found"}
-        try:
-            result = await self.node.send_repeater_command(
-                repeater_name=contact.name,
-                command=command,
-                parameters=parameters,
-            )
-            reason = "Command successful" if result.get("success") else "No response"
-            return {
-                "success": result.get("success", False),
-                "repeater": contact.name,
-                "command": command,
-                "response": result.get("response"),
-                "reason": reason,
-            }
-        except Exception as e:
-            logger.error(f"Repeater command error: {e}")
-            return {"success": False, "reason": str(e)}
-
-    # -------------------------------------------------------------------------
-    # Control Data
-    # -------------------------------------------------------------------------
-
-    async def send_control_data(self, data: Optional[bytes] = None) -> bool:
-        """Send CONTROL packet. If data valid (len 1-254, byte0 0x80), send as control payload;
-        else send default discovery request (backward compat).
-        """
-        if data and len(data) <= 254 and (data[0] & 0x80) != 0:
-            try:
-                pkt = Packet()
-                pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
-                pkt.path_len = 0
-                pkt.path = bytearray()
-                pkt.payload = bytearray(data)
-                pkt.payload_len = len(data)
-                return await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
-            except Exception as e:
-                logger.error(f"Error sending control data: {e}")
-                return False
-        try:
-            tag = random.randint(0, 0xFFFFFFFF)
-            pkt = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
-            return await self.node.dispatcher.send_packet(pkt, wait_for_ack=False)
-        except Exception as e:
-            logger.error(f"Error sending control data: {e}")
             return False
 
     # -------------------------------------------------------------------------
@@ -480,8 +248,6 @@ class CompanionRadio(CompanionBase):
             )
 
     async def _on_packet_received(self, pkt: Any) -> None:
-        from ..protocol.constants import ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
-
         route_type = pkt.get_route_type()
         is_flood = route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD)
         self.stats.record_rx(is_flood=is_flood)

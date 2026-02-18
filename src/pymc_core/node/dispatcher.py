@@ -19,15 +19,10 @@ from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
 # Import handler classes
 from .handlers import (
     AckHandler,
-    AdvertHandler,
     AnonReqResponseHandler,
     ControlHandler,
-    GroupTextHandler,
-    LoginResponseHandler,
-    PathHandler,
-    ProtocolResponseHandler,
-    TextMessageHandler,
     TraceHandler,
+    create_core_handlers,
 )
 
 ACK_TIMEOUT = 5.0  # seconds to wait for an ACK
@@ -167,94 +162,56 @@ class Dispatcher:
         # Keep our identity handy for detecting our own packets
         self.local_identity = local_identity
 
-        # Set up ACK handler with callback to us
+        # --- ACK handler (dispatcher-specific wiring) ---
         ack_handler = AckHandler(self._log, self)
         ack_handler.set_ack_received_callback(self._register_ack_received)
-
-        # Register all the standard handlers
-        self.register_handler(
-            AdvertHandler.payload_type(),
-            AdvertHandler(self._log, event_service=event_service),
-        )
         self.register_handler(AckHandler.payload_type(), ack_handler)
 
-        # Text message handler - needs to send ACKs back through us
-        text_message_handler = TextMessageHandler(
-            local_identity,
-            contacts,
-            self._log,
-            self.send_packet,
-            event_service,
-            radio_config,
-        )
-        # Keep a reference so the node can use it
-        self.text_message_handler = text_message_handler
-        self.register_handler(
-            TextMessageHandler.payload_type(),
-            text_message_handler,
-        )
-        # Group text handler with channel database
-        self.register_handler(
-            GroupTextHandler.payload_type(),
-            GroupTextHandler(
-                local_identity,
-                contacts,
-                self._log,
-                self.send_packet,
-                channel_db,
-                event_service,
-                node_name,
-            ),
-        )
-        # Protocol response handler for encrypted responses (including telemetry)
-        protocol_response_handler = ProtocolResponseHandler(self._log, local_identity, contacts)
-        # Keep a reference for the node
-        self.protocol_response_handler = protocol_response_handler
-
-        # Login response handler for PAYLOAD_TYPE_RESPONSE packets
-        login_response_handler = LoginResponseHandler(local_identity, contacts, self._log)
-        # Connect protocol response handler for forwarding telemetry
-        login_response_handler.set_protocol_response_handler(protocol_response_handler)
-        # Keep references for backward compatibility
-        # Note: telemetry now uses protocol_response_handler, login uses PAYLOAD_TYPE_RESPONSE
-        self.login_response_handler = login_response_handler
-        # For backward compatibility, point telemetry handler to protocol response handler
-        self.telemetry_response_handler = protocol_response_handler
-
-        # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(
-            self._log, ack_handler, protocol_response_handler, login_response_handler
-        )
-        self.register_handler(PathHandler.payload_type(), path_handler)
-
-        # Login response handler for PAYLOAD_TYPE_RESPONSE packets
-        self.register_handler(
-            LoginResponseHandler.payload_type(),
-            login_response_handler,
+        # --- Core handlers via shared factory ---
+        core = create_core_handlers(
+            identity=local_identity,
+            contacts=contacts,
+            channels=channel_db,
+            event_service=event_service,
+            send_packet_fn=self.send_packet,
+            log_fn=self._log,
+            node_name=node_name,
+            radio_config=radio_config,
+            ack_handler=ack_handler,
         )
 
-        # Anonymous request response handler for login responses that come as ANON_REQ
+        # Keep references for companion layer access
+        self.text_message_handler = core.text_handler
+        self.protocol_response_handler = core.protocol_response_handler
+        self.login_response_handler = core.login_response_handler
+        # Backward compat alias
+        self.telemetry_response_handler = core.protocol_response_handler
+
+        # Register core handlers by payload type
+        from .handlers import AdvertHandler as _Adv
+        from .handlers import GroupTextHandler as _Grp
+        from .handlers import LoginResponseHandler as _Login
+        from .handlers import PathHandler as _Path
+        from .handlers import TextMessageHandler as _Txt
+
+        self.register_handler(_Adv.payload_type(), core.advert_handler)
+        self.register_handler(_Txt.payload_type(), core.text_handler)
+        self.register_handler(_Grp.payload_type(), core.group_text_handler)
+        self.register_handler(_Path.payload_type(), core.path_handler)
+        self.register_handler(_Login.payload_type(), core.login_response_handler)
+
+        # --- Dispatcher-only handlers ---
         self.register_handler(
             AnonReqResponseHandler.payload_type(),
             AnonReqResponseHandler(local_identity, contacts, self._log),
         )
 
-        # TRACE handler for diagnostics and routing analysis
-        trace_handler = TraceHandler(self._log, protocol_response_handler)
-        self.register_handler(
-            TraceHandler.payload_type(),
-            trace_handler,
-        )
-        # Keep a reference for the node
+        trace_handler = TraceHandler(self._log, core.protocol_response_handler)
+        self.register_handler(TraceHandler.payload_type(), trace_handler)
         self.trace_handler = trace_handler
 
-        # CONTROL handler for node discovery
         control_handler = ControlHandler(self._log)
-        self.register_handler(
-            ControlHandler.payload_type(),
-            control_handler,
-        )
-        # Keep a reference for the node
+        self.register_handler(ControlHandler.payload_type(), control_handler)
         self.control_handler = control_handler
 
         self._logger.info("Default handlers registered.")

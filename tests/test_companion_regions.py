@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from pymc_core.companion import CompanionRadio
-from pymc_core.companion.models import Contact
 from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     ROUTE_TYPE_DIRECT,
@@ -59,12 +58,6 @@ def _make_companion() -> CompanionRadio:
     radio = MockRadio()
     identity = LocalIdentity()
     return CompanionRadio(radio=radio, identity=identity, node_name="test")
-
-
-def _make_peer_contact(name: str) -> Contact:
-    """Return a contact with a valid Ed25519 public key."""
-    peer = LocalIdentity()
-    return Contact(public_key=peer.get_public_key(), name=name)
 
 
 # ---------------------------------------------------------------------------
