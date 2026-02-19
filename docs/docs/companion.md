@@ -2,14 +2,17 @@
 
 The companion module provides a high-level Python interface to the MeshCore companion radio protocol. It manages contacts, messaging, channels, advertisements, path routing, telemetry, cryptographic signing, and device configuration on top of pyMC_core's `MeshNode`.
 
-Two implementations are provided:
+Three main classes are provided:
 
 | Class | Owns Radio | Use Case |
 |---|---|---|
 | `CompanionRadio` | Yes | Standalone companion — wraps a hardware radio and `MeshNode` |
 | `CompanionBridge` | No | Repeater-integrated companion — shares an existing dispatcher via a packet injector callback |
+| `CompanionFrameServer` | No | TCP server implementing the MeshCore companion frame protocol (the binary wire format used by companion apps) |
 
-Both inherit from `CompanionBase` (an abstract base class), which holds all shared stores, event handling, device configuration logic, and unified TX methods (advertising, binary requests, path discovery, offline queue sync). Subclasses implement transport via the abstract `_send_packet` method.
+`CompanionRadio` and `CompanionBridge` both inherit from `CompanionBase` (an abstract base class), which holds all shared stores, event handling, device configuration logic, and unified TX methods. Subclasses implement transport via the abstract `_send_packet` method.
+
+`CompanionFrameServer` wraps a `CompanionBridge` (or any `CompanionBase` subclass) and exposes it over TCP using the same binary frame protocol as the MeshCore firmware companion radio.
 
 ---
 
@@ -24,13 +27,25 @@ CompanionBase (ABC)
 ├── StatsCollector        (TX/RX counters, uptime)
 ├── NodePrefs             (radio params, name, location)
 │
+│   Persistence hooks (no-op by default, override for SQLite/JSON):
+│   _save_prefs, _load_prefs
+│
 │   Unified methods (use abstract _send_packet):
-│   advertise, share_contact, send_binary_req,
-│   send_path_discovery_req, send_trace_path_raw,
-│   sync_next_message
+│   advertise, share_contact, send_text_message,
+│   send_channel_message, send_binary_req,
+│   send_path_discovery_req, send_trace_path,
+│   send_login, send_logout, sync_next_message
 │
 ├─► CompanionRadio        (owns MeshNode + hardware radio)
 └─► CompanionBridge       (packet_injector callback, no radio)
+        │
+        └─► CompanionFrameServer  (TCP binary frame protocol server)
+                │
+                │   Persistence hooks (no-op by default):
+                │   _persist_companion_message, _sync_next_from_persistence,
+                │   _save_contacts, _save_channels, _get_batt_and_storage
+                │
+                └─► (your subclass, e.g. SQLite-backed repeater)
 ```
 
 ---
@@ -181,7 +196,7 @@ companion.remove_contact(pub_key_bytes)
 companion.reset_path(pub_key_bytes)
 
 # Serialise for sharing
-blob   = companion.export_contact(pub_key)   # bytes
+blob   = companion.export_contact(pub_key)   # bytes (73-byte binary packet)
 ok     = companion.import_contact(blob)      # bool
 ```
 
@@ -212,6 +227,9 @@ advert_path = companion.get_advert_path(pub_key_prefix_7bytes)
 ```python
 # Login to a repeater
 resp = await companion.send_login(repeater_key, password="secret")
+
+# Logout from a repeater
+ok = await companion.send_logout(repeater_key)
 
 # Request repeater status
 resp = await companion.send_status_request(repeater_key)
@@ -245,23 +263,37 @@ companion.on_binary_response(
 
 ### Device Configuration
 
+All preference-mutating methods automatically call `_save_prefs()` (a no-op by default; override in subclasses for persistence).
+
 ```python
-companion.set_advert_name("NewName")                   # max 31 chars
-companion.set_advert_latlon(37.7749, -122.4194)        # GPS coordinates
+companion.set_advert_name("NewName")                     # max 31 chars
+companion.set_advert_latlon(37.7749, -122.4194)          # GPS coordinates
 companion.set_radio_params(915_000_000, 250_000, 10, 5)  # freq, bw, SF, CR
-companion.set_tx_power(22)                              # dBm
+companion.set_tx_power(22)                                # dBm
 companion.set_tuning_params(rx_delay=0.0, airtime_factor=0.0)
+
+# Time management (transient, not persisted)
+device_time = companion.get_time()                        # Unix timestamp
+ok = companion.set_time(1700000000)                       # returns False if in the past
+
+# Custom variables (key:value string pairs, max 140 chars total)
+custom_vars = companion.get_custom_vars()                 # -> dict[str, str]
+ok = companion.set_custom_var("key", "value")             # -> bool
+
+# Auto-add configuration
+config = companion.get_autoadd_config()                   # -> int bitmask
+companion.set_autoadd_config(AUTOADD_CHAT | AUTOADD_REPEATER)
 
 # Location sharing in adverts
 from pymc_core.companion import ADVERT_LOC_SHARE
 companion.set_other_params(
     manual_add=0,
-    telemetry_modes=(0, 0, 0),
+    telemetry_modes=0,
     advert_loc_policy=ADVERT_LOC_SHARE,
     multi_acks=0,
 )
 
-prefs = companion.get_self_info()   # -> NodePrefs
+prefs = companion.get_self_info()   # -> NodePrefs (copy)
 ```
 
 ### Flood Scope (Regions)
@@ -307,6 +339,18 @@ stats = companion.get_stats(STATS_TYPE_CORE)
 stats = companion.get_stats(STATS_TYPE_PACKETS)
 # {'flood_tx': 42, 'flood_rx': 108, 'direct_tx': 5, 'direct_rx': 12, ...}
 ```
+
+### CompanionRadio-Specific Overrides
+
+`CompanionRadio` overrides several `CompanionBase` methods to also configure the physical radio hardware:
+
+| Method | Base Behavior | Radio Override |
+|---|---|---|
+| `set_radio_params()` | Updates `prefs` fields | Also calls `radio.configure_radio()` |
+| `set_tx_power()` | Updates `prefs.tx_power_dbm` | Also calls `radio.set_tx_power()` |
+| `set_advert_name()` | Updates `prefs.node_name` | Also syncs `node.node_name` |
+| `set_flood_scope()` | Stores transport key | Also syncs to `node.dispatcher` |
+| `set_flood_region()` | Derives key from name | Also syncs to `node.dispatcher` |
 
 ---
 
@@ -396,6 +440,212 @@ The bridge registers internal handlers for these payload types:
 
 `CompanionBridge` exposes the same messaging, contact, channel, path, signing, stats, and configuration APIs as `CompanionRadio` (inherited from `CompanionBase`). The only behavioral difference is that all TX goes through the `packet_injector` instead of an owned radio.
 
+Note that `set_radio_params()` and `set_tx_power()` update in-memory prefs only — there is no physical radio to configure. This is correct: the repeater host owns the radio hardware.
+
+---
+
+## CompanionFrameServer
+
+`CompanionFrameServer` implements the MeshCore companion radio TCP frame protocol — the same binary wire format used by the C++ firmware (`examples/companion_radio/`). It wraps a `CompanionBase` subclass (typically a `CompanionBridge`) and exposes it to companion apps (e.g. MeshCore Android/iOS) over a TCP socket.
+
+### Frame Format
+
+All frames use a simple length-prefixed format:
+
+| Direction | Prefix | Length | Data |
+|---|---|---|---|
+| App → Radio | `<` (0x3C) | 2-byte LE | Command byte + payload |
+| Radio → App | `>` (0x3E) | 2-byte LE | Response/push byte + payload |
+
+Maximum frame size: 512 bytes.
+
+### Quick Start
+
+```python
+from pymc_core import LocalIdentity
+from pymc_core.companion import CompanionBridge, CompanionFrameServer
+
+identity = LocalIdentity()
+bridge = CompanionBridge(identity=identity, packet_injector=my_injector)
+
+server = CompanionFrameServer(
+    bridge=bridge,
+    companion_hash="abcd1234",   # identifier for this companion
+    port=5000,
+    device_model="pyMC-Companion",
+    device_version="1.0.0",
+)
+
+await server.start()   # starts listening on TCP port
+# ... companion app connects and sends commands ...
+await server.stop()
+```
+
+### Constructor
+
+```python
+CompanionFrameServer(
+    bridge: CompanionBase,              # the companion to wrap
+    companion_hash: str,                # unique identifier
+    port: int = 5000,
+    bind_address: str = "0.0.0.0",
+    *,
+    device_model: str = "pyMC-Companion",
+    device_version: str = "1.0.0",
+    build_date: str = "",
+    local_hash: int | None = None,
+    stats_getter: Callable | None = None,
+    control_handler: Any | None = None,
+)
+```
+
+### Supported Commands
+
+The frame server handles the following companion radio protocol commands:
+
+| CMD | Code | Description |
+|---|---|---|
+| `CMD_APP_START` | 1 | Initialize connection, return device info |
+| `CMD_SEND_TXT_MSG` | 2 | Send a direct text message |
+| `CMD_SEND_CHANNEL_TXT_MSG` | 3 | Send a channel message |
+| `CMD_GET_CONTACTS` | 4 | Retrieve contact list (paginated) |
+| `CMD_GET_DEVICE_TIME` | 5 | Get current device time |
+| `CMD_SET_DEVICE_TIME` | 6 | Set device time |
+| `CMD_SEND_SELF_ADVERT` | 7 | Broadcast self advertisement |
+| `CMD_SET_ADVERT_NAME` | 8 | Set advertised node name |
+| `CMD_ADD_UPDATE_CONTACT` | 9 | Add or update a contact |
+| `CMD_SYNC_NEXT_MESSAGE` | 10 | Pop next queued message |
+| `CMD_SET_RADIO_PARAMS` | 11 | Set frequency, bandwidth, SF, CR |
+| `CMD_SET_RADIO_TX_POWER` | 12 | Set transmit power |
+| `CMD_RESET_PATH` | 13 | Reset routing path for a contact |
+| `CMD_SET_ADVERT_LATLON` | 14 | Set GPS coordinates |
+| `CMD_REMOVE_CONTACT` | 15 | Remove a contact |
+| `CMD_SHARE_CONTACT` | 16 | Share a contact to the mesh |
+| `CMD_EXPORT_CONTACT` | 17 | Export contact as 73-byte blob |
+| `CMD_IMPORT_CONTACT` | 18 | Import contact from blob |
+| `CMD_GET_BATT_AND_STORAGE` | 20 | Get battery/storage info |
+| `CMD_SET_TUNING_PARAMS` | 21 | Set RX delay and airtime factor |
+| `CMD_DEVICE_QUERY` | 22 | Return device model/version |
+| `CMD_SEND_LOGIN` | 26 | Login to a repeater |
+| `CMD_SEND_STATUS_REQ` | 27 | Request repeater status |
+| `CMD_LOGOUT` | 29 | Logout from a repeater |
+| `CMD_GET_CONTACT_BY_KEY` | 30 | Look up contact by public key |
+| `CMD_GET_CHANNEL` | 31 | Get a channel by index |
+| `CMD_SET_CHANNEL` | 32 | Set a channel |
+| `CMD_SEND_TRACE_PATH` | 36 | Send trace path request |
+| `CMD_SEND_TELEMETRY_REQ` | 39 | Request telemetry data |
+| `CMD_GET_CUSTOM_VARS` | 40 | Get custom variables |
+| `CMD_SET_CUSTOM_VAR` | 41 | Set a custom variable |
+| `CMD_GET_ADVERT_PATH` | 42 | Get cached advert path |
+| `CMD_SEND_BINARY_REQ` | 50 | Send binary request |
+| `CMD_SEND_PATH_DISCOVERY_REQ` | 52 | Send path discovery |
+| `CMD_SET_FLOOD_SCOPE` | 54 | Set flood scope transport key |
+| `CMD_SEND_CONTROL_DATA` | 55 | Send control data |
+| `CMD_GET_STATS` | 56 | Get statistics |
+| `CMD_SET_AUTOADD_CONFIG` | 58 | Set auto-add configuration |
+| `CMD_GET_AUTOADD_CONFIG` | 59 | Get auto-add configuration |
+
+### Push Notifications
+
+The frame server sends unsolicited push frames to the companion app when events occur:
+
+| Push Code | Value | Description |
+|---|---|---|
+| `PUSH_CODE_ADVERT` | 0x80 | Contact advertisement received |
+| `PUSH_CODE_MSG_WAITING` | 0x82 | New message queued |
+| `PUSH_CODE_SEND_CONFIRMED` | 0x84 | ACK received for a sent message |
+| `PUSH_CODE_PATH_UPDATED` | 0x86 | Contact path updated |
+| `PUSH_CODE_LOG_RX_DATA` | 0x88 | Raw RX packet (diagnostics) |
+| `PUSH_CODE_TRACE_DATA` | 0x89 | Trace path response |
+| `PUSH_CODE_NEW_ADVERT` | 0x8A | New (previously unknown) contact discovered |
+| `PUSH_CODE_CONTROL_DATA` | 0x8E | Control data received |
+| `PUSH_CODE_LOGIN_SUCCESS` | 0x91 | Repeater login succeeded |
+| `PUSH_CODE_LOGIN_FAIL` | 0x92 | Repeater login failed |
+| `PUSH_CODE_STATUS_RESPONSE` | 0x93 | Repeater status response |
+| `PUSH_CODE_TELEMETRY_RESPONSE` | 0x94 | Telemetry response |
+| `PUSH_CODE_BINARY_RESPONSE` | 0x95 | Binary request response |
+| `PUSH_CODE_PATH_DISCOVERY_RESPONSE` | 0x96 | Path discovery response |
+
+### Host-Callable Push Methods
+
+The frame server exposes methods for the host application to push data to the connected companion app:
+
+```python
+# Push trace data from the repeater
+server.push_trace_data(
+    path_len=3, flags=0, tag=42, auth_code=0,
+    path_hashes=b"...", path_snrs=b"...", final_snr_byte=0
+)
+
+# Push raw RX packet for diagnostics logging
+server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"...")
+
+# Push control data
+await server.push_control_data(
+    snr=-5.0, rssi=-100, path_len=2,
+    path_bytes=b"...", payload=b"..."
+)
+```
+
+### Persistence Hooks
+
+`CompanionFrameServer` provides no-op hooks that subclasses override for persistent storage (e.g. SQLite):
+
+```python
+class MyFrameServer(CompanionFrameServer):
+    async def _persist_companion_message(self, msg_dict: dict) -> None:
+        """Called when a message is received. Save to database."""
+        await self.db.save_message(msg_dict)
+
+    def _sync_next_from_persistence(self) -> QueuedMessage | None:
+        """Called when the in-memory queue is empty. Pop from database."""
+        return self.db.pop_oldest_message()
+
+    def _save_contacts(self) -> None:
+        """Called after contact list changes. Sync to database."""
+        self.db.save_contacts(self.bridge.contacts.to_dicts())
+
+    def _save_channels(self) -> None:
+        """Called after channel changes. Sync to database."""
+        self.db.save_channels(...)
+
+    def _get_batt_and_storage(self) -> tuple[int, int, int]:
+        """Return (millivolts, used_kb, total_kb) for CMD_GET_BATT_AND_STORAGE."""
+        return (4200, 128, 1024)
+```
+
+---
+
+## Persistence Hooks
+
+The companion module uses a "no-op hook" pattern for persistence: base classes define empty methods that subclasses override to save/load state from their storage backend.
+
+### CompanionBase Hooks (Preferences)
+
+```python
+class CompanionBase:
+    def _save_prefs(self) -> None:
+        """Persist self.prefs. Called after any pref-mutating method."""
+
+    def _load_prefs(self) -> None:
+        """Restore self.prefs on startup. Called at end of _init_companion_stores()."""
+```
+
+`_save_prefs()` is called automatically by: `set_radio_params`, `set_tx_power`, `set_tuning_params`, `set_autoadd_config`, `set_other_params`, `set_advert_name`, `set_advert_latlon`.
+
+Note: `set_time()` does **not** call `_save_prefs()` — the time offset is a transient runtime correction, not a persistent preference.
+
+### CompanionFrameServer Hooks (Messages, Contacts, Channels)
+
+```python
+class CompanionFrameServer:
+    async def _persist_companion_message(self, msg_dict: dict) -> None: ...
+    def _sync_next_from_persistence(self) -> QueuedMessage | None: ...
+    def _save_contacts(self) -> None: ...
+    def _save_channels(self) -> None: ...
+    def _get_batt_and_storage(self) -> tuple[int, int, int]: ...
+```
+
 ---
 
 ## Use Cases
@@ -463,7 +713,31 @@ async def repeater_on_rx(pkt):
     # ... also handle repeater logic ...
 ```
 
-### 4. Network Diagnostics Tool
+### 4. Companion Frame Server (TCP Protocol)
+
+Expose a companion over TCP so standard companion apps can connect.
+
+```python
+bridge = CompanionBridge(
+    identity=identity,
+    packet_injector=repeater.inject_packet,
+    node_name="pyMC-Server",
+)
+
+server = CompanionFrameServer(
+    bridge=bridge,
+    companion_hash="abcd1234",
+    port=5000,
+    device_model="pyMC-Companion",
+    device_version="1.0.0",
+)
+
+await bridge.start()
+await server.start()
+# Companion apps (Android/iOS) can now connect on port 5000
+```
+
+### 5. Network Diagnostics Tool
 
 Trace paths and discover topology.
 
@@ -480,7 +754,7 @@ await companion.send_trace_path(target_key, tag=1, auth_code=0)
 await companion.send_path_discovery_req(target_key)
 ```
 
-### 5. Group Chat / Channels
+### 6. Group Chat / Channels
 
 ```python
 companion.set_channel(0, name="Emergency", secret=b"shared_channel_secret___________")
@@ -535,6 +809,7 @@ class Contact:
     lastmod: int = 0
     gps_lat: float = 0.0
     gps_lon: float = 0.0
+    sync_since: int = 0
 ```
 
 ### Channel
@@ -544,6 +819,31 @@ class Contact:
 class Channel:
     name: str           # up to 32 characters
     secret: bytes       # 16-byte pre-shared key
+```
+
+### NodePrefs
+
+```python
+@dataclass
+class NodePrefs:
+    node_name: str = "pyMC"
+    adv_type: int = 1               # ADV_TYPE_CHAT
+    tx_power_dbm: int = 20
+    frequency_hz: int = 915000000
+    bandwidth_hz: int = 250000
+    spreading_factor: int = 10
+    coding_rate: int = 5
+    latitude: float = 0.0
+    longitude: float = 0.0
+    advert_loc_policy: int = 0      # ADVERT_LOC_NONE
+    multi_acks: int = 0
+    telemetry_mode_base: int = 0    # TELEM_MODE_DENY
+    telemetry_mode_location: int = 0
+    telemetry_mode_environment: int = 0
+    manual_add_contacts: int = 0
+    autoadd_config: int = 0
+    rx_delay_base: float = 0.0
+    airtime_factor: float = 0.0
 ```
 
 ### SentResult
@@ -569,6 +869,30 @@ class QueuedMessage:
     is_channel: bool = False
     channel_idx: int = 0
     path_len: int = 0
+```
+
+### AdvertPath
+
+```python
+@dataclass
+class AdvertPath:
+    public_key_prefix: bytes    # 7-byte prefix
+    name: str = ""
+    path_len: int = 0
+    path: bytes = b""
+    recv_timestamp: int = 0
+```
+
+### PacketStats
+
+```python
+@dataclass
+class PacketStats:
+    flood_tx: int = 0
+    flood_rx: int = 0
+    direct_tx: int = 0
+    direct_rx: int = 0
+    tx_errors: int = 0
 ```
 
 ---
@@ -621,8 +945,26 @@ PROTOCOL_CODE_RAW_DATA    = 0x00
 PROTOCOL_CODE_BINARY_REQ  = 0x02
 PROTOCOL_CODE_ANON_REQ    = 0x07
 
-# Timeouts
+# Frame format
+FRAME_OUTBOUND_PREFIX = 0x3E  # '>' (radio → app)
+FRAME_INBOUND_PREFIX  = 0x3C  # '<' (app → radio)
+MAX_FRAME_SIZE        = 512
+
+# Error codes (returned by frame server)
+ERR_CODE_UNSUPPORTED_CMD = 1
+ERR_CODE_NOT_FOUND       = 2
+ERR_CODE_TABLE_FULL      = 3
+ERR_CODE_BAD_STATE       = 4
+ERR_CODE_FILE_IO_ERROR   = 5
+ERR_CODE_ILLEGAL_ARG     = 6
+
+# Defaults
 DEFAULT_RESPONSE_TIMEOUT_MS = 10000
+DEFAULT_MAX_CONTACTS        = 1000
+DEFAULT_MAX_CHANNELS        = 40
+DEFAULT_OFFLINE_QUEUE_SIZE  = 512
+PUB_KEY_SIZE                = 32
+MAX_PATH_SIZE               = 64
 ```
 
 ---
@@ -633,9 +975,7 @@ The following protocol-level features from the MeshCore companion radio firmware
 
 | Feature | Firmware Reference | Description |
 |---|---|---|
-| Logout | `CMD_LOGOUT` (0x1D) | Disconnect from a repeater/server session |
 | Has connection | `CMD_HAS_CONNECTION` (0x1C) | Check if active connection exists to a contact |
 | Push: contact deleted | `PUSH_CODE_CONTACT_DELETED` (0x8F) | Notification when a contact is overwritten by auto-add |
 | Push: contacts full | `PUSH_CODE_CONTACTS_FULL` (0x90) | Notification when contact storage is full |
-| Push: RX data log | `PUSH_CODE_LOG_RX_DATA` (0x88) | Raw received packet logging for diagnostics |
 | Keep-alive mechanism | Server-driven keep-alive | Periodic keep-alive packets for active server connections |
