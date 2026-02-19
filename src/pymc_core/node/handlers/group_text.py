@@ -30,24 +30,39 @@ class GroupTextHandler(BaseHandler):
         self.our_node_name = our_node_name  # Store our node name for echo detection
 
     def _get_channel_by_hash(self, channel_hash: int) -> Optional[dict]:
-        """Find a channel by its hash (first byte of public key) from database."""
+        """Find a channel by its hash (first byte of SHA256) from database.
+
+        Returns the first matching channel.  See also
+        :meth:`_get_channels_by_hash` which returns *all* matches (needed
+        because the hash is only 1 byte and collisions are expected).
+        """
+        matches = self._get_channels_by_hash(channel_hash)
+        return matches[0] if matches else None
+
+    def _get_channels_by_hash(self, channel_hash: int) -> list[dict]:
+        """Return **all** channels whose derived hash matches *channel_hash*.
+
+        The channel hash is only 1 byte, so collisions between channels
+        with different PSKs are expected (~0.4 % per foreign channel).
+        The firmware handles this by trying each match until HMAC validates;
+        we do the same.
+        """
         if not self.channel_db:
             self.log("No channel database available")
-            return None
+            return []
 
         try:
-            # Get all channels from database (live query)
             channels = self.channel_db.get_channels()
+            matches = []
             for channel in channels:
                 if "secret" in channel:
-                    # Use consistent channel hash derivation
                     calculated_hash = self._derive_channel_hash(channel["secret"])
                     if calculated_hash == channel_hash:
-                        return channel
-            return None
+                        matches.append(channel)
+            return matches
         except Exception as e:
             self.log(f"Error querying channel database: {e}")
-            return None
+            return []
 
     def _secret_bytes_for_hash(self, channel_secret: str) -> bytes:
         """Normalize secret to bytes used for channel hash (match MeshCore firmware).
@@ -87,7 +102,12 @@ class GroupTextHandler(BaseHandler):
     def _decrypt_channel_message(
         self, channel_secret: str, mac: bytes, ciphertext: bytes
     ) -> Optional[bytes]:
-        """Decrypt a channel message using the channel secret."""
+        """Attempt to decrypt a channel message using *channel_secret*.
+
+        Returns the plaintext on success, or ``None`` if the HMAC does not
+        validate (which is expected during candidate iteration when multiple
+        channels share the same 1-byte hash).
+        """
         try:
             # Convert hex secret to bytes
             try:
@@ -97,22 +117,19 @@ class GroupTextHandler(BaseHandler):
 
             # Ensure we have PUB_KEY_SIZE (32 bytes) for the secret
             if len(secret_bytes) < 32:
-                # Pad with zeros if needed
                 secret_bytes = secret_bytes + b"\x00" * (32 - len(secret_bytes))
             elif len(secret_bytes) > 32:
-                # Truncate if too long
                 secret_bytes = secret_bytes[:32]
 
             expected_mac = CryptoUtils._hmac_sha256(secret_bytes, ciphertext)[:2]
 
             if mac != expected_mac:
-                raise ValueError("Invalid HMAC")
+                return None  # HMAC mismatch — normal during candidate iteration
 
-            plaintext = CryptoUtils._aes_decrypt(secret_bytes[:16], ciphertext)
-            return plaintext
+            return CryptoUtils._aes_decrypt(secret_bytes[:16], ciphertext)
 
         except Exception as e:
-            self.log(f"Channel message decryption failed: {e}")
+            self.log(f"Channel message decryption error: {e}")
             return None
 
     def _parse_plaintext_message(self, plaintext: bytes) -> Optional[dict]:
@@ -193,20 +210,35 @@ class GroupTextHandler(BaseHandler):
             cipher_mac = payload[1:3]
             ciphertext = payload[3:]
 
-            # Find the channel configuration
-            channel = self._get_channel_by_hash(channel_hash)
-            if not channel:
+            # Find all channels whose 1-byte hash matches (collisions are
+            # expected; the firmware tries up to 4 candidates).
+            candidates = self._get_channels_by_hash(channel_hash)
+            if not candidates:
                 self.log(f"Unknown channel hash: {channel_hash:02X}")
+                return
+
+            # Try each candidate until HMAC validates (matches firmware behaviour).
+            channel = None
+            plaintext = None
+            for candidate in candidates:
+                result = self._decrypt_channel_message(candidate["secret"], cipher_mac, ciphertext)
+                if result is not None:
+                    channel = candidate
+                    plaintext = result
+                    break
+
+            if channel is None or plaintext is None:
+                # No candidate validated — this is normal for hash collisions
+                # with channels on other networks.
+                self.log(
+                    f"GRP_TXT hash {channel_hash:02X} matched "
+                    f"{len(candidates)} channel(s) but HMAC failed for all "
+                    f"— likely a hash collision from another network"
+                )
                 return
 
             channel_name = channel.get("name", f"Channel-{channel_hash:02X}")
             self.log(f"Received group message for channel: {channel_name}")
-
-            # Decrypt the message
-            plaintext = self._decrypt_channel_message(channel["secret"], cipher_mac, ciphertext)
-            if not plaintext:
-                self.log("Failed to decrypt channel message")
-                return
 
             # Parse the decrypted message
             parsed_message = self._parse_plaintext_message(plaintext)
