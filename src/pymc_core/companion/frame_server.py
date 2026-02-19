@@ -1122,6 +1122,8 @@ class CompanionFrameServer:
         self._write_frame(bytes([PUSH_CODE_STATUS_RESPONSE, 0]) + pubkey[:6] + raw_bytes)
 
     async def _cmd_send_telemetry_req(self, data: bytes) -> None:
+        # Protocol: CMD_SEND_TELEMETRY_REQ has reserved bytes(3) then pub_key bytes(32).
+        # See MeshCore Companion-Radio-Protocol: CMD_SEND_TELEMETRY_REQ frame format.
         if len(data) < 35:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return

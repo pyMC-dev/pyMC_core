@@ -228,12 +228,12 @@ class GroupTextHandler(BaseHandler):
                     break
 
             if channel is None or plaintext is None:
-                # No candidate validated — this is normal for hash collisions
-                # with channels on other networks.
+                # No candidate validated — the packet is for a channel we
+                # don't have the key for (hash collision with 1-byte hash).
                 self.log(
                     f"GRP_TXT hash {channel_hash:02X} matched "
-                    f"{len(candidates)} channel(s) but HMAC failed for all "
-                    f"— likely a hash collision from another network"
+                    f"{len(candidates)} local channel(s) but HMAC failed "
+                    f"for all — unknown channel"
                 )
                 return
 
