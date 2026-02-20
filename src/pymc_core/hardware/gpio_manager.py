@@ -9,11 +9,11 @@ import logging
 import sys
 import threading
 import time
+import os
 from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO, EdgeEvent
-
     PERIPHERY_AVAILABLE = True
 except ImportError:
     # Mock GPIO classes for testing/non-hardware environments
@@ -24,7 +24,6 @@ except ImportError:
 # Optional libgpiod support
 try:
     import gpiod
-
     GPIOD_AVAILABLE = True
 except Exception:
     GPIOD_AVAILABLE = False

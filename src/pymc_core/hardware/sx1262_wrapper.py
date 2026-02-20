@@ -78,7 +78,7 @@ class SX1262Radio(LoRaRadio):
             is_waveshare: Use alternate initialization needed for Waveshare HAT
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
-            use_dio2_rf: Enable DIO2 as RF switch control (default: False)
+            use_dio2_rf: Enable DIO2 as RF switch control (default: False)    
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -256,7 +256,7 @@ class SX1262Radio(LoRaRadio):
             irqStat = self.lora.getIrqStatus()
 
             if irqStat != 0:
-                self.lora.clearIrqStatus(irqStat)
+                self.lora.clearIrqStatus(0xFFFF)
 
             self._last_irq_status = irqStat
             if irqStat & self.lora.IRQ_TX_DONE:
@@ -1553,31 +1553,21 @@ class SX1262Radio(LoRaRadio):
                 return False
         finally:
             try:
-                # Full sequence required to prevent SX1262 lockups after CAD
-                # Critical: Do this in the correct order to avoid interrupt race conditions
 
-                # Step 1: Clear all interrupts first
                 self.lora.clearIrqStatus(0xFFFF)
 
-                # Step 2: Put radio in standby (stops all operations)
                 self.lora.setStandby(self.lora.STANDBY_RC)
                 await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
 
-                # Step 3: Disable all interrupts temporarily during reconfiguration
                 self.lora.setDioIrqParams(
                     self.lora.IRQ_NONE, self.lora.IRQ_NONE, self.lora.IRQ_NONE, self.lora.IRQ_NONE
                 )
                 await asyncio.sleep(0.001)  # Let interrupt config settle
 
-                # Step 4: Clear any interrupts that may have fired during standby transition
                 self.lora.clearIrqStatus(0xFFFF)
-
-                # Step 5: Re-configure RX interrupts
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-                await asyncio.sleep(0.001)  # Let interrupt config settle
-
-                # Step 6: Start RX mode
+                await asyncio.sleep(0.001)  
                 self.lora.request(self.lora.RX_CONTINUOUS)
                 await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter RX mode
 
