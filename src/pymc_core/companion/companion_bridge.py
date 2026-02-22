@@ -17,6 +17,7 @@ from ..node.handlers import create_core_handlers
 from ..node.handlers.login_server import LoginServerHandler
 from ..protocol import LocalIdentity, Packet
 from ..protocol.constants import (
+    MAX_PATH_SIZE,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_ANON_REQ,
@@ -47,7 +48,8 @@ MAX_PENDING_ACK_CRCS = 64
 
 
 class _BridgeAckHandler:
-    """Handles ACK packets. Fires send_confirmed when ACK CRC matches."""
+    """Handles ACK packets (discrete and PATH-carried).
+    Fires send_confirmed when ACK CRC matches."""
 
     def __init__(self, bridge: "CompanionBridge") -> None:
         self._bridge = bridge
@@ -60,15 +62,67 @@ class _BridgeAckHandler:
         if not packet.payload or len(packet.payload) != 4:
             return
         crc = int.from_bytes(packet.payload, "little")
-        if crc in self._bridge._pending_ack_crcs:
-            self._bridge._pending_ack_crcs.discard(crc)
-            await self._bridge._fire_callbacks("send_confirmed", crc)
+        await self._apply_ack(crc)
+
+    async def _apply_ack(self, crc: int) -> None:
+        """If CRC is pending, clear it and fire send_confirmed."""
+        if crc not in self._bridge._pending_ack_crcs:
+            return
+        self._bridge._pending_ack_crcs.discard(crc)
+        await self._bridge._fire_callbacks("send_confirmed", crc)
 
     async def process_path_ack_variants(self, packet: Packet) -> Optional[int]:
+        """Decrypt PATH payload; update contact out_path (firmware pattern), return ACK CRC.
+        Tries every contact matching src_hash (same as TXT_MSG) so we use the correct key.
+        """
+        from ..protocol import CryptoUtils, Identity
+
+        payload = packet.payload
+        if not payload or len(payload) < 2 + 6:
+            return None
+        dest_hash = payload[0]
+        src_hash = payload[1]
+        our_hash = self._bridge._identity.get_public_key()[0]
+        if dest_hash != our_hash:
+            return None
+        encrypted = bytes(payload[2:])
+        # Try each contact with matching src_hash until decryption succeeds
+        for contact in self._bridge.contacts.contacts:
+            try:
+                pk = contact.public_key
+                pub = bytes.fromhex(pk) if isinstance(pk, str) else bytes(pk)
+                if len(pub) != 32 or pub[0] != src_hash:
+                    continue
+                peer_id = Identity(pub)
+                shared_secret = peer_id.calc_shared_secret(self._bridge._identity.get_private_key())
+                aes_key = shared_secret[:16]
+                decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted)
+            except Exception:
+                continue
+            if len(decrypted) < 2:
+                continue
+            path_len = min(decrypted[0], MAX_PATH_SIZE)
+            if 1 + path_len > len(decrypted):
+                continue
+            path_bytes = bytes(decrypted[1 : 1 + path_len])
+            # Firmware pattern: onContactPathRecv stores out_path so replies can use sendDirect()
+            # Update the underlying Contact (store expects Contact with bytes public_key, not proxy)
+            contact_obj = self._bridge.contacts.get_by_key(pub)
+            if contact_obj:
+                contact_obj.out_path_len = path_len
+                contact_obj.out_path = path_bytes
+                self._bridge.contacts.update(contact_obj)
+            await self._bridge._fire_callbacks("contact_path_updated", pub, path_len, path_bytes)
+            # If this PATH carries an ACK, return it so send_confirmed can fire
+            extra_start = 1 + path_len
+            if len(decrypted) >= extra_start + 1 + 4 and decrypted[extra_start] == PAYLOAD_TYPE_ACK:
+                return int.from_bytes(decrypted[extra_start + 1 : extra_start + 5], "little")
+            return None
         return None
 
     async def _notify_ack_received(self, crc: int) -> None:
-        pass
+        """Called by path handler when PATH packet contained an ACK."""
+        await self._apply_ack(crc)
 
 
 # ---------------------------------------------------------------------------

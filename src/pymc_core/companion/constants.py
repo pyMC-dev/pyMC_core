@@ -69,6 +69,7 @@ class BinaryReqType(IntEnum):
     MMA = 0x04
     ACL = 0x05
     NEIGHBOURS = 0x06
+    OWNER_INFO = 0x07  # REQ_TYPE_GET_OWNER_INFO: variable "version\nname\nowner"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,10 @@ MAX_SIGN_DATA_SIZE = 8192  # 8KB signing buffer (matches firmware)
 # ===========================================================================
 # Frame Protocol Constants (MeshCore Companion Radio Protocol)
 # ===========================================================================
+
+# Protocol version reported in RESP_CODE_DEVICE_INFO; phone uses 9+ to infer
+# CMD_SEND_ANON_REQ (owner requests, etc.) is supported.
+FIRMWARE_VER_CODE = 9
 
 # ---------------------------------------------------------------------------
 # Commands (app -> radio)

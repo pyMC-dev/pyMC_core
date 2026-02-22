@@ -42,6 +42,7 @@ from .constants import (
     PH_VER_MASK,
     PH_VER_SHIFT,
     PUB_KEY_SIZE,
+    REQ_TYPE_GET_OWNER_INFO,
     REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_DIRECT,
@@ -152,6 +153,7 @@ __all__ = [
     # Protocol request types
     "REQ_TYPE_GET_STATUS",
     "REQ_TYPE_GET_TELEMETRY_DATA",
+    "REQ_TYPE_GET_OWNER_INFO",
     "TELEM_PERM_BASE",
     "TELEM_PERM_LOCATION",
     "TELEM_PERM_ENVIRONMENT",

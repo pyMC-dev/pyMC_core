@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import serial
 
+from ..protocol.packet_utils import PacketTimingUtils
 from .base import LoRaRadio
 
 # RX callback: (data) for backward compat, or (data, rssi, snr) for per-packet metrics
@@ -759,17 +760,21 @@ class KissModemWrapper(LoRaRadio):
             return resp[1][0] == 0x01
         return False
 
-    def get_airtime(self, packet_length: int) -> Optional[int]:
+    def get_airtime(self, packet_length: int, timeout: Optional[float] = None) -> Optional[int]:
         """
-        Get estimated airtime for a packet
+        Get estimated airtime for a packet from the modem.
 
         Args:
             packet_length: Length of packet in bytes
+            timeout: Response timeout in seconds (default: RESPONSE_TIMEOUT).
+                     Use a shorter value (e.g. 1.0) in the TX path to avoid
+                     blocking when the modem is busy or unresponsive.
 
         Returns:
-            Airtime in milliseconds or None on error
+            Airtime in milliseconds or None on error/timeout
         """
-        resp = self._send_command(CMD_GET_AIRTIME, bytes([packet_length]))
+        t = timeout if timeout is not None else RESPONSE_TIMEOUT
+        resp = self._send_command(CMD_GET_AIRTIME, bytes([packet_length]), timeout=t)
         if resp and resp[0] == RESP_AIRTIME and len(resp[1]) >= 4:
             return struct.unpack("<I", resp[1][:4])[0]
         return None
@@ -1105,9 +1110,13 @@ class KissModemWrapper(LoRaRadio):
         if not success:
             raise Exception("Failed to send frame via KISS modem")
 
-        airtime = self.get_airtime(len(data))
+        # Use short timeout for GET_AIRTIME so TX path is not blocked if modem
+        # is busy or unresponsive (avoids 5s stall and subsequent bad state).
+        airtime = self.get_airtime(len(data), timeout=1.0)
+        if airtime is None:
+            airtime = int(PacketTimingUtils.estimate_airtime_ms(len(data), self.radio_config))
         return {
-            "airtime_ms": airtime if airtime is not None else 0,
+            "airtime_ms": airtime,
             "lbt_attempts": len(lbt_backoff_delays),
             "lbt_backoff_delays_ms": lbt_backoff_delays,
             "lbt_channel_busy": len(lbt_backoff_delays) > 0,

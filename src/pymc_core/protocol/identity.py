@@ -100,17 +100,19 @@ class LocalIdentity(Identity):
         if seed and len(seed) == 64:
             from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-            # MeshCore format: [32-byte scalar][32-byte nonce]; firmware clamps first 32 for ECDH
+            # MeshCore format: [32-byte scalar][32-byte nonce]. Identity.cpp readFrom(64) calls
+            # ed25519_derive_pub(pub_key, prv_key) which uses first 32 bytes as-is (no clamp).
+            # key_exchange.c uses first 32 bytes clamped for ECDH. We must match both.
             self._firmware_key = seed
             self.signing_key = None
 
-            # Use X25519 clamping so ECDH matches firmware's ed25519_key_exchange()
-            scalar = seed[:32]
-            clamped = CryptoUtils.x25519_clamp_scalar(scalar)
-            ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(clamped)
+            scalar_first32 = seed[:32]
+            # Ed25519 public: derive without clamping so get_public_key() matches firmware
+            ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(scalar_first32)
             self.verify_key = VerifyKey(ed25519_pub)
 
-            # Use clamped scalar for ECDH (firmware key_exchange.c uses first 32 bytes clamped)
+            # ECDH: use clamped scalar so shared secret matches firmware's ed25519_key_exchange()
+            clamped = CryptoUtils.x25519_clamp_scalar(scalar_first32)
             self._x25519_private = clamped
             self._x25519_public = CryptoUtils.scalarmult_base(clamped)
         else:

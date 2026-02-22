@@ -36,6 +36,7 @@ from .constants import (
     CMD_LOGOUT,
     CMD_REMOVE_CONTACT,
     CMD_RESET_PATH,
+    CMD_SEND_ANON_REQ,
     CMD_SEND_BINARY_REQ,
     CMD_SEND_CHANNEL_TXT_MSG,
     CMD_SEND_CONTROL_DATA,
@@ -63,6 +64,7 @@ from .constants import (
     ERR_CODE_NOT_FOUND,
     ERR_CODE_TABLE_FULL,
     ERR_CODE_UNSUPPORTED_CMD,
+    FIRMWARE_VER_CODE,
     FRAME_INBOUND_PREFIX,
     FRAME_OUTBOUND_PREFIX,
     MAX_FRAME_SIZE,
@@ -168,7 +170,7 @@ class CompanionFrameServer:
         bind_address: str = "0.0.0.0",
         *,
         device_model: str = "pyMC-Companion",
-        device_version: str = "1.0.0",
+        device_version: Optional[str] = None,
         build_date: str = "",
         local_hash: Optional[int] = None,
         stats_getter: Optional[Callable] = None,
@@ -186,7 +188,11 @@ class CompanionFrameServer:
         self._client_reader: Optional[asyncio.StreamReader] = None
         self._app_target_ver = 0
 
-        # Pre-compute padded device info bytes for _cmd_device_query
+        # Pre-compute padded device info bytes for _cmd_device_query. Version string
+        # should reflect FIRMWARE_VER_CODE so clients that parse it see 9+ (owner/anon).
+        if device_version is None:
+            # At least 2 chars so client substring(0, 2) etc. doesn't RangeError
+            device_version = f"{FIRMWARE_VER_CODE}.0"
         self._build_date_bytes = (build_date.encode("utf-8") + b"\x00")[:12].ljust(12, b"\x00")
         self._model_bytes = (device_model.encode("utf-8") + b"\x00")[:40].ljust(40, b"\x00")
         self._version_bytes = (device_version.encode("utf-8") + b"\x00")[:20].ljust(20, b"\x00")
@@ -660,6 +666,8 @@ class CompanionFrameServer:
                 await self._cmd_set_channel(data)
             elif cmd == CMD_SEND_BINARY_REQ:
                 await self._cmd_send_binary_req(data)
+            elif cmd == CMD_SEND_ANON_REQ:
+                await self._cmd_send_anon_req(data)
             elif cmd == CMD_SEND_PATH_DISCOVERY_REQ:
                 await self._cmd_send_path_discovery_req(data)
             elif cmd == CMD_SEND_CONTROL_DATA:
@@ -744,14 +752,23 @@ class CompanionFrameServer:
         self._write_frame(frame)
 
     async def _cmd_device_query(self, data: bytes) -> None:
+        # Layout must match MeshCore companion_radio MyMesh.cpp handleCmdFrame() CMD_DEVICE_QEURY:
+        # [0]=RESP_CODE_DEVICE_INFO, [1]=FIRMWARE_VER_CODE, [2]=MAX_CONTACTS/2,
+        # [3]=MAX_GROUP_CHANNELS, [4..7]=ble_pin, [8..19]=build_date(12),
+        # [20..59]=manufacturer(40), [60..79]=version(20), [80]=client_repeat.
         if len(data) >= 1:
             self._app_target_ver = data[0]
-        firmware_ver = 8
+        firmware_ver = FIRMWARE_VER_CODE
         max_contacts = getattr(getattr(self.bridge, "contacts", None), "max_contacts", 1000)
         max_channels_val = getattr(getattr(self.bridge, "channels", None), "max_channels", 40)
         max_contacts_div_2 = min(max_contacts // 2, 255)
         max_channels = min(max_channels_val, 255)
         ble_pin = 0
+        try:
+            prefs = self.bridge.get_self_info()
+            client_repeat = getattr(prefs, "client_repeat", 0) & 0xFF
+        except Exception:
+            client_repeat = 0
         frame = (
             bytes(
                 [
@@ -765,6 +782,15 @@ class CompanionFrameServer:
             + self._build_date_bytes
             + self._model_bytes
             + self._version_bytes
+            + bytes([client_repeat & 0xFF])
+        )
+        version_str = self._version_bytes.split(b"\x00")[0].decode("utf-8", errors="replace")
+        logger.info(
+            "Companion device info sent: FIRMWARE_VER_CODE=%s (byte at index 1), "
+            "version string=%r, frame_len=%s",
+            firmware_ver,
+            version_str,
+            len(frame),
         )
         self._write_frame(frame)
 
@@ -905,6 +931,32 @@ class CompanionFrameServer:
             result = await send_binary_req(pubkey, req_data)
         except Exception as e:
             logger.error("send_binary_req error: %s", e, exc_info=True)
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        if not result.success:
+            self._write_err(ERR_CODE_NOT_FOUND)
+            return
+        tag = result.expected_ack if result.expected_ack is not None else 0
+        timeout_ms = result.timeout_ms if result.timeout_ms is not None else 10000
+        frame = bytes([RESP_CODE_SENT, 1 if result.is_flood else 0]) + struct.pack(
+            "<II", tag, timeout_ms
+        )
+        self._write_frame(frame)
+
+    async def _cmd_send_anon_req(self, data: bytes) -> None:
+        if len(data) < 33:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        pubkey = data[:32]
+        req_data = data[32:]
+        send_anon_req = getattr(self.bridge, "send_anon_req", None)
+        if not send_anon_req:
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
+        try:
+            result = await send_anon_req(pubkey, req_data)
+        except Exception as e:
+            logger.error("send_anon_req error: %s", e, exc_info=True)
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         if not result.success:

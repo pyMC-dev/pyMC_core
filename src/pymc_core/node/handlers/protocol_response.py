@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet
 from ...protocol.constants import MAX_PATH_SIZE, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE
+from ...protocol.crypto import CIPHER_BLOCK_SIZE, CIPHER_MAC_SIZE
 
 # ---------------------------------------------------------------------------
 # Built-in CayenneLPP decoder (no external dependency)
@@ -57,6 +58,10 @@ def _decode_cayenne_lpp(data: bytes) -> list:
     while idx + 2 <= len(data):
         channel = data[idx]
         type_id = data[idx + 1]
+        # Channel 0 is never used by MeshCore firmware (channels start at
+        # TELEM_CHANNEL_SELF=1).  A channel=0 byte is AES zero-padding — stop.
+        if channel == 0:
+            break
         idx += 2
         spec = _LPP_TYPES.get(type_id)
         if spec is None:
@@ -186,19 +191,15 @@ class ProtocolResponseHandler:
             # stats, repeater command), deliver there first.  The binary/path-discovery
             # callback is a generic fallback for unsolicited binary responses.
             #
-            # Guard: skip responses that are clearly NOT protocol responses (e.g. a
-            # stale login response retransmission).  Protocol responses always decrypt
-            # to a tag(4) + meaningful payload, so ≥20 bytes.  Login responses are only
-            # ~12 bytes and parse as "binary" fallback.  Without this check a
-            # retransmitted login response can consume the stats/telemetry waiter.
+            # Guard: only skip when this is a login response (13 bytes, response_code at [4]
+            # 0x00/0x01). A broad "decrypted_len < 20" would drop valid PATH-wrapped stats
+            # or other short responses and delay stats load after login.
             if src_hash in self._response_callbacks:
-                resp_type = parsed_data.get("type") if isinstance(parsed_data, dict) else None
-                decrypted_len = len(raw_decrypted) if raw_decrypted else 0
-                if not success or (resp_type == "binary" and decrypted_len < 20):
-                    self._log(
-                        f"[ProtocolResponse] Ignoring non-protocol response for 0x{src_hash:02X} "
-                        f"(success={success}, type={resp_type}, decrypted_len={decrypted_len})"
-                    )
+                if not success:
+                    return
+                if self._is_login_response(pkt, raw_decrypted):
+                    # Login responses are handled by LoginResponseHandler; do not deliver to
+                    # stats/telemetry waiter.
                     return
                 callback = self._response_callbacks[src_hash]
                 if callback:
@@ -243,6 +244,13 @@ class ProtocolResponseHandler:
                     tag_bytes = raw_decrypted[:4]
                     response_data = raw_decrypted[4:]
 
+                # Do not deliver login responses to the binary callback; they are
+                # handled by LoginResponseHandler. Login response format is
+                # tag(4) + response_code(1) + keep_alive(1) + is_admin(1) + ...
+                # = 13 bytes total, with response_code 0x00 or 0x01.
+                if len(response_data) == 9 and response_data[0] in (0x00, 0x01):
+                    return
+
                 try:
                     cb_result = self._binary_response_callback(tag_bytes, response_data, path_info)
                     if asyncio.iscoroutine(cb_result):
@@ -254,6 +262,25 @@ class ProtocolResponseHandler:
         except Exception as e:
             self._log(f"[ProtocolResponse] Error processing protocol response: {e}")
 
+    def _is_login_response(self, pkt: Packet, raw_decrypted: Optional[bytes]) -> bool:
+        """True if raw_decrypted is a login response (13 bytes, response_code at [4] in 0x00/0x01).
+        Used to avoid delivering a retransmitted login to the stats/telemetry waiter.
+        """
+        if not raw_decrypted or len(raw_decrypted) < 13:
+            return False
+        pkt_type = (pkt.header >> 2) & 0x0F
+        if pkt_type == PAYLOAD_TYPE_PATH:
+            if len(raw_decrypted) < 2:
+                return False
+            path_len_byte = raw_decrypted[0]
+            inner_offset = 1 + path_len_byte + 1
+            if len(raw_decrypted) < inner_offset + 13:
+                return False
+            inner = raw_decrypted[inner_offset : inner_offset + 13]
+        else:
+            inner = raw_decrypted[:13]
+        return len(inner) == 13 and inner[4] in (0x00, 0x01)
+
     async def _decrypt_protocol_response(
         self, pkt: Packet, src_hash: int
     ) -> tuple[bool, str, Dict[str, Any], Optional[bytes]]:
@@ -262,37 +289,48 @@ class ProtocolResponseHandler:
         Handles both packet types:
         - RESPONSE (0x01): direct → tag(4)+data
         - PATH (0x08): path_len+path(N)+extra_type+extra
+
+        Both use same wire payload layout: dest_hash(1) + src_hash(1) + MAC(2) + ciphertext.
         """
-        try:
-            # Find the contact by hash
-            contact = self._find_contact_by_hash(src_hash)
-            if not contact:
-                return False, f"Unknown contact for hash 0x{src_hash:02X}", {}, None
+        payload = pkt.get_payload()
+        if len(payload) < 2 + 4:  # need dest+src + at least MAC(2)+min ciphertext
+            return False, "Payload too short", {}, None
+        encrypted_data = payload[2:]
+        # MAC(2) + ciphertext; ciphertext must be block-aligned (16 bytes)
+        # (20 = login response, 68 = stats. Variable: REQ_TYPE_GET_OWNER_INFO can produce 19 bytes.)
+        enc_len = len(encrypted_data)
+        if enc_len <= CIPHER_MAC_SIZE or (enc_len - CIPHER_MAC_SIZE) % CIPHER_BLOCK_SIZE != 0:
+            self._log(
+                f"[ProtocolResponse] Payload truncated or invalid length for hash "
+                f"0x{src_hash:02X}: encrypted_data={enc_len}B (need MAC(2)+16k ciphertext)"
+            )
+            return False, "Payload truncated or invalid length", {}, None
+        pkt_type = (pkt.header >> 2) & 0x0F
 
-            # Get encryption keys
-            contact_pubkey = bytes.fromhex(contact.public_key)
-            peer_id = Identity(contact_pubkey)
-            shared_secret = peer_id.calc_shared_secret(self._local_identity.get_private_key())
-            aes_key = shared_secret[:16]
+        # Try every contact matching src_hash (same “try all hash matches” as TXT_MSG and PATH ACK).
+        # Repeaters use the same ECDH shared secret as login (createPathReturn(..., secret, ...)).
+        # Firmware: ed25519_key_exchange uses first 32B of priv (clamped) and (y+1)/(1-y) for peer
+        # pub; we match via libsodium ed25519_pk_to_curve25519 + scalarmult.
+        contacts_tried = list(self._contacts_by_hash(src_hash))
+        for contact in contacts_tried:
+            try:
+                pk = contact.public_key
+                contact_pubkey = pk if isinstance(pk, bytes) else bytes.fromhex(pk)
+                if len(contact_pubkey) != 32:
+                    continue
+                peer_id = Identity(contact_pubkey)
+                shared_secret = peer_id.calc_shared_secret(self._local_identity.get_private_key())
+                aes_key = shared_secret[:16]
+                decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_data)
+            except Exception:
+                continue
 
-            # Extract encrypted data (skip dest_hash(1) + src_hash(1))
-            encrypted_data = pkt.payload[2:]
-
-            # Decrypt the payload
-            decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_data)
-
-            # Determine the actual payload type from the incoming packet header.
-            pkt_type = (pkt.header >> 2) & 0x0F
-
-            # Extract the actual response data based on packet type.
+            # Determine the actual response data based on packet type.
             response_data = decrypted
-
             if pkt_type == PAYLOAD_TYPE_PATH:
-                # Path-return format: path_len(1) + path(N) + extra_type(1) + extra_data
-                # The actual protocol response is inside the 'extra' field.
-                if len(decrypted) >= 2:  # need at least path_len + extra_type
+                if len(decrypted) >= 2:
                     path_len_byte = decrypted[0]
-                    inner_offset = 1 + path_len_byte + 1  # path_len + path + extra_type
+                    inner_offset = 1 + path_len_byte + 1
                     if path_len_byte <= MAX_PATH_SIZE and len(decrypted) >= inner_offset:
                         extra_type = decrypted[1 + path_len_byte] & 0x0F
                         if extra_type == PAYLOAD_TYPE_RESPONSE and len(decrypted) > inner_offset:
@@ -303,28 +341,61 @@ class ProtocolResponseHandler:
                                 f"not RESPONSE"
                             )
 
-            # Parse based on content type
             success, text, parsed = self._parse_protocol_response(response_data)
             return success, text, parsed, decrypted
 
-        except Exception as e:
-            self._log(f"[ProtocolResponse] Decryption failed: {e}")
-            return False, f"Decryption failed: {e}", {}, None
+        # Log once per packet: no contact or HMAC failed for every matching contact
+        if not contacts_tried:
+            self._log(
+                f"[ProtocolResponse] No contact for hash 0x{src_hash:02X}, "
+                "cannot decrypt PATH/RESPONSE"
+            )
+        else:
+            self._log(
+                f"[ProtocolResponse] HMAC failed for hash 0x{src_hash:02X} "
+                f"(tried {len(contacts_tried)} contact(s), repeater PATH uses same ECDH as login)"
+            )
+        return False, "Decryption failed: Invalid HMAC", {}, None
 
     def _parse_protocol_response(self, data: bytes) -> tuple[bool, str, Dict[str, Any]]:
         """Parse decrypted protocol response data.
 
-        Parse order mirrors MeshCore firmware priority:
-        1. Stats (RepeaterStats struct, ≥52 bytes)
-        2. Text / status (UTF-8 printable after stripping tag + nulls)
-        3. Telemetry (reflected_timestamp + valid CayenneLPP with ≥1 sensor)
+        Parse order:
+        0. Login response (13 bytes, response_code at [4] 0x00/0x01) → binary,
+           for LoginResponseHandler.
+        1. Telemetry (reflected_timestamp + valid CayenneLPP signature byte check)
+        2. Stats (RepeaterStats struct, ≥52 bytes, only when not telemetry)
+        3. Text / status (UTF-8 printable after stripping tag + nulls)
         4. Binary fallback
+
+        Telemetry is checked first because CayenneLPP data can be ≥56 bytes for
+        sensors with many readings, which would otherwise be misidentified as stats.
+        The telemetry signature check (channel=1, type=0x74) is cheap and reliable.
         """
         try:
-            # 1. Check if this looks like a stats response (protocol 0x01)
+            # 0. Login responses are 13 bytes (tag(4) + response_code(1) + keep_alive(1) + ...).
+            #    Do not parse as telemetry/stats; LoginResponseHandler will handle them.
+            if len(data) == 13 and data[4] in (0x00, 0x01):
+                return (
+                    True,
+                    "Binary response: " + data.hex(),
+                    {"type": "binary", "hex": data.hex()},
+                )
+
+            # 1. Check if this looks like a telemetry response (protocol 0x03).
+            #    MeshCore always starts telemetry with addVoltage(TELEM_CHANNEL_SELF=1, ...)
+            #    which produces LPP channel=0x01, type=0x74 (LPP_VOLTAGE) as first record.
+            #    This signature reliably distinguishes telemetry from stats/text responses.
+            if len(data) >= 8:  # tag(4) + at least one LPP record (ch+type+val = 3+)
+                telemetry_result = self._parse_telemetry_response(data)
+                if telemetry_result and telemetry_result.get("sensor_count", 0) > 0:
+                    return True, telemetry_result["formatted"], telemetry_result
+
+            # 2. Check if this looks like a stats response (protocol 0x01).
             #    RepeaterStats is 48-56 bytes + 4-byte tag.  Older firmware
             #    omits n_recv_errors (52 B struct → 56 total); PATH-wrapped
             #    responses may also lose trailing bytes to AES block alignment.
+            #    Only reached if telemetry signature check above failed.
             if len(data) >= 56:
                 stats_result = self._parse_stats_response(data)
                 if stats_result:
@@ -340,7 +411,7 @@ class ProtocolResponseHandler:
                     )
                     return True, stats_result["formatted"], result_dict
 
-            # 2. Try parsing as text/status response.
+            # 3. Try parsing as text/status response.
             #    Status responses are tag(4) + UTF-8 text.  Strip the 4-byte
             #    tag that prefixes every response, then check for printable text.
             if len(data) > 4:
@@ -354,13 +425,6 @@ class ProtocolResponseHandler:
                         )
                 except UnicodeDecodeError:
                     pass
-
-            # 3. Check if this looks like a telemetry response (protocol 0x03)
-            #    Must decode at least one sensor from valid CayenneLPP after the tag.
-            if len(data) >= 8:  # tag(4) + at least one LPP record (ch+type+val = 3+)
-                telemetry_result = self._parse_telemetry_response(data)
-                if telemetry_result and telemetry_result.get("sensor_count", 0) > 0:
-                    return True, telemetry_result["formatted"], telemetry_result
 
             # 4. Fall back to hex representation
             hex_response = data.hex()
@@ -586,17 +650,19 @@ class ProtocolResponseHandler:
         return " | ".join(result)
 
     def _find_contact_by_hash(self, contact_hash: int):
-        """Find contact by hash value."""
-        if not self._contact_book:
-            return None
+        """Find first contact by hash value."""
+        for contact in self._contacts_by_hash(contact_hash):
+            return contact
+        return None
 
-        # Search through contacts to find one with matching hash
+    def _contacts_by_hash(self, contact_hash: int):
+        """Yield all contacts whose public_key first byte matches contact_hash."""
+        if not self._contact_book:
+            return
         for contact in self._contact_book.list_contacts():
             try:
                 contact_pubkey = bytes.fromhex(contact.public_key)
                 if contact_pubkey[0] == contact_hash:
-                    return contact
+                    yield contact
             except (ValueError, IndexError):
                 continue
-
-        return None

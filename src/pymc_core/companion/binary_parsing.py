@@ -24,6 +24,8 @@ def parse_binary_response(
         return _parse_acl(data)
     if request_type == BinaryReqType.NEIGHBOURS:
         return _parse_neighbours(data, context or {})
+    if request_type == BinaryReqType.OWNER_INFO and len(data) >= 4:
+        return _parse_owner_info(data)
     return {"raw_hex": data.hex(), "request_type": request_type}
 
 
@@ -87,6 +89,22 @@ def _parse_mma(data: bytes) -> dict:
     except Exception:
         pass
     return out
+
+
+def _parse_owner_info(data: bytes) -> dict:
+    """Parse GET_OWNER_INFO response: tag(4) + 'version\\nname\\nowner' (variable)."""
+    try:
+        text = data[4:].decode("utf-8", errors="replace").strip()
+        parts = text.split("\n", 2)
+        return {
+            "tag": int.from_bytes(data[:4], "little"),
+            "version": parts[0] if len(parts) > 0 else "",
+            "node_name": parts[1] if len(parts) > 1 else "",
+            "owner_info": parts[2] if len(parts) > 2 else "",
+            "raw_text": text,
+        }
+    except Exception:
+        return {"raw_hex": data.hex(), "request_type": BinaryReqType.OWNER_INFO}
 
 
 def _parse_acl(buf: bytes) -> dict:

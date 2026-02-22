@@ -808,7 +808,14 @@ class CompanionBase(ABC):
         tag_bytes = tag_int.to_bytes(4, "little")
         tag_hex = tag_bytes.hex()
         request_type = data[0] if len(data) >= 1 else 0
-        req_payload = tag_bytes + data
+        # The firmware's sendRequest(req_data) sends: firmware_tag(4) + req_data on the wire.
+        # onContactRequest receives data = req_data, so data[0] = req_type.
+        # create_protocol_request sends: timestamp(4) + protocol_code(1) + extra_data.
+        # onContactRequest receives data = [protocol_code, extra_data...].
+        # So protocol_code must be req_type (data[0]), and extra_data is data[1:] plus
+        # a random blob (matching the firmware's entropy suffix) for packet uniqueness.
+        protocol_code = request_type
+        req_payload = data[1:] + tag_bytes  # optional payload + random tag for uniqueness
         self.cleanup_expired_binary_requests()
         self.register_binary_request(
             tag_hex,
@@ -820,13 +827,62 @@ class CompanionBase(ABC):
             pkt, _ = PacketBuilder.create_protocol_request(
                 contact=proxy,
                 local_identity=self._identity,
-                protocol_code=PROTOCOL_CODE_BINARY_REQ,
+                protocol_code=protocol_code,
                 data=req_payload,
             )
             self._apply_flood_scope(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Binary request send error: {e}")
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        if not success:
+            self._pending_binary_requests.pop(tag_hex, None)
+            return SentResult(success=False)
+        return SentResult(
+            success=True,
+            is_flood=contact.out_path_len <= 0,
+            expected_ack=tag_int,
+            timeout_ms=DEFAULT_RESPONSE_TIMEOUT_MS,
+        )
+
+    async def send_anon_req(
+        self, pub_key: bytes, data: bytes, timeout_seconds: float = 15.0
+    ) -> SentResult:
+        """Send anonymous request (CMD_SEND_ANON_REQ), e.g. owner info.
+
+        data = request payload (e.g. [0x07] for GET_OWNER_INFO). Response is
+        delivered via on_binary_response (PUSH_CODE_BINARY_RESPONSE) like binary req.
+        """
+        contact = self.contacts.get_by_key(pub_key)
+        if not contact:
+            return SentResult(success=False)
+        proxy = self.contacts.get_by_name(contact.name)
+        if not proxy:
+            return SentResult(success=False)
+        tag_int = random.randint(0, 0xFFFFFFFF)
+        tag_bytes = tag_int.to_bytes(4, "little")
+        tag_hex = tag_bytes.hex()
+        request_type = PROTOCOL_CODE_ANON_REQ
+        req_payload = data + tag_bytes
+        self.cleanup_expired_binary_requests()
+        self.register_binary_request(
+            tag_hex,
+            request_type=request_type,
+            timeout_seconds=timeout_seconds,
+            pubkey_prefix=pub_key[:6].hex(),
+        )
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=proxy,
+                local_identity=self._identity,
+                protocol_code=PROTOCOL_CODE_ANON_REQ,
+                data=req_payload,
+            )
+            self._apply_flood_scope(pkt)
+            success = await self._send_packet(pkt, wait_for_ack=False)
+        except Exception as e:
+            logger.error(f"Anon request send error: {e}")
             self._pending_binary_requests.pop(tag_hex, None)
             return SentResult(success=False)
         if not success:
