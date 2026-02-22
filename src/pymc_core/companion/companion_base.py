@@ -1414,6 +1414,10 @@ class CompanionBase(ABC):
         )
 
     async def _handle_new_channel_message(self, data: dict) -> None:
+        # Do not push our own (outgoing) channel messages to the client as incoming.
+        if data.get("is_outgoing"):
+            return
+
         # Deduplicate by packet hash so we queue one frame per logical message, matching
         # firmware: Mesh.cpp only calls onChannelMessageRecv when !_tables->hasSeen(pkt).
         pkt_hash = data.get("packet_hash")
