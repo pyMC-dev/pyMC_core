@@ -170,13 +170,14 @@ class LoginResponseHandler(BaseHandler):
             if len(plaintext) < 12:
                 return None
 
-            # Parse the C++ response format:
+            # Parse the C++ response format (handleLoginReq reply_data):
             # timestamp(4) + response_code(1) + keep_alive(1) + is_admin(1) +
-            # reserved(1) + random(4)
+            # permissions(1) + random(4) + [firmware_ver_level(1) at index 12]
             timestamp, response_code, keep_alive, is_admin, reserved = struct.unpack(
                 "<IBBBB", plaintext[:8]
             )
             random_blob = plaintext[8:12]
+            firmware_ver_level = int(plaintext[12]) if len(plaintext) >= 13 else None
 
             return {
                 "timestamp": timestamp,
@@ -185,6 +186,7 @@ class LoginResponseHandler(BaseHandler):
                 "is_admin": bool(is_admin),
                 "reserved": reserved,
                 "random_blob": random_blob,
+                "firmware_ver_level": firmware_ver_level,
                 "contact": contact,
             }
 

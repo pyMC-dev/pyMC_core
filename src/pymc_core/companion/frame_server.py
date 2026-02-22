@@ -754,8 +754,8 @@ class CompanionFrameServer:
     async def _cmd_device_query(self, data: bytes) -> None:
         # Layout must match MeshCore companion_radio MyMesh.cpp handleCmdFrame() CMD_DEVICE_QEURY:
         # [0]=RESP_CODE_DEVICE_INFO, [1]=FIRMWARE_VER_CODE, [2]=MAX_CONTACTS/2,
-        # [3]=MAX_GROUP_CHANNELS, [4..7]=ble_pin, [8..19]=build_date(12),
-        # [20..59]=manufacturer(40), [60..79]=version(20), [80]=client_repeat.
+        # [3]=MAX_GROUP_CHANNELS, [4..7]=ble_pin, [8..19]=build_date(12), [20..59]=manufacturer(40),
+        # [60..79]=version(20), [80]=client_repeat.
         if len(data) >= 1:
             self._app_target_ver = data[0]
         firmware_ver = FIRMWARE_VER_CODE
@@ -1141,6 +1141,10 @@ class CompanionFrameServer:
         self._write_frame(bytes([RESP_CODE_SENT, 1]) + struct.pack("<II", 0, 10000))
         result = await self.bridge.send_login(pubkey, password)
         if result.get("success"):
+            # Layout matches MeshCore companion_radio onContactResponse
+            fw_level = result.get("firmware_ver_level")
+            if fw_level is None:
+                fw_level = FIRMWARE_VER_CODE  # fallback so app sees >= 2 for owner info
             self._write_frame(
                 bytes(
                     [
@@ -1151,6 +1155,7 @@ class CompanionFrameServer:
                 + pubkey[:6]
                 + struct.pack("<I", result.get("tag", 0))
                 + bytes([result.get("acl_permissions", 0)])
+                + bytes([min(255, max(0, int(fw_level)))])
             )
         else:
             self._write_frame(bytes([PUSH_CODE_LOGIN_FAIL, 0]) + pubkey[:6])

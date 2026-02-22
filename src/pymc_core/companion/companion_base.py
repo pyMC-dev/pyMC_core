@@ -1133,6 +1133,7 @@ class CompanionBase(ABC):
                 "keep_alive_interval": data.get("keep_alive_interval", 0),
                 "tag": data.get("timestamp", 0),
                 "acl_permissions": data.get("reserved", data.get("permissions", 0)),
+                "firmware_ver_level": data.get("firmware_ver_level"),
                 "reason": "Login successful" if login_result["success"] else "Login failed",
             }
         except Exception as e:
