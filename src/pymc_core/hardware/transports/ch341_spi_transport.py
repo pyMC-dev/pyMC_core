@@ -72,11 +72,20 @@ class CH341SPITransport(SPITransport):
             logger.info("CH341 GPIO manager automatically initialized")
         except Exception as e:
             logger.error(f"Failed to setup CH341 GPIO manager: {e}")
-            hint = (
-                f"CH341 GPIO manager initialization failed: {e}. "
-                f"Check USB connection, permissions (udev rules), and that the "
-                f"CH341 device is accessible."
-            )
+            # Detect specific error types for better guidance
+            err_str = str(e)
+            if "No backend available" in err_str:
+                hint = (
+                    f"CH341 GPIO manager initialization failed: {e}. "
+                    f"The libusb library is not installed. "
+                    f"Install it with: sudo apt-get install libusb-1.0-0"
+                )
+            else:
+                hint = (
+                    f"CH341 GPIO manager initialization failed: {e}. "
+                    f"Check USB connection, permissions (udev rules), and that the "
+                    f"CH341 device is accessible."
+                )
             if _is_container():
                 hint += (
                     "\n\n*** CONTAINER DETECTED ***\n"
