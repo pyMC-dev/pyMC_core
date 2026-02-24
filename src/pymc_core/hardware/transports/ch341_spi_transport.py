@@ -48,7 +48,12 @@ class CH341SPITransport(SPITransport):
             set_gpio_manager(self._gpio_manager)
             logger.info("CH341 GPIO manager automatically initialized")
         except Exception as e:
-            logger.warning(f"Failed to setup CH341 GPIO manager: {e}")
+            logger.error(f"Failed to setup CH341 GPIO manager: {e}")
+            raise RuntimeError(
+                f"CH341 GPIO manager initialization failed: {e}. "
+                f"Check USB connection, permissions (udev rules), and that the "
+                f"CH341 device is accessible."
+            ) from e
 
     def open(self, bus: int, cs: int, speed: int = 2000000) -> bool:
         """
