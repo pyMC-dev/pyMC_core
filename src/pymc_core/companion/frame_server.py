@@ -362,10 +362,18 @@ class CompanionFrameServer:
                     _write_push(full)
             except Exception as e:
                 logger.exception("advert_received callback error: %s", e)
+            try:
+                self._save_contacts()
+            except Exception as e:
+                logger.warning("Save contacts after advert failed: %s", e)
 
         async def on_contact_path_updated(pub_key, path_len, path):
             if isinstance(pub_key, bytes) and len(pub_key) >= 32:
                 _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + pub_key[:32])
+            try:
+                self._save_contacts()
+            except Exception as e:
+                logger.warning("Save contacts after path update failed: %s", e)
 
         async def on_channel_message_received(
             channel_name,
