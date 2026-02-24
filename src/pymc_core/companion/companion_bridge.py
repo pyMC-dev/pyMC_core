@@ -292,7 +292,7 @@ class CompanionBridge(CompanionBase):
             try:
                 result = await handler(packet)
                 if ptype == PAYLOAD_TYPE_ADVERT and result:
-                    contact = self._update_stores_from_advert(packet, result)
+                    contact = await self._update_stores_from_advert(packet, result)
                     if contact:
                         await self._fire_callbacks("advert_received", contact)
             except Exception as e:
@@ -303,8 +303,16 @@ class CompanionBridge(CompanionBase):
         # No duplicate call here — it would cause double decryption and could
         # deliver the result to response waiters twice.
 
-    def _update_stores_from_advert(self, packet: Packet, advert_data: dict):
-        """Update ContactStore and PathCache from advert result. Returns the Contact or None."""
+    async def _update_stores_from_advert(self, packet: Packet, advert_data: dict):
+        """Update ContactStore and PathCache from advert result.
+
+        Mirrors C++ BaseChatMesh::onAdvertRecv (BaseChatMesh.cpp:106-170):
+        - Existing contacts are always updated (name, GPS, etc.)
+        - New contacts are subject to auto-add type filtering
+        - When store is full, overwrite-oldest replaces the oldest non-favourite
+
+        Returns the Contact or None.
+        """
         try:
             pub_key = bytes.fromhex(advert_data.get("public_key", ""))
             if len(pub_key) < 7:
@@ -320,10 +328,11 @@ class CompanionBridge(CompanionBase):
             last_advert_ts = advert_data.get("advert_timestamp", 0)
             if last_advert_ts > now:
                 last_advert_ts = now
+            adv_type = advert_data.get("contact_type_id", 0)
             contact = Contact(
                 public_key=pub_key,
                 name=name,
-                adv_type=advert_data.get("contact_type_id", 0),
+                adv_type=adv_type,
                 gps_lat=advert_data.get("latitude", 0.0),
                 gps_lon=advert_data.get("longitude", 0.0),
                 lastmod=now,
@@ -331,7 +340,24 @@ class CompanionBridge(CompanionBase):
                 out_path_len=-1,
                 out_path=b"",
             )
-            self.contacts.add(contact)
+
+            is_existing = self.contacts.get_by_key(pub_key) is not None
+            if is_existing:
+                # Always update existing contacts (C++ BaseChatMesh.cpp:158-167)
+                self.contacts.update(contact)
+            elif not self.should_auto_add_contact_type(adv_type):
+                # Type not allowed — still fire callback so app sees the advert
+                logger.debug("Auto-add filtered: type %d not allowed", adv_type)
+            elif self.should_overwrite_when_full() and self.contacts.is_full():
+                ok, overwritten = self.contacts.add_or_overwrite(contact)
+                if ok and overwritten:
+                    await self._fire_callbacks("contact_deleted", overwritten)
+                elif not ok:
+                    await self._fire_callbacks("contacts_full")
+            else:
+                added = self.contacts.add(contact)
+                if not added and self.contacts.is_full():
+                    await self._fire_callbacks("contacts_full")
 
             self.path_cache.update(
                 AdvertPath(

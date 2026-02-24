@@ -41,6 +41,11 @@ from .constants import (
     ADV_TYPE_ROOM,
     ADV_TYPE_SENSOR,
     ADVERT_LOC_SHARE,
+    AUTOADD_CHAT,
+    AUTOADD_OVERWRITE_OLDEST,
+    AUTOADD_REPEATER,
+    AUTOADD_ROOM,
+    AUTOADD_SENSOR,
     DEFAULT_MAX_CHANNELS,
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
@@ -77,6 +82,8 @@ PUSH_CALLBACK_KEYS = [
     "raw_data_received",
     "binary_response",
     "path_discovery_response",
+    "contact_deleted",
+    "contacts_full",
 ]
 
 
@@ -564,6 +571,30 @@ class CompanionBase(ABC):
         self.prefs.autoadd_config = config
         self._save_prefs()
 
+    # Map ADV_TYPE_* → AUTOADD_* bitmask bits (mirrors C++ shouldAutoAddContactType)
+    _AUTOADD_TYPE_MAP: dict[int, int] = {
+        ADV_TYPE_CHAT: AUTOADD_CHAT,  # 1 → 0x02
+        ADV_TYPE_REPEATER: AUTOADD_REPEATER,  # 2 → 0x04
+        ADV_TYPE_ROOM: AUTOADD_ROOM,  # 3 → 0x08
+        ADV_TYPE_SENSOR: AUTOADD_SENSOR,  # 4 → 0x10
+    }
+
+    def should_auto_add_contact_type(self, contact_type: int) -> bool:
+        """Check if a contact type should be auto-added based on current preferences.
+
+        Mirrors C++ MyMesh::shouldAutoAddContactType (MyMesh.cpp:281-304).
+        """
+        # manual_add_contacts bit 0 == 0  →  auto-add ALL types
+        if (self.prefs.manual_add_contacts & 1) == 0:
+            return True
+        # Selective mode: check the type-specific bit in autoadd_config
+        type_bit = self._AUTOADD_TYPE_MAP.get(contact_type, 0)
+        return bool(self.prefs.autoadd_config & type_bit) if type_bit else False
+
+    def should_overwrite_when_full(self) -> bool:
+        """Check if overwrite-oldest is enabled. Mirrors C++ shouldOverwriteWhenFull."""
+        return bool(self.prefs.autoadd_config & AUTOADD_OVERWRITE_OLDEST)
+
     # -------------------------------------------------------------------------
     # Push Callbacks
     # -------------------------------------------------------------------------
@@ -608,6 +639,14 @@ class CompanionBase(ABC):
     def on_path_discovery_response(self, callback: Callable) -> None:
         """Register callback for path discovery 0x8D. (tag_bytes, pubkey, out_path, in_path)."""
         self._push_callbacks["path_discovery_response"].append(callback)
+
+    def on_contact_deleted(self, callback: Callable) -> None:
+        """Register callback for PUSH 0x8F (contact overwritten). Callback(pub_key_bytes)."""
+        self._push_callbacks["contact_deleted"].append(callback)
+
+    def on_contacts_full(self, callback: Callable) -> None:
+        """Register callback for PUSH 0x90 (contacts store full). Callback()."""
+        self._push_callbacks["contacts_full"].append(callback)
 
     def register_binary_request(
         self,

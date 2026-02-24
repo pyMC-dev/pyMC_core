@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Tuple
 
 from .constants import DEFAULT_MAX_CONTACTS
 from .models import Contact
@@ -102,6 +102,35 @@ class ContactStore:
         self._contacts[contact.public_key] = contact
         self._proxies[contact.public_key] = ContactProxy(contact)
         return True
+
+    def add_or_overwrite(self, contact: Contact) -> Tuple[bool, Optional[bytes]]:
+        """Add a contact, overwriting the oldest non-favourite if store is full.
+
+        Mirrors C++ BaseChatMesh::allocateContactSlot (BaseChatMesh.cpp:70-90).
+
+        Returns:
+            (success, overwritten_pubkey_or_None)
+        """
+        if contact.public_key in self._contacts:
+            return self.update(contact), None
+        if len(self._contacts) >= self._max_contacts:
+            # Find oldest non-favourite (flags bit 0 = favourite)
+            oldest_key: Optional[bytes] = None
+            oldest_lastmod = 0xFFFFFFFF
+            for key, c in self._contacts.items():
+                if (c.flags & 0x01) == 0 and c.lastmod < oldest_lastmod:
+                    oldest_lastmod = c.lastmod
+                    oldest_key = key
+            if oldest_key is None:
+                return False, None  # all contacts are favourites
+            overwritten = oldest_key
+            self.remove(oldest_key)
+            self._contacts[contact.public_key] = contact
+            self._proxies[contact.public_key] = ContactProxy(contact)
+            return True, overwritten
+        self._contacts[contact.public_key] = contact
+        self._proxies[contact.public_key] = ContactProxy(contact)
+        return True, None
 
     def update(self, contact: Contact) -> bool:
         """Update an existing contact. Returns False if not found."""

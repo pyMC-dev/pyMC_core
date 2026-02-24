@@ -54,6 +54,7 @@ from .constants import (
     CMD_SET_CUSTOM_VAR,
     CMD_SET_DEVICE_TIME,
     CMD_SET_FLOOD_SCOPE,
+    CMD_SET_OTHER_PARAMS,
     CMD_SET_RADIO_PARAMS,
     CMD_SET_RADIO_TX_POWER,
     CMD_SET_TUNING_PARAMS,
@@ -72,6 +73,8 @@ from .constants import (
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_BINARY_RESPONSE,
+    PUSH_CODE_CONTACT_DELETED,
+    PUSH_CODE_CONTACTS_FULL,
     PUSH_CODE_CONTROL_DATA,
     PUSH_CODE_LOG_RX_DATA,
     PUSH_CODE_LOGIN_FAIL,
@@ -423,6 +426,13 @@ class CompanionFrameServer:
             )
             _write_push(frame)
 
+        async def on_contact_deleted(pub_key):
+            if isinstance(pub_key, bytes) and len(pub_key) >= 32:
+                _write_push(bytes([PUSH_CODE_CONTACT_DELETED]) + pub_key[:32])
+
+        async def on_contacts_full():
+            _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
+
         self.bridge.on_message_received(on_message_received)
         self.bridge.on_channel_message_received(on_channel_message_received)
         self.bridge.on_send_confirmed(on_send_confirmed)
@@ -430,6 +440,8 @@ class CompanionFrameServer:
         self.bridge.on_contact_path_updated(on_contact_path_updated)
         self.bridge.on_binary_response(on_binary_response)
         self.bridge.on_path_discovery_response(on_path_discovery_response)
+        self.bridge.on_contact_deleted(on_contact_deleted)
+        self.bridge.on_contacts_full(on_contacts_full)
 
     # -------------------------------------------------------------------------
     # Public push methods (called directly by host application)
@@ -708,6 +720,8 @@ class CompanionFrameServer:
                 await self._cmd_set_autoadd_config(data)
             elif cmd == CMD_GET_AUTOADD_CONFIG:
                 await self._cmd_get_autoadd_config(data)
+            elif cmd == CMD_SET_OTHER_PARAMS:
+                await self._cmd_set_other_params(data)
             else:
                 logger.warning(
                     "Companion unsupported cmd 0x%02x (%s) len=%s",
@@ -1605,3 +1619,15 @@ class CompanionFrameServer:
     async def _cmd_get_autoadd_config(self, data: bytes) -> None:
         config = self.bridge.get_autoadd_config()
         self._write_frame(bytes([RESP_CODE_AUTOADD_CONFIG, config & 0xFF]))
+
+    async def _cmd_set_other_params(self, data: bytes) -> None:
+        """Handle CMD_SET_OTHER_PARAMS (0x26). Mirrors MyMesh.cpp:1290-1305."""
+        if len(data) < 1:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        manual_add = data[0]
+        telemetry_modes = data[1] if len(data) >= 2 else 0
+        advert_loc_policy = data[2] if len(data) >= 3 else 0
+        multi_acks = data[3] if len(data) >= 4 else 0
+        self.bridge.set_other_params(manual_add, telemetry_modes, advert_loc_policy, multi_acks)
+        self._write_ok()
