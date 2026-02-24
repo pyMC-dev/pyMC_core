@@ -36,10 +36,17 @@ class CryptoUtils:
     @staticmethod
     def _aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
         cipher = AES.new(key, AES.MODE_ECB)
-        return b"".join(
+        orig_len = len(ciphertext)
+        if orig_len % CIPHER_BLOCK_SIZE != 0:
+            # Firmware may send non-block-aligned ciphertext (e.g. telemetry 63 bytes).
+            # Pad to next block for decrypt, then return only original length.
+            pad_len = CIPHER_BLOCK_SIZE - (orig_len % CIPHER_BLOCK_SIZE)
+            ciphertext = ciphertext + (b"\x00" * pad_len)
+        out = b"".join(
             cipher.decrypt(ciphertext[i : i + CIPHER_BLOCK_SIZE])
             for i in range(0, len(ciphertext), CIPHER_BLOCK_SIZE)
         )
+        return out[:orig_len]
 
     @staticmethod
     def encrypt_then_mac(key_aes: bytes, shared_secret: bytes, plaintext: bytes) -> bytes:

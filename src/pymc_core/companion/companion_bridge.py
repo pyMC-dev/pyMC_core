@@ -87,22 +87,42 @@ class _BridgeAckHandler:
             return None
         encrypted = bytes(payload[2:])
         # Try each contact with matching src_hash until decryption succeeds
+        contacts_tried = 0
         for contact in self._bridge.contacts.contacts:
             try:
                 pk = contact.public_key
                 pub = bytes.fromhex(pk) if isinstance(pk, str) else bytes(pk)
                 if len(pub) != 32 or pub[0] != src_hash:
                     continue
+                contacts_tried += 1
                 peer_id = Identity(pub)
                 shared_secret = peer_id.calc_shared_secret(self._bridge._identity.get_private_key())
                 aes_key = shared_secret[:16]
                 decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted)
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    "process_path_ack_variants: decrypt failed for src=0x%02x " "contact=%s: %s",
+                    src_hash,
+                    getattr(contact, "name", "?"),
+                    e,
+                )
                 continue
             if len(decrypted) < 2:
+                logger.debug(
+                    "process_path_ack_variants: decrypted too short (%d) for src=0x%02x",
+                    len(decrypted),
+                    src_hash,
+                )
                 continue
             path_len = min(decrypted[0], MAX_PATH_SIZE)
             if 1 + path_len > len(decrypted):
+                logger.debug(
+                    "process_path_ack_variants: path_len=%d exceeds decrypted len=%d "
+                    "for src=0x%02x",
+                    path_len,
+                    len(decrypted),
+                    src_hash,
+                )
                 continue
             path_bytes = bytes(decrypted[1 : 1 + path_len])
             # Firmware pattern: onContactPathRecv stores out_path so replies can use sendDirect()
@@ -112,12 +132,31 @@ class _BridgeAckHandler:
                 contact_obj.out_path_len = path_len
                 contact_obj.out_path = path_bytes
                 self._bridge.contacts.update(contact_obj)
+                logger.debug(
+                    "process_path_ack_variants: updated out_path for src=0x%02x "
+                    "contact=%s path_len=%d",
+                    src_hash,
+                    getattr(contact, "name", "?"),
+                    path_len,
+                )
+            else:
+                logger.debug(
+                    "process_path_ack_variants: get_by_key returned None for src=0x%02x",
+                    src_hash,
+                )
             await self._bridge._fire_callbacks("contact_path_updated", pub, path_len, path_bytes)
             # If this PATH carries an ACK, return it so send_confirmed can fire
             extra_start = 1 + path_len
             if len(decrypted) >= extra_start + 1 + 4 and decrypted[extra_start] == PAYLOAD_TYPE_ACK:
                 return int.from_bytes(decrypted[extra_start + 1 : extra_start + 5], "little")
             return None
+        if contacts_tried > 0:
+            logger.debug(
+                "process_path_ack_variants: no contact decrypted successfully for src=0x%02x "
+                "(tried %d)",
+                src_hash,
+                contacts_tried,
+            )
         return None
 
     async def _notify_ack_received(self, crc: int) -> None:
@@ -218,6 +257,7 @@ class CompanionBridge(CompanionBase):
         self._login_response_handler = core.login_response_handler
         self._text_handler_ref = core.text_handler
         core.protocol_response_handler.set_binary_response_callback(self._on_binary_response)
+        core.protocol_response_handler.set_packet_injector(self._packet_injector)
 
     # -------------------------------------------------------------------------
     # Handler accessors (used by CompanionBase concrete send methods)
@@ -257,6 +297,11 @@ class CompanionBridge(CompanionBase):
                         await self._fire_callbacks("advert_received", contact)
             except Exception as e:
                 logger.error(f"Handler error for type {ptype:02X}: {e}")
+
+        # NOTE: PATH packets are already delivered to protocol_response_handler
+        # via PathHandler.__call__ (path.py), which runs as the handler above.
+        # No duplicate call here — it would cause double decryption and could
+        # deliver the result to response waiters twice.
 
     def _update_stores_from_advert(self, packet: Packet, advert_data: dict):
         """Update ContactStore and PathCache from advert result. Returns the Contact or None."""

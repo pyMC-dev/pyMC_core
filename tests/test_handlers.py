@@ -316,6 +316,34 @@ class TestProtocolResponseHandler:
         assert self.handler._log == self.log_fn
         assert self.handler._local_identity == self.local_identity
 
+    def test_parse_telemetry_response_tag_plus_lpp(self):
+        """Parse tag(4) + CayenneLPP matches repeater firmware format; raw_bytes is LPP only."""
+        # Repeater sends: tag(4) + LPP. Tag is 4-byte reflected_timestamp (little-endian).
+        # MeshCore first record: addVoltage(TELEM_CHANNEL_SELF=1, v)
+        # → channel=1, type=0x74 (LPP_VOLTAGE), 2 bytes 0.01V big-endian. 3.7V → 370 → 0x01 0x72
+        tag = b"\x01\x00\x00\x00"  # LE 1
+        lpp = bytes([0x01, 0x74, 0x01, 0x72])  # ch 1, Voltage, 370 (3.70 V)
+        data = tag + lpp
+        result = self.handler._parse_telemetry_response(data)
+        assert result is not None
+        assert result["type"] == "telemetry"
+        assert result["reflected_timestamp"] == 1
+        assert result["raw_bytes"] == lpp
+        assert result["sensor_count"] == 1
+        sensor = result["sensors"][0]
+        assert sensor["channel"] == 1
+        assert sensor["type"] == "Voltage"
+        assert sensor["type_id"] == 0x74
+        assert abs(sensor["value"] - 3.7) < 0.001
+
+    def test_parse_telemetry_response_rejects_non_telemetry(self):
+        """Payload without channel=1, type=0x74 signature is not classified as telemetry."""
+        tag = b"\x00\x00\x00\x00"  # LE 0
+        # Not starting with 0x01 0x74
+        data = tag + bytes([0x01, 0x67, 0x00, 0x00])  # ch 1, Temperature, 0°C
+        result = self.handler._parse_telemetry_response(data)
+        assert result is None
+
 
 # Trace Handler Tests
 class TestTraceHandler:

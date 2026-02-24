@@ -562,7 +562,7 @@ The frame server sends unsolicited push frames to the companion app when events 
 | `PUSH_CODE_LOGIN_SUCCESS` | 0x91 | Repeater login succeeded |
 | `PUSH_CODE_LOGIN_FAIL` | 0x92 | Repeater login failed |
 | `PUSH_CODE_STATUS_RESPONSE` | 0x93 | Repeater status response |
-| `PUSH_CODE_TELEMETRY_RESPONSE` | 0x94 | Telemetry response |
+| `PUSH_CODE_TELEMETRY_RESPONSE` | 0x8B | Telemetry response |
 | `PUSH_CODE_BINARY_RESPONSE` | 0x95 | Binary request response |
 | `PUSH_CODE_PATH_DISCOVERY_RESPONSE` | 0x96 | Path discovery response |
 

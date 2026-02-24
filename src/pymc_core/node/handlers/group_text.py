@@ -265,7 +265,9 @@ class GroupTextHandler(BaseHandler):
             # Check if this message is from ourselves using sender name (echo detection)
             is_own = self._is_own_message(packet)
             if is_own:
-                self.log(f"Own echo detected (will publish for heard-count): {sender_name}: {message_body}")
+                self.log(
+                    f"Own echo detected (skip publish to client): {sender_name}: {message_body}"
+                )
 
             # Log the group message
             self.log(f"<<< Channel [{channel_name}] {sender_name}: {message_body} >>>")
@@ -293,7 +295,12 @@ class GroupTextHandler(BaseHandler):
     ):
         """Save the group message to database and broadcast via WebSocket."""
         try:
-            message_id = packet.get_packet_hash_hex(16)  
+            message_id = packet.get_packet_hash_hex(16)
+
+            # Do not publish NEW_CHANNEL_MESSAGE for our own messages (inject + echoes).
+            # The client already has the sent message; publishing per echo would spam the event.
+            if is_outgoing:
+                return
 
             # Publish channel message event if available
             if self.event_service:

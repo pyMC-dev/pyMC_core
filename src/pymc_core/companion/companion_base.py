@@ -49,6 +49,7 @@ from .constants import (
     PROTOCOL_CODE_ANON_REQ,
     PROTOCOL_CODE_BINARY_REQ,
     PROTOCOL_CODE_RAW_DATA,
+    PUSH_CODE_TELEMETRY_RESPONSE,
     STATS_TYPE_CORE,
     STATS_TYPE_PACKETS,
     STATS_TYPE_RADIO,
@@ -804,37 +805,39 @@ class CompanionBase(ABC):
         proxy = self.contacts.get_by_name(contact.name)
         if not proxy:
             return SentResult(success=False)
-        tag_int = random.randint(0, 0xFFFFFFFF)
-        tag_bytes = tag_int.to_bytes(4, "little")
-        tag_hex = tag_bytes.hex()
         request_type = data[0] if len(data) >= 1 else 0
-        # The firmware's sendRequest(req_data) sends: firmware_tag(4) + req_data on the wire.
-        # onContactRequest receives data = req_data, so data[0] = req_type.
-        # create_protocol_request sends: timestamp(4) + protocol_code(1) + extra_data.
-        # onContactRequest receives data = [protocol_code, extra_data...].
-        # So protocol_code must be req_type (data[0]), and extra_data is data[1:] plus
-        # a random blob (matching the firmware's entropy suffix) for packet uniqueness.
+        # C++ companion pattern (BaseChatMesh::sendRequest):
+        #   tag = getRTCClock()->getCurrentTimeUnique()
+        #   memcpy(temp, &tag, 4);  memcpy(&temp[4], req_data, data_len);
+        # create_protocol_request packs: timestamp(4) + protocol_code(1) + extra_data.
+        # The repeater echoes sender_timestamp (bytes 0-3) in the response.
+        # So the timestamp IS the tag — we capture it from create_protocol_request.
         protocol_code = request_type
-        req_payload = data[1:] + tag_bytes  # optional payload + random tag for uniqueness
+        req_payload = data[1:]  # request params only; timestamp provides uniqueness
         self.cleanup_expired_binary_requests()
-        self.register_binary_request(
-            tag_hex,
-            request_type=request_type,
-            timeout_seconds=timeout_seconds,
-            pubkey_prefix=pub_key[:6].hex(),
-        )
         try:
-            pkt, _ = PacketBuilder.create_protocol_request(
+            pkt, timestamp = PacketBuilder.create_protocol_request(
                 contact=proxy,
                 local_identity=self._identity,
                 protocol_code=protocol_code,
                 data=req_payload,
             )
+            # Use the timestamp as the tag — matches what the repeater echoes back
+            tag_int = timestamp
+            tag_bytes = tag_int.to_bytes(4, "little")
+            tag_hex = tag_bytes.hex()
+            self.register_binary_request(
+                tag_hex,
+                request_type=request_type,
+                timeout_seconds=timeout_seconds,
+                pubkey_prefix=pub_key[:6].hex(),
+            )
             self._apply_flood_scope(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Binary request send error: {e}")
-            self._pending_binary_requests.pop(tag_hex, None)
+            if "tag_hex" in locals():
+                self._pending_binary_requests.pop(tag_hex, None)
             return SentResult(success=False)
         if not success:
             self._pending_binary_requests.pop(tag_hex, None)
@@ -860,30 +863,32 @@ class CompanionBase(ABC):
         proxy = self.contacts.get_by_name(contact.name)
         if not proxy:
             return SentResult(success=False)
-        tag_int = random.randint(0, 0xFFFFFFFF)
-        tag_bytes = tag_int.to_bytes(4, "little")
-        tag_hex = tag_bytes.hex()
         request_type = PROTOCOL_CODE_ANON_REQ
-        req_payload = data + tag_bytes
+        req_payload = data  # no random tag; timestamp provides uniqueness
         self.cleanup_expired_binary_requests()
-        self.register_binary_request(
-            tag_hex,
-            request_type=request_type,
-            timeout_seconds=timeout_seconds,
-            pubkey_prefix=pub_key[:6].hex(),
-        )
         try:
-            pkt, _ = PacketBuilder.create_protocol_request(
+            pkt, timestamp = PacketBuilder.create_protocol_request(
                 contact=proxy,
                 local_identity=self._identity,
                 protocol_code=PROTOCOL_CODE_ANON_REQ,
                 data=req_payload,
             )
+            # Use the timestamp as the tag — matches what the repeater echoes back
+            tag_int = timestamp
+            tag_bytes = tag_int.to_bytes(4, "little")
+            tag_hex = tag_bytes.hex()
+            self.register_binary_request(
+                tag_hex,
+                request_type=request_type,
+                timeout_seconds=timeout_seconds,
+                pubkey_prefix=pub_key[:6].hex(),
+            )
             self._apply_flood_scope(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Anon request send error: {e}")
-            self._pending_binary_requests.pop(tag_hex, None)
+            if "tag_hex" in locals():
+                self._pending_binary_requests.pop(tag_hex, None)
             return SentResult(success=False)
         if not success:
             self._pending_binary_requests.pop(tag_hex, None)
@@ -1158,6 +1163,24 @@ class CompanionBase(ABC):
             logger.error(f"Logout error: {e}")
             return False
 
+    async def _wait_for_path_propagation(self, proxy: Any, request_type: str) -> None:
+        """Wait for reciprocal PATH to propagate through the mesh for multi-hop contacts.
+
+        After login, pyMC sends a reciprocal PATH so the remote repeater learns
+        the return route.  Each mesh hop adds ~500ms (airtime + processing).
+        Without this delay, the first REQ may arrive before the reciprocal PATH,
+        causing the remote to fall back to sendFlood() — which gets dropped by
+        intermediate repeaters due to transport-code region filtering.
+        """
+        out_path_len = getattr(proxy, "out_path_len", -1)
+        if out_path_len > 0:
+            propagation_delay = out_path_len * 0.5  # e.g. 3 hops → 1.5s
+            logger.debug(
+                f"Multi-hop {request_type}: waiting {propagation_delay:.1f}s for "
+                f"reciprocal PATH propagation ({out_path_len} hops)"
+            )
+            await asyncio.sleep(propagation_delay)
+
     async def send_status_request(self, pub_key: bytes, timeout: float = 15.0) -> dict:
         """Send a protocol request for repeater status/stats."""
         contact = self.contacts.get_by_key(pub_key)
@@ -1173,6 +1196,7 @@ class CompanionBase(ABC):
         waiter = ResponseWaiter()
         proto_handler.set_response_callback(contact_hash, waiter.callback)
         try:
+            await self._wait_for_path_propagation(proxy, "stats request")
             pkt, _ = PacketBuilder.create_protocol_request(
                 contact=proxy,
                 local_identity=self._identity,
@@ -1216,6 +1240,7 @@ class CompanionBase(ABC):
         waiter = ResponseWaiter()
         proto_handler.set_response_callback(contact_hash, waiter.callback)
         try:
+            await self._wait_for_path_propagation(proxy, "telemetry request")
             inv = PacketBuilder._compute_inverse_perm_mask(
                 want_base, want_location, want_environment
             )
@@ -1227,10 +1252,17 @@ class CompanionBase(ABC):
             )
             await self._send_packet(pkt, wait_for_ack=False)
             result = await waiter.wait(timeout)
+            telemetry_data = dict(result.get("parsed", {}))
+            raw_bytes = telemetry_data.get("raw_bytes", b"")
+            if raw_bytes and len(pub_key) >= 6:
+                # Companion-style frame: 0x8B + reserved + 6-byte pubkey prefix + LPP
+                telemetry_data["frame_bytes"] = (
+                    bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pub_key[:6] + raw_bytes
+                )
             return {
                 "success": result.get("success", False),
                 "contact": contact.name,
-                "telemetry_data": result.get("parsed", {}),
+                "telemetry_data": telemetry_data,
                 "response_text": result.get("text"),
                 "reason": ("Telemetry received" if result.get("success") else "Telemetry failed"),
             }

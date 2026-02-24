@@ -1199,13 +1199,17 @@ class CompanionFrameServer:
         )
         if not result.get("success"):
             self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
+            await self._drain_writer()
             return
         telem_data = result.get("telemetry_data", {})
         raw_bytes = telem_data.get("raw_bytes", b"")
         if not raw_bytes:
             self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
+            await self._drain_writer()
             return
         self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6] + raw_bytes)
+        await self._drain_writer()
+        logger.info("Telemetry push sent to client: %d bytes LPP", len(raw_bytes))
 
     async def _cmd_send_self_advert(self, data: bytes) -> None:
         flood = len(data) >= 1 and data[0] == 1

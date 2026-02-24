@@ -65,6 +65,7 @@ def create_core_handlers(
 
     login_response_handler = LoginResponseHandler(identity, contacts, log_fn)
     login_response_handler.set_protocol_response_handler(protocol_response_handler)
+    protocol_response_handler.set_login_response_handler(login_response_handler)
 
     path_handler = PathHandler(
         log_fn,

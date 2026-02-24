@@ -9,8 +9,14 @@ import struct
 from typing import Any, Callable, Dict, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet
-from ...protocol.constants import MAX_PATH_SIZE, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE
+from ...protocol.constants import (
+    MAX_PATH_SIZE,
+    PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RESPONSE,
+    ROUTE_TYPE_DIRECT,
+)
 from ...protocol.crypto import CIPHER_BLOCK_SIZE, CIPHER_MAC_SIZE
+from ...protocol.packet_builder import PacketBuilder
 
 # ---------------------------------------------------------------------------
 # Built-in CayenneLPP decoder (no external dependency)
@@ -34,7 +40,7 @@ _LPP_TYPES: Dict[int, tuple] = {
     0x71: ("Accelerometer", 6, 1000, True),  # LPP_ACCELEROMETER   = 113, 3×int16
     0x73: ("Barometer", 2, 10, False),  # LPP_BAROMETRIC_PRESSURE = 115
     0x74: ("Voltage", 2, 100, False),  # LPP_VOLTAGE         = 116, 0.01V
-    0x75: ("Current", 2, 1000, False),  # LPP_CURRENT         = 117, 0.001A
+    0x75: ("Current", 2, 1000, True),  # LPP_CURRENT         = 117, 0.001A signed
     0x76: ("Frequency", 4, 1, False),  # LPP_FREQUENCY       = 118, 1Hz
     0x78: ("Percentage", 1, 1, False),  # LPP_PERCENTAGE      = 120, 1-100%
     0x79: ("Altitude", 2, 1, True),  # LPP_ALTITUDE        = 121, 1m signed
@@ -46,8 +52,10 @@ _LPP_TYPES: Dict[int, tuple] = {
     0x85: ("Unix Time", 4, 1, False),  # LPP_UNIXTIME        = 133
     0x86: ("Gyroscope", 6, 100, True),  # LPP_GYROMETER       = 134, 3×int16
     0x87: ("Colour", 3, 1, False),  # LPP_COLOUR          = 135, RGB
-    0x88: ("GPS", 9, 1, True),  # LPP_GPS             = 136, lat(3)+lon(3)+alt(3)
+    0x88: ("GPS", 9, 1, True),  # LPP_GPS             = 136, lat(3)+lon(3)+alt(3), mult 10000/100
     0x8E: ("Switch", 1, 1, False),  # LPP_SWITCH          = 142, 0/1
+    # LPP_POLYLINE 240: variable size; min 8 bytes (size+delta+lon+lat). Skip min to continue.
+    0xF0: ("Polyline", 8, 1, False),  # LPP_POLYLINE       = 240
 }
 
 
@@ -111,6 +119,17 @@ def _decode_cayenne_lpp(data: bytes) -> list:
                     "raw_value": raw.hex(),
                 }
             )
+        elif type_id == 0xF0:
+            # Polyline: variable size; we only consume minimum 8 bytes (MeshCore skipData).
+            sensors.append(
+                {
+                    "channel": channel,
+                    "type": name,
+                    "type_id": type_id,
+                    "value": raw.hex(),
+                    "raw_value": raw.hex(),
+                }
+            )
         else:
             val = int.from_bytes(raw, "big", signed=signed)
             sensors.append(
@@ -144,6 +163,26 @@ class ProtocolResponseHandler:
         # Optional: decrypted payloads with tag+data (and optional path) passed as binary response.
         # Signature: (tag_bytes, response_data, path_info=None).
         self._binary_response_callback: Optional[Callable[..., Any]] = None
+        # Reference to LoginResponseHandler for state-based login detection
+        self._login_response_handler: Optional[Any] = None
+        # Packet injector for sending reciprocal PATH packets (mirrors C++ Mesh.cpp:168-169)
+        self._packet_injector: Optional[Callable] = None
+
+    def set_login_response_handler(self, handler: Any) -> None:
+        """Set login handler ref for checking active login state."""
+        self._login_response_handler = handler
+
+    def set_packet_injector(self, injector: Optional[Callable]) -> None:
+        """Set packet injector for sending reciprocal PATH packets.
+
+        When the companion receives a flooded PATH from a remote repeater,
+        the C++ firmware sends a reciprocal PATH back so the remote repeater
+        learns the route to us (Mesh.cpp:168-169).  Without this, the remote
+        repeater has no out_path for us and must fall back to plain FLOOD for
+        responses — which intermediate repeaters may drop due to transport-code
+        region filtering.
+        """
+        self._packet_injector = injector
 
     @staticmethod
     def payload_type() -> int:
@@ -174,6 +213,13 @@ class ProtocolResponseHandler:
             # Both PATH and RESPONSE packets share the same structure:
             # dest_hash(1) + src_hash(1) + encrypted_data(N)
             src_hash = pkt.payload[1]
+            pkt_type = (pkt.header >> 2) & 0x0F
+            route_label = "FLOOD" if pkt.is_route_flood() else "DIRECT"
+            if pkt_type == PAYLOAD_TYPE_RESPONSE:
+                self._log(
+                    f"[ProtocolResponse] Received RESPONSE (0x01) from 0x{src_hash:02X} "
+                    f"({route_label}, {len(pkt.payload)}B)"
+                )
 
             # Proceed if we have a callback for this source or the binary (path-discovery) callback
             if src_hash not in self._response_callbacks and self._binary_response_callback is None:
@@ -203,6 +249,11 @@ class ProtocolResponseHandler:
                     return
                 callback = self._response_callbacks[src_hash]
                 if callback:
+                    if parsed_data.get("type") == "telemetry":
+                        self._log(
+                            f"[ProtocolResponse] Delivering telemetry to waiter "
+                            f"(src=0x{src_hash:02X}, {parsed_data.get('sensor_count', 0)} sensors)"
+                        )
                     callback(success, decoded_text, parsed_data)
                 return
 
@@ -263,23 +314,119 @@ class ProtocolResponseHandler:
             self._log(f"[ProtocolResponse] Error processing protocol response: {e}")
 
     def _is_login_response(self, pkt: Packet, raw_decrypted: Optional[bytes]) -> bool:
-        """True if raw_decrypted is a login response (13 bytes, response_code at [4] in 0x00/0x01).
-        Used to avoid delivering a retransmitted login to the stats/telemetry waiter.
+        """True if a login is currently pending for the source contact.
+
+        Mirrors the C++ companion firmware pattern: classify responses by
+        pending-request state rather than payload content.  The previous
+        content-based check (``inner[4] in (0x00, 0x01)``) falsely matched
+        CayenneLPP telemetry whose first byte is channel 0x01.
         """
-        if not raw_decrypted or len(raw_decrypted) < 13:
+        if not self._login_response_handler:
             return False
-        pkt_type = (pkt.header >> 2) & 0x0F
-        if pkt_type == PAYLOAD_TYPE_PATH:
-            if len(raw_decrypted) < 2:
-                return False
-            path_len_byte = raw_decrypted[0]
-            inner_offset = 1 + path_len_byte + 1
-            if len(raw_decrypted) < inner_offset + 13:
-                return False
-            inner = raw_decrypted[inner_offset : inner_offset + 13]
-        else:
-            inner = raw_decrypted[:13]
-        return len(inner) == 13 and inner[4] in (0x00, 0x01)
+        passwords = getattr(self._login_response_handler, "_active_login_passwords", {})
+        if not passwords:
+            return False
+        if len(pkt.payload) < 2:
+            return False
+        src_hash = pkt.payload[1]
+        return src_hash in passwords
+
+    def _update_contact_path(
+        self,
+        contact_pubkey: bytes,
+        src_hash: int,
+        path_len_byte: int,
+        decrypted: bytes,
+    ) -> None:
+        """Update contact out_path from decrypted PATH data (firmware onContactPathRecv pattern).
+
+        When a PATH packet is successfully decrypted, store the return path
+        on the contact so that subsequent requests use sendDirect() instead
+        of sendFlood().  This mirrors C++ ``BaseChatMesh::onContactPathRecv``.
+        """
+        try:
+            if path_len_byte > MAX_PATH_SIZE:
+                return
+            out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+            contact_obj = self._contact_book.get_by_key(contact_pubkey)
+            if contact_obj is not None:
+                contact_obj.out_path_len = path_len_byte
+                contact_obj.out_path = out_path_bytes
+                self._contact_book.update(contact_obj)
+                self._log(
+                    f"[ProtocolResponse] Updated out_path for 0x{src_hash:02X}: "
+                    f"path_len={path_len_byte}"
+                )
+            else:
+                self._log(
+                    f"[ProtocolResponse] Cannot update out_path for 0x{src_hash:02X}: "
+                    f"contact not found by key"
+                )
+        except Exception as e:
+            self._log(f"[ProtocolResponse] Failed to update out_path: {e}")
+
+    async def _send_reciprocal_path(
+        self,
+        src_hash: int,
+        shared_secret: bytes,
+        pkt: Packet,
+        decrypted: bytes,
+        path_len_byte: int,
+    ) -> None:
+        """Send a reciprocal PATH back to the sender so it learns the route to us.
+
+        Mirrors C++ firmware behaviour (Mesh.cpp lines 166-169):
+
+            mesh::Packet* rpath = createPathReturn(
+                &src_hash, secret, pkt->path, pkt->path_len, 0, NULL, 0);
+            if (rpath) sendDirect(rpath, path, path_len, 500);
+
+        - ``pkt.path`` is the flood accumulation path on the received PATH
+          (the inbound route, e.g. [hash_X, hash_B]).  This is placed inside
+          the reciprocal's encrypted payload so the remote repeater stores it
+          as *its* ``out_path`` — the route from itself back to us.
+        - The reciprocal is sent **DIRECT** using the inner ``out_path``
+          extracted from the decrypted data (e.g. [hash_B, hash_X]), which
+          routes through the mesh to reach the remote repeater.
+        """
+        if self._packet_injector is None:
+            return
+        try:
+            our_hash = self._local_identity.get_public_key()[0]
+            # The inbound flood path (pkt.path) tells the remote repeater
+            # "to reach me, go through these intermediate hops".
+            in_path = list(pkt.path) if pkt.path else []
+
+            # Build the reciprocal PATH packet.  create_path_return produces a
+            # FLOOD PATH by default; we convert it to DIRECT below.
+            reciprocal = PacketBuilder.create_path_return(
+                dest_hash=src_hash,
+                src_hash=our_hash,
+                secret=shared_secret,
+                path=in_path,
+                extra_type=0xFF,  # no extra payload (dummy, same as C++ NULL/0)
+                extra=b"",
+            )
+
+            # Convert to DIRECT routing using the inner out_path (the route
+            # from us to the remote repeater).
+            out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+            reciprocal.header = (reciprocal.header & ~0x03) | ROUTE_TYPE_DIRECT
+            reciprocal.path = bytearray(out_path_bytes)
+            reciprocal.path_len = len(out_path_bytes)
+
+            # Await injection so the reciprocal PATH is serialized through the
+            # radio TX pipeline before this method returns.  This ensures the
+            # login callback doesn't fire until the reciprocal PATH is in flight,
+            # preventing the app's first stats REQ from racing ahead of it.
+            await self._packet_injector(reciprocal)
+
+            self._log(
+                f"[ProtocolResponse] Sending reciprocal PATH to 0x{src_hash:02X} "
+                f"via DIRECT (out_path_len={path_len_byte}, in_path_len={len(in_path)})"
+            )
+        except Exception as e:
+            self._log(f"[ProtocolResponse] Failed to send reciprocal PATH: {e}")
 
     async def _decrypt_protocol_response(
         self, pkt: Packet, src_hash: int
@@ -296,15 +443,17 @@ class ProtocolResponseHandler:
         if len(payload) < 2 + 4:  # need dest+src + at least MAC(2)+min ciphertext
             return False, "Payload too short", {}, None
         encrypted_data = payload[2:]
-        # MAC(2) + ciphertext; ciphertext must be block-aligned (16 bytes)
-        # (20 = login response, 68 = stats. Variable: REQ_TYPE_GET_OWNER_INFO can produce 19 bytes.)
+        # MAC(2) + ciphertext. Ciphertext may be block-aligned or truncated (e.g. long PATH
+        # packets lose one byte to header size; telemetry PATH 63 bytes). Allow MAC + 15 bytes
+        # minimum so we can pad to one block and attempt decrypt.
         enc_len = len(encrypted_data)
-        if enc_len <= CIPHER_MAC_SIZE or (enc_len - CIPHER_MAC_SIZE) % CIPHER_BLOCK_SIZE != 0:
+        min_enc = CIPHER_MAC_SIZE + (CIPHER_BLOCK_SIZE - 1)  # 17: MAC(2) + 15 ciphertext
+        if enc_len < min_enc:
             self._log(
-                f"[ProtocolResponse] Payload truncated or invalid length for hash "
-                f"0x{src_hash:02X}: encrypted_data={enc_len}B (need MAC(2)+16k ciphertext)"
+                f"[ProtocolResponse] Payload too short for hash 0x{src_hash:02X}: "
+                f"encrypted_data={enc_len}B (need MAC(2)+≥15 bytes ciphertext)"
             )
-            return False, "Payload truncated or invalid length", {}, None
+            return False, "Payload too short", {}, None
         pkt_type = (pkt.header >> 2) & 0x0F
 
         # Try every contact matching src_hash (same “try all hash matches” as TXT_MSG and PATH ACK).
@@ -341,6 +490,24 @@ class ProtocolResponseHandler:
                                 f"not RESPONSE"
                             )
 
+                    # Firmware pattern (onContactPathRecv): update contact out_path
+                    # so subsequent requests use sendDirect() instead of sendFlood().
+                    self._update_contact_path(contact_pubkey, src_hash, path_len_byte, decrypted)
+
+                    # Firmware pattern (Mesh.cpp:168-169): send reciprocal PATH back
+                    # to the sender so it learns the route to us.  Without this, the
+                    # remote repeater has no out_path for us and must fall back to
+                    # plain FLOOD for responses — which intermediate repeaters may
+                    # drop due to transport-code region filtering.
+                    if pkt.is_route_flood():
+                        await self._send_reciprocal_path(
+                            src_hash,
+                            shared_secret,
+                            pkt,
+                            decrypted,
+                            path_len_byte,
+                        )
+
             success, text, parsed = self._parse_protocol_response(response_data)
             return success, text, parsed, decrypted
 
@@ -353,7 +520,7 @@ class ProtocolResponseHandler:
         else:
             self._log(
                 f"[ProtocolResponse] HMAC failed for hash 0x{src_hash:02X} "
-                f"(tried {len(contacts_tried)} contact(s), repeater PATH uses same ECDH as login)"
+                f"(tried {len(contacts_tried)} contact(s). Repeater PATH uses same ECDH as login)"
             )
         return False, "Decryption failed: Invalid HMAC", {}, None
 
@@ -362,7 +529,7 @@ class ProtocolResponseHandler:
 
         Parse order:
         0. Login response (13 bytes, response_code at [4] 0x00/0x01) → binary,
-           for LoginResponseHandler.
+          for LoginResponseHandler.
         1. Telemetry (reflected_timestamp + valid CayenneLPP signature byte check)
         2. Stats (RepeaterStats struct, ≥52 bytes, only when not telemetry)
         3. Text / status (UTF-8 printable after stripping tag + nulls)
@@ -496,6 +663,14 @@ class ProtocolResponseHandler:
                 total_rx_air_time_secs,  # uint32  offset 48
                 n_recv_errors,  # uint32  offset 52
             ) = struct.unpack("<HHhhIIIIIIIIHhHHII", stats_data[:56])
+
+            # Sanity-check key fields to avoid misidentifying non-stats data
+            # (e.g. neighbor list binary data parsed as RepeaterStats produces
+            # batt=22mV, rssi=-27844, which are obviously invalid).
+            if batt_milli_volts > 10000:  # > 10V is unreasonable
+                return None
+            if last_rssi < -200 or last_rssi > 0:  # RSSI always negative, > -200 dBm
+                return None
 
             raw_stats = {
                 "batt_milli_volts": batt_milli_volts,

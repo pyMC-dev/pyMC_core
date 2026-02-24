@@ -827,7 +827,8 @@ class PacketBuilder:
         )
 
         out_path_len = getattr(contact, "out_path_len", -1)
-        if out_path_len < 0:
+        out_path = getattr(contact, "out_path", b"") or b""
+        if out_path_len <= 0 or not out_path:
             route_type = "flood"
         else:
             route_type = "direct"
@@ -835,12 +836,10 @@ class PacketBuilder:
         header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ, route_type)
         packet = PacketBuilder._create_packet(header, payload)
 
-        if route_type == "direct" and out_path_len > 0:
-            out_path = getattr(contact, "out_path", b"")
-            if out_path:
-                path_bytes = out_path[:MAX_PATH_SIZE]
-                packet.path = bytearray(path_bytes)
-                packet.path_len = len(packet.path)
+        if route_type == "direct" and len(out_path) > 0:
+            path_bytes = out_path[:MAX_PATH_SIZE]
+            packet.path = bytearray(path_bytes)
+            packet.path_len = len(packet.path)
 
         return packet, timestamp
 
