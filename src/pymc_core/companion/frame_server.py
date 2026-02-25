@@ -1162,7 +1162,7 @@ class CompanionFrameServer:
     async def _cmd_sync_next_message(self, data: bytes) -> None:
         msg = self.bridge.sync_next_message()
         if msg is None:
-            msg = self._sync_next_from_persistence()
+            msg = await asyncio.to_thread(self._sync_next_from_persistence)
         if msg is None:
             self._write_frame(bytes([RESP_CODE_NO_MORE_MESSAGES]))
             return
@@ -1433,9 +1433,14 @@ class CompanionFrameServer:
         ):
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
-        stats = (
-            self.stats_getter(stats_type) if self.stats_getter else None
-        ) or self.bridge.get_stats(stats_type)
+        if self.stats_getter:
+            if asyncio.iscoroutinefunction(self.stats_getter):
+                stats = await self.stats_getter(stats_type)
+            else:
+                stats = await asyncio.to_thread(self.stats_getter, stats_type)
+        else:
+            stats = None
+        stats = stats or self.bridge.get_stats(stats_type)
         frame = bytes([RESP_CODE_STATS, stats_type])
         if stats_type == STATS_TYPE_CORE:
             battery_mv = int(stats.get("battery_mv", 0))
