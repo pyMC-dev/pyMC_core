@@ -341,9 +341,15 @@ class CompanionBridge(CompanionBase):
                 out_path=b"",
             )
 
-            is_existing = self.contacts.get_by_key(pub_key) is not None
-            if is_existing:
-                # Always update existing contacts (C++ BaseChatMesh.cpp:158-167)
+            existing = self.contacts.get_by_key(pub_key)
+            if existing is not None:
+                # Always update existing contacts (C++ BaseChatMesh.cpp:158-167).
+                # Preserve fields that adverts don't carry: the firmware only
+                # updates name, type, gps, last_advert_timestamp, lastmod.
+                contact.out_path_len = existing.out_path_len
+                contact.out_path = existing.out_path
+                contact.flags = existing.flags
+                contact.sync_since = existing.sync_since
                 self.contacts.update(contact)
             elif not self.should_auto_add_contact_type(adv_type):
                 # Type not allowed — still fire callback so app sees the advert

@@ -92,7 +92,7 @@ class LoginResponseHandler(BaseHandler):
             if dest_hash != our_hash and src_hash != our_hash:
                 return
 
-        # Find stored password and matching contact
+        # Find stored password and matching contact(s)
         if lookup_hash not in self._active_login_passwords:
             # This might be a telemetry response, not a login response
             # Forward to protocol response handler if available
@@ -111,23 +111,38 @@ class LoginResponseHandler(BaseHandler):
                     )
             return
 
-        matched_contact = None
-
+        # Collect all contacts whose public_key first byte matches (hash collision / multiple peers)
+        candidates = []
         for contact in self.contacts.contacts:
             try:
-                contact_pubkey = bytes.fromhex(contact.public_key)
-                if len(contact_pubkey) > 0 and contact_pubkey[0] == lookup_hash:
-                    matched_contact = contact
-                    break
+                pk = contact.public_key
+                contact_pubkey = pk if isinstance(pk, bytes) else bytes.fromhex(pk)
+                if len(contact_pubkey) == 32 and contact_pubkey[0] == lookup_hash:
+                    candidates.append(contact)
             except Exception:
                 continue
 
-        if not matched_contact:
+        if not candidates:
+            if self.login_callback:
+                await self._safe_callback(
+                    False,
+                    {
+                        "error": "No contact found for login response (src_hash=0x%02x)"
+                        % lookup_hash
+                    },
+                )
             return
 
-        # Decrypt and process response
-        response_data = await self._decrypt_response(packet, matched_contact, encrypted_start)
-        if response_data:
+        # Try each candidate until one decrypts successfully (same shared-secret as firmware)
+        response_data = None
+        matched_contact = None
+        for contact in candidates:
+            response_data = await self._decrypt_response(packet, contact, encrypted_start)
+            if response_data:
+                matched_contact = contact
+                break
+
+        if response_data and matched_contact:
             await self._process_login_response(response_data, matched_contact)
             self.clear_login_password(lookup_hash)
         elif self.login_callback:
@@ -142,7 +157,8 @@ class LoginResponseHandler(BaseHandler):
             encrypted_data = packet.payload[encrypted_start:]
 
             # Calculate X25519 ECDH shared secret
-            contact_pubkey = bytes.fromhex(contact.public_key)
+            pk = contact.public_key
+            contact_pubkey = pk if isinstance(pk, bytes) else bytes.fromhex(pk)
             contact_identity = Identity(contact_pubkey)
             shared_secret = contact_identity.calc_shared_secret(
                 self.local_identity.get_private_key()

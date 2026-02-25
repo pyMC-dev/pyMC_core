@@ -13,7 +13,9 @@ Frame format:
 
 import asyncio
 import logging
+import socket
 import struct
+import sys
 import time
 from typing import Any, Callable, Optional
 
@@ -178,6 +180,7 @@ class CompanionFrameServer:
         local_hash: Optional[int] = None,
         stats_getter: Optional[Callable] = None,
         control_handler: Optional[Any] = None,
+        heartbeat_interval: int = 15,
     ):
         self.bridge = bridge
         self.companion_hash = companion_hash
@@ -186,6 +189,7 @@ class CompanionFrameServer:
         self.local_hash = local_hash
         self.stats_getter = stats_getter
         self._control_handler = control_handler
+        self._heartbeat_interval = heartbeat_interval
         self._server: Optional[asyncio.Server] = None
         self._client_writer: Optional[asyncio.StreamWriter] = None
         self._client_reader: Optional[asyncio.StreamReader] = None
@@ -252,11 +256,18 @@ class CompanionFrameServer:
         Default returns ``None``."""
         return None
 
-    def _save_contacts(self) -> None:
-        """Hook: persist the current contact list.  Default is a no-op."""
+    async def _persist_contact(self, contact) -> None:
+        """Hook: persist a single contact.  Default is a no-op.
 
-    def _save_channels(self) -> None:
-        """Hook: persist the current channel list.  Default is a no-op."""
+        Subclasses should override to do a fast single-row upsert rather
+        than rewriting the entire contact list.
+        """
+
+    async def _save_contacts(self) -> None:
+        """Hook: persist the full contact list.  Default is a no-op."""
+
+    async def _save_channels(self) -> None:
+        """Hook: persist the full channel list.  Default is a no-op."""
 
     def _get_batt_and_storage(self) -> tuple[int, int, int]:
         """Hook: return (millivolts, used_kb, total_kb).  Default: all zeros."""
@@ -276,7 +287,11 @@ class CompanionFrameServer:
                     self._client_writer.write(frame)
                     asyncio.create_task(self._drain_writer())
                 except Exception as e:
-                    logger.debug("Push write error: %s", e)
+                    logger.warning("Push write error (closing connection): %s", e)
+                    try:
+                        self._client_writer.close()
+                    except Exception:
+                        pass
 
         async def on_message_received(sender_key, text, timestamp, txt_type, packet_hash=None):
             msg_dict = {
@@ -366,17 +381,19 @@ class CompanionFrameServer:
             except Exception as e:
                 logger.exception("advert_received callback error: %s", e)
             try:
-                self._save_contacts()
+                await self._persist_contact(contact)
             except Exception as e:
-                logger.warning("Save contacts after advert failed: %s", e)
+                logger.warning("Persist contact after advert failed: %s", e)
 
         async def on_contact_path_updated(pub_key, path_len, path):
             if isinstance(pub_key, bytes) and len(pub_key) >= 32:
                 _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + pub_key[:32])
             try:
-                self._save_contacts()
+                c = self.bridge.contacts.get_by_key(pub_key) if isinstance(pub_key, bytes) else None
+                if c is not None:
+                    await self._persist_contact(c)
             except Exception as e:
-                logger.warning("Save contacts after path update failed: %s", e)
+                logger.warning("Persist contact after path update failed: %s", e)
 
         async def on_channel_message_received(
             channel_name,
@@ -560,6 +577,12 @@ class CompanionFrameServer:
         if self._client_writer:
             try:
                 await self._client_writer.drain()
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.warning("Drain failed (connection lost): %s", e)
+                try:
+                    self._client_writer.close()
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -579,6 +602,43 @@ class CompanionFrameServer:
     # Client handling
     # -------------------------------------------------------------------------
 
+    async def _heartbeat_loop(self) -> None:
+        """Send periodic ``RESP_CODE_CURR_TIME`` to keep the TCP connection alive."""
+        try:
+            while self._client_writer and not self._client_writer.is_closing():
+                await asyncio.sleep(self._heartbeat_interval)
+                if self._client_writer and not self._client_writer.is_closing():
+                    now = self.bridge.get_time()
+                    self._write_frame(bytes([RESP_CODE_CURR_TIME]) + struct.pack("<I", now))
+                    await self._drain_writer()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("Heartbeat loop ended: %s", e)
+
+    @staticmethod
+    def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
+        """Enable TCP keepalive on the underlying socket."""
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if sys.platform == "linux":
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 15)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            elif sys.platform == "darwin":
+                # TCP_KEEPALIVE is the macOS equivalent of TCP_KEEPIDLE
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 15)
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                except (AttributeError, OSError):
+                    pass  # older macOS may lack KEEPINTVL/KEEPCNT
+        except OSError as e:
+            logger.debug("Could not set TCP keepalive: %s", e)
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -591,9 +651,11 @@ class CompanionFrameServer:
 
         self._client_reader = reader
         self._client_writer = writer
+        self._enable_tcp_keepalive(writer)
         self._setup_push_callbacks()
         logger.info("Companion client connected (port=%s)", self.port)
 
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             while True:
                 prefix = await reader.read(1)
@@ -616,6 +678,11 @@ class CompanionFrameServer:
         except Exception as e:
             logger.error("Client handler error: %s", e, exc_info=True)
         finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             self._client_writer = None
             self._client_reader = None
             logger.info("Companion client disconnected (port=%s)", self.port)
@@ -1321,7 +1388,7 @@ class CompanionFrameServer:
         await self._drain_writer()
         if ok:
             try:
-                self._save_contacts()
+                await self._save_contacts()
             except Exception as e:
                 logger.warning("Save contacts after add/update failed: %s", e)
 
@@ -1333,7 +1400,10 @@ class CompanionFrameServer:
         pubkey = data[:32]
         ok = self.bridge.remove_contact(pubkey)
         if ok:
-            self._save_contacts()
+            try:
+                await self._save_contacts()
+            except Exception as e:
+                logger.warning("Save contacts after remove failed: %s", e)
         self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
         await self._drain_writer()
 
@@ -1494,7 +1564,10 @@ class CompanionFrameServer:
             return
         ok = self.bridge.set_channel(channel_idx, name, secret)
         if ok:
-            self._save_channels()
+            try:
+                await self._save_channels()
+            except Exception as e:
+                logger.warning("Save channels after set failed: %s", e)
         self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
 
     async def _cmd_set_flood_scope(self, data: bytes) -> None:
