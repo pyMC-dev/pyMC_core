@@ -404,6 +404,8 @@ class CompanionFrameServer:
             path_len=0,
             channel_idx=0,
             packet_hash=None,
+            snr=None,
+            rssi=None,
         ):
             msg_dict = {
                 "sender_key": b"",
@@ -1184,11 +1186,14 @@ class CompanionFrameServer:
             txt_type = 0
             text_bytes = (msg.text or "").rstrip("\x00").encode("utf-8", errors="replace")
             if self._app_target_ver >= 3:
+                snr_byte = max(-128, min(127, int(round(msg.snr * 4))))
+                if snr_byte < 0:
+                    snr_byte += 256
                 frame = (
                     bytes(
                         [
                             RESP_CODE_CHANNEL_MSG_RECV_V3,
-                            0,
+                            snr_byte & 0xFF,
                             0,
                             0,
                             msg.channel_idx,

@@ -98,3 +98,5 @@ class QueuedMessage:
     is_channel: bool = False
     channel_idx: int = 0  # only meaningful if is_channel
     path_len: int = 0
+    snr: float = 0.0
+    rssi: int = 0

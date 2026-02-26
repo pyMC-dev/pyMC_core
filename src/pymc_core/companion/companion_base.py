@@ -1509,6 +1509,11 @@ class CompanionBase(ABC):
         # sender and message separately. Use full_content (not message_text) so client can split.
         # Strip trailing nulls so frame matches firmware (exact string length, no padding).
         display_text = (data.get("full_content", data.get("message_text", "")) or "").rstrip("\x00")
+        # Extract SNR/RSSI from network info if available
+        network_info = data.get("network_info", {})
+        snr = network_info.get("snr")
+        rssi = network_info.get("rssi")
+
         msg = QueuedMessage(
             sender_key=b"",
             txt_type=0,
@@ -1517,8 +1522,11 @@ class CompanionBase(ABC):
             is_channel=True,
             channel_idx=channel_idx,
             path_len=path_len,
+            snr=snr if snr is not None else 0.0,
+            rssi=rssi if rssi is not None else 0,
         )
         self.message_queue.push(msg)
+
         await self._fire_callbacks(
             "channel_message_received",
             data.get("channel_name", ""),
@@ -1528,6 +1536,8 @@ class CompanionBase(ABC):
             path_len,
             channel_idx,
             pkt_hash,
+            snr,
+            rssi,
         )
 
     async def _fire_callbacks(self, event_name: str, *args: Any) -> None:
