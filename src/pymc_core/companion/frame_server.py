@@ -163,7 +163,10 @@ def _build_advert_push_frames(data: dict) -> tuple[bytes, Optional[bytes]]:
 class CompanionFrameServer:
     """TCP server for the MeshCore companion frame protocol.
 
-    One client per companion at a time.  Persistence is handled through
+    One client per companion at a time.  If a new connection arrives while
+    one is already active, the existing connection is closed and the new
+    one is accepted (eviction). An idle read timeout (client_idle_timeout_sec)
+    frees the slot when no data is received. Persistence is handled through
     overridable hook methods; the base class works with in-memory stores only.
     """
 
@@ -181,6 +184,7 @@ class CompanionFrameServer:
         stats_getter: Optional[Callable] = None,
         control_handler: Optional[Any] = None,
         heartbeat_interval: int = 15,
+        client_idle_timeout_sec: int = 90,
     ):
         self.bridge = bridge
         self.companion_hash = companion_hash
@@ -190,6 +194,7 @@ class CompanionFrameServer:
         self.stats_getter = stats_getter
         self._control_handler = control_handler
         self._heartbeat_interval = heartbeat_interval
+        self._client_idle_timeout_sec = client_idle_timeout_sec
         self._server: Optional[asyncio.Server] = None
         self._client_writer: Optional[asyncio.StreamWriter] = None
         self._client_reader: Optional[asyncio.StreamReader] = None
@@ -642,12 +647,22 @@ class CompanionFrameServer:
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle a new client connection.  One client at a time."""
+        """Handle a new client connection.  One client at a time.
+        If a client is already connected, the existing connection is closed
+        and the new one is accepted (eviction). An idle read timeout also
+        frees the slot when no data is received for client_idle_timeout_sec.
+        """
         if self._client_writer:
-            logger.warning("Companion already has a client; rejecting new connection")
-            writer.close()
-            await writer.wait_closed()
-            return
+            logger.info(
+                "Companion already has a client; evicting previous connection (port=%s)",
+                self.port,
+            )
+            old_writer = self._client_writer
+            try:
+                old_writer.close()
+                await old_writer.wait_closed()
+            except Exception:
+                pass
 
         self._client_reader = reader
         self._client_writer = writer
@@ -658,7 +673,13 @@ class CompanionFrameServer:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             while True:
-                prefix = await reader.read(1)
+                try:
+                    prefix = await asyncio.wait_for(
+                        reader.read(1), timeout=self._client_idle_timeout_sec
+                    )
+                except asyncio.TimeoutError:
+                    logger.info("Companion client idle timeout (port=%s)", self.port)
+                    break
                 if not prefix:
                     break
                 if prefix[0] != FRAME_INBOUND_PREFIX:
@@ -683,9 +704,10 @@ class CompanionFrameServer:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
-            self._client_writer = None
-            self._client_reader = None
-            logger.info("Companion client disconnected (port=%s)", self.port)
+            if self._client_writer is writer:
+                self._client_writer = None
+                self._client_reader = None
+                logger.info("Companion client disconnected (port=%s)", self.port)
 
     # -------------------------------------------------------------------------
     # Command dispatch
