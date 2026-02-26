@@ -184,7 +184,7 @@ class CompanionFrameServer:
         stats_getter: Optional[Callable] = None,
         control_handler: Optional[Any] = None,
         heartbeat_interval: int = 15,
-        client_idle_timeout_sec: int = 90,
+        client_idle_timeout_sec: int = 120,
     ):
         self.bridge = bridge
         self.companion_hash = companion_hash
@@ -292,11 +292,7 @@ class CompanionFrameServer:
                     self._client_writer.write(frame)
                     asyncio.create_task(self._drain_writer())
                 except Exception as e:
-                    logger.warning("Push write error (closing connection): %s", e)
-                    try:
-                        self._client_writer.close()
-                    except Exception:
-                        pass
+                    logger.warning("Push write error: %s", e)
 
         async def on_message_received(sender_key, text, timestamp, txt_type, packet_hash=None):
             msg_dict = {
@@ -584,12 +580,6 @@ class CompanionFrameServer:
                 await self._client_writer.drain()
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 logger.warning("Drain failed (connection lost): %s", e)
-                try:
-                    self._client_writer.close()
-                except Exception:
-                    pass
-            except Exception:
-                pass
 
     def _write_frame(self, data: bytes) -> None:
         """Send a frame to the connected client (outbound format)."""
@@ -692,6 +682,7 @@ class CompanionFrameServer:
                     break
                 payload = await reader.readexactly(frame_len)
                 await self._handle_cmd(payload)
+                await self._drain_writer()
         except asyncio.IncompleteReadError:
             pass
         except (ConnectionResetError, BrokenPipeError):
