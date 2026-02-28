@@ -630,6 +630,7 @@ class CompanionFrameServer:
         logger.info("Companion client connected (port=%s)", self.port)
 
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        disconnect_reason: Optional[str] = None
         try:
             while True:
                 try:
@@ -637,9 +638,10 @@ class CompanionFrameServer:
                         reader.read(1), timeout=self._client_idle_timeout_sec
                     )
                 except asyncio.TimeoutError:
-                    logger.info("Companion client idle timeout (port=%s)", self.port)
+                    disconnect_reason = "idle_timeout"
                     break
                 if not prefix:
+                    disconnect_reason = "empty_read"
                     break
                 if prefix[0] != FRAME_INBOUND_PREFIX:
                     logger.warning("Invalid frame prefix: 0x%02x", prefix[0])
@@ -648,15 +650,17 @@ class CompanionFrameServer:
                 frame_len = struct.unpack("<H", len_bytes)[0]
                 if frame_len > MAX_FRAME_SIZE:
                     logger.warning("Frame too long: %s", frame_len)
+                    disconnect_reason = "frame_too_long"
                     break
                 payload = await reader.readexactly(frame_len)
                 await self._handle_cmd(payload)
                 await self._drain_writer()
         except asyncio.IncompleteReadError:
-            pass
-        except (ConnectionResetError, BrokenPipeError):
-            pass
+            disconnect_reason = "incomplete_read"
+        except (ConnectionResetError, BrokenPipeError) as e:
+            disconnect_reason = type(e).__name__
         except Exception as e:
+            disconnect_reason = f"other: {type(e).__name__}: {e}"
             logger.error("Client handler error: %s", e, exc_info=True)
         finally:
             heartbeat_task.cancel()
@@ -667,7 +671,11 @@ class CompanionFrameServer:
             if self._client_writer is writer:
                 self._client_writer = None
                 self._client_reader = None
-                logger.info("Companion client disconnected (port=%s)", self.port)
+                logger.info(
+                    "Companion client disconnected (port=%s): %s",
+                    self.port,
+                    disconnect_reason or "unknown",
+                )
 
     # -------------------------------------------------------------------------
     # Command dispatch
@@ -1188,8 +1196,11 @@ class CompanionFrameServer:
             path_len_byte = msg.path_len if msg.path_len < 256 else 0xFF
             text_bytes = msg.text.encode("utf-8", errors="replace")
             if self._app_target_ver >= 3:
+                snr_byte = max(-128, min(127, int(round(msg.snr * 4))))
+                if snr_byte < 0:
+                    snr_byte += 256
                 frame = (
-                    bytes([RESP_CODE_CONTACT_MSG_RECV_V3, 0, 0, 0])
+                    bytes([RESP_CODE_CONTACT_MSG_RECV_V3, snr_byte & 0xFF, 0, 0])
                     + prefix
                     + bytes([path_len_byte, msg.txt_type])
                     + struct.pack("<I", msg.timestamp)
@@ -1479,6 +1490,8 @@ class CompanionFrameServer:
             return
         pub_key = data[1 : 1 + PUB_KEY_SIZE]
         prefix = pub_key[:7]
+        # Bridge methods used from command handlers must not block the event loop;
+        # if a subclass adds sync I/O here, run it via asyncio.to_thread().
         found = (
             self.bridge.get_advert_path(prefix)
             if getattr(self.bridge, "get_advert_path", None)
