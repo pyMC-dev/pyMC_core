@@ -217,11 +217,16 @@ class CompanionFrameServer:
             if self._server.sockets
             else (self.bind_address, self.port)
         )
+        # Repeater passes hash as hex (first byte of pubkey, e.g. "f5"); accept decimal or hex.
+        try:
+            hash_int = int(self.companion_hash)
+        except ValueError:
+            hash_int = int(self.companion_hash, 16)
         logger.info(
             "Companion frame server listening on %s:%s (hash=0x%02x)",
             addr[0],
             addr[1],
-            int(self.companion_hash),
+            hash_int,
         )
 
     async def stop(self) -> None:
