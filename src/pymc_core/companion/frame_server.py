@@ -119,45 +119,66 @@ from .models import Contact, QueuedMessage
 logger = logging.getLogger("CompanionFrameServer")
 
 
-def _build_advert_push_frames(data: dict) -> tuple[bytes, Optional[bytes]]:
+def _build_advert_push_frames(contact: Contact) -> tuple[bytes, Optional[bytes]]:
     """Build PUSH_CODE_ADVERT short frame and optional PUSH_CODE_NEW_ADVERT
-    full frame from extracted data.  Thread-safe for ``asyncio.to_thread``."""
-    pubkey_b = data.get("pubkey_b", b"")
+    full frame from contact.  Thread-safe for ``asyncio.to_thread``."""
+    pubkey_b = contact.public_key
     if isinstance(pubkey_b, bytes):
         pubkey_b = pubkey_b[:32].ljust(32, b"\x00")
     else:
         pubkey_b = b"\x00" * 32
     short = bytes([PUSH_CODE_ADVERT]) + pubkey_b
-    if not data.get("include_full"):
+    if not contact.name:
         return (short, None)
-    op = data.get("out_path", b"")
-    op = (op if isinstance(op, bytes) else bytes(op or []))[:MAX_PATH_SIZE].ljust(
-        MAX_PATH_SIZE, b"\x00"
-    )
-    nb = data.get("name_b", b"")
+    op = contact.out_path if isinstance(contact.out_path, bytes) else bytes(contact.out_path or [])
+    op = op[:MAX_PATH_SIZE].ljust(MAX_PATH_SIZE, b"\x00")
     nb = (
-        nb
-        if isinstance(nb, bytes)
-        else (nb.encode("utf-8", errors="replace") if isinstance(nb, str) else b"")
+        contact.name.encode("utf-8", errors="replace")
+        if isinstance(contact.name, str)
+        else (contact.name if isinstance(contact.name, bytes) else b"")
     )[:32].ljust(32, b"\x00")
+    opl_byte = 0xFF if contact.out_path_len < 0 else min(contact.out_path_len, 255)
     full = (
         bytes([PUSH_CODE_NEW_ADVERT])
         + pubkey_b
-        + bytes(
-            [
-                data.get("adv_type", 0),
-                data.get("flags", 0),
-                data.get("opl_byte", 0xFF),
-            ]
-        )
+        + bytes([contact.adv_type, contact.flags, opl_byte])
         + op
         + nb
-        + struct.pack("<I", data.get("last_advert", 0))
-        + struct.pack("<i", data.get("gps_lat_int", 0))
-        + struct.pack("<i", data.get("gps_lon_int", 0))
-        + struct.pack("<I", data.get("lastmod", 0))
+        + struct.pack("<I", contact.last_advert_timestamp)
+        + struct.pack("<i", int(contact.gps_lat * 1e6))
+        + struct.pack("<i", int(contact.gps_lon * 1e6))
+        + struct.pack("<I", contact.lastmod)
     )
     return (short, full)
+
+
+def _contact_from_dict(d: dict) -> Contact:
+    """Build a Contact from a dict (e.g. legacy callback payload)."""
+    pub = d.get("public_key", b"")
+    if isinstance(pub, str):
+        pub = bytes.fromhex(pub) if pub else b""
+    elif not isinstance(pub, bytes):
+        pub = b""
+    pub = pub[:32].ljust(32, b"\x00")
+    out_path = d.get("out_path", b"")
+    if isinstance(out_path, str):
+        out_path = bytes.fromhex(out_path) if out_path else b""
+    elif isinstance(out_path, (list, bytearray)):
+        out_path = bytes(out_path)
+    else:
+        out_path = bytes(out_path) if out_path else b""
+    return Contact(
+        public_key=pub,
+        name=(d.get("name") or ""),
+        adv_type=d.get("adv_type", 0),
+        flags=d.get("flags", 0),
+        out_path_len=d.get("out_path_len", -1),
+        out_path=out_path,
+        last_advert_timestamp=d.get("last_advert_timestamp", d.get("last_advert", 0)),
+        lastmod=d.get("lastmod", 0),
+        gps_lat=float(d.get("gps_lat", 0)),
+        gps_lon=float(d.get("gps_lon", 0)),
+    )
 
 
 class CompanionFrameServer:
@@ -322,59 +343,23 @@ class CompanionFrameServer:
                 if isinstance(contact, dict):
                     pubkey = contact.get("public_key", b"")
                     if isinstance(pubkey, str):
-                        pubkey = bytes.fromhex(pubkey)
+                        pubkey = bytes.fromhex(pubkey) if pubkey else b""
+                    elif not isinstance(pubkey, bytes):
+                        pubkey = b""
+                    if len(pubkey) < 32:
+                        return
+                    contact = _contact_from_dict(contact)
                 else:
                     pubkey = getattr(
                         contact,
                         "public_key",
                         getattr(contact, "pub_key", b""),
                     )
-                if isinstance(pubkey, str):
-                    pubkey = bytes.fromhex(pubkey)
-                if not isinstance(pubkey, bytes) or len(pubkey) < 32:
-                    return
-                pubkey_b = pubkey[:32].ljust(32, b"\x00")
-                include_full = not isinstance(contact, dict) and getattr(contact, "name", None)
-                data = {
-                    "pubkey_b": pubkey_b,
-                    "include_full": bool(include_full),
-                    "adv_type": 0,
-                    "flags": 0,
-                    "opl_byte": 0xFF,
-                    "out_path": b"\x00" * MAX_PATH_SIZE,
-                    "name_b": b"\x00" * 32,
-                    "last_advert": 0,
-                    "gps_lat_int": 0,
-                    "gps_lon_int": 0,
-                    "lastmod": 0,
-                }
-                if include_full:
-                    data["adv_type"] = getattr(contact, "adv_type", 0)
-                    data["flags"] = getattr(contact, "flags", 0)
-                    opl = getattr(contact, "out_path_len", -1)
-                    data["opl_byte"] = 0xFF if opl < 0 else min(opl, 255)
-                    out_path = getattr(contact, "out_path", b"") or b""
-                    if isinstance(out_path, str):
-                        out_path = bytes.fromhex(out_path) if out_path else b""
-                    elif isinstance(out_path, (list, bytearray)):
-                        out_path = bytes(out_path)
-                    data["out_path"] = bytes(out_path)[:MAX_PATH_SIZE].ljust(MAX_PATH_SIZE, b"\x00")
-                    name = getattr(contact, "name", "") or ""
-                    if isinstance(name, str):
-                        data["name_b"] = name.encode("utf-8", errors="replace")[:32].ljust(
-                            32, b"\x00"
-                        )
-                    elif isinstance(name, bytes):
-                        data["name_b"] = name[:32].ljust(32, b"\x00")
-                    else:
-                        data["name_b"] = b"\x00" * 32
-                    data["last_advert"] = getattr(contact, "last_advert_timestamp", 0)
-                    data["lastmod"] = getattr(contact, "lastmod", 0)
-                    gps_lat = getattr(contact, "gps_lat", 0.0)
-                    gps_lon = getattr(contact, "gps_lon", 0.0)
-                    data["gps_lat_int"] = int(gps_lat * 1e6)
-                    data["gps_lon_int"] = int(gps_lon * 1e6)
-                short, full = await asyncio.to_thread(_build_advert_push_frames, data)
+                    if isinstance(pubkey, str):
+                        pubkey = bytes.fromhex(pubkey)
+                    if not isinstance(pubkey, bytes) or len(pubkey) < 32:
+                        return
+                short, full = await asyncio.to_thread(_build_advert_push_frames, contact)
                 _write_push(short)
                 if full is not None:
                     await asyncio.sleep(0)
