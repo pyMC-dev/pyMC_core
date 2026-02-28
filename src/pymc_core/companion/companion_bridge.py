@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Any, Callable, Optional
 
 from ..node.handlers import create_core_handlers
@@ -35,7 +34,6 @@ from .constants import (
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
 )
-from .models import Contact
 
 logger = logging.getLogger("CompanionBridge")
 
@@ -290,11 +288,7 @@ class CompanionBridge(CompanionBase):
         handler = self._handlers.get(ptype)
         if handler:
             try:
-                result = await handler(packet)
-                if ptype == PAYLOAD_TYPE_ADVERT and result:
-                    contact = await self._update_stores_from_advert(packet, result)
-                    if contact:
-                        await self._fire_callbacks("advert_received", contact)
+                await handler(packet)
             except Exception as e:
                 logger.error(f"Handler error for type {ptype:02X}: {e}")
 
@@ -302,25 +296,6 @@ class CompanionBridge(CompanionBase):
         # via PathHandler.__call__ (path.py), which runs as the handler above.
         # No duplicate call here — it would cause double decryption and could
         # deliver the result to response waiters twice.
-
-    async def _update_stores_from_advert(self, packet: Packet, advert_data: dict):
-        """Update ContactStore and PathCache from advert result.
-
-        Builds Contact and inbound path from packet, then delegates to
-        _apply_advert_to_stores. Returns the Contact if added or updated, None otherwise.
-        """
-        try:
-            contact = Contact.from_dict(advert_data, now=int(time.time()))
-            if len(contact.public_key) < 7 or not contact.name:
-                return None
-            path_len = getattr(packet, "path_len", 0) or 0
-            path = getattr(packet, "path", bytearray()) or bytearray()
-            effective_len = path_len if path_len > 0 else len(path)
-            inbound_path = bytes(path[:effective_len]) if effective_len > 0 else b""
-            return await self._apply_advert_to_stores(contact, inbound_path)
-        except Exception as e:
-            logger.error("Error updating stores from advert: %s", e)
-            return None
 
     # -------------------------------------------------------------------------
     # Abstract method implementations

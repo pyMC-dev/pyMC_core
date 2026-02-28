@@ -946,7 +946,7 @@ class CompanionFrameServer:
             else bytes.fromhex(contact.public_key)
         )
         result = await self.bridge.send_text_message(
-            pubkey, text, txt_type=txt_type, attempt=attempt + 1
+            pubkey, text, txt_type=txt_type, attempt=attempt + 1, wait_for_ack=False
         )
         if result.success:
             ack = result.expected_ack or 0

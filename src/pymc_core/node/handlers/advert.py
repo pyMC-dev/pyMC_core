@@ -137,6 +137,10 @@ class AdvertHandler(BaseHandler):
             # Publish so companion/app receives node-discovered and advert_received callbacks
             if self.event_service:
                 try:
+                    path_len = getattr(packet, "path_len", 0) or 0
+                    path = getattr(packet, "path", bytearray()) or bytearray()
+                    effective_len = path_len if path_len > 0 else len(path)
+                    inbound_path = bytes(path[:effective_len]) if effective_len > 0 else b""
                     event_data = {
                         "public_key": pubkey_hex,
                         "name": name,
@@ -147,6 +151,7 @@ class AdvertHandler(BaseHandler):
                         "timestamp": int(time.time()),
                         "snr": advert_data["snr"],
                         "rssi": advert_data["rssi"],
+                        "inbound_path": inbound_path,
                     }
                     self.event_service.publish_sync(MeshEvents.NODE_DISCOVERED, event_data)
                 except Exception as e:

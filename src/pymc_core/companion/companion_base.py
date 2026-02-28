@@ -1046,8 +1046,14 @@ class CompanionBase(ABC):
         text: str,
         txt_type: int = TXT_TYPE_PLAIN,
         attempt: int = 1,
+        wait_for_ack: bool = True,
     ) -> SentResult:
-        """Send a direct text message to a contact."""
+        """Send a direct text message to a contact.
+
+        When wait_for_ack is True (default), blocks until ACK or timeout.
+        When wait_for_ack is False, returns as soon as the packet is handed off;
+        ACK (if any) is still tracked and will trigger send_confirmed later.
+        """
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             logger.warning(f"Contact not found for key {pub_key.hex()[:12]}...")
@@ -1067,7 +1073,19 @@ class CompanionBase(ABC):
             )
             self._apply_flood_scope(pkt)
             self._track_pending_ack(ack_crc)
-            success = await self._send_packet(pkt, wait_for_ack=True)
+            if wait_for_ack:
+                success = await self._send_packet(pkt, wait_for_ack=True)
+                if success:
+                    self.stats.record_tx(is_flood=is_flood)
+                else:
+                    self.stats.record_tx_error()
+                return SentResult(
+                    success=success,
+                    is_flood=is_flood,
+                    expected_ack=ack_crc,
+                    timeout_ms=None,
+                )
+            success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self.stats.record_tx(is_flood=is_flood)
             else:
@@ -1076,7 +1094,7 @@ class CompanionBase(ABC):
                 success=success,
                 is_flood=is_flood,
                 expected_ack=ack_crc,
-                timeout_ms=None,
+                timeout_ms=DEFAULT_RESPONSE_TIMEOUT_MS,
             )
         except Exception as e:
             logger.error(f"Error sending text message: {e}")
@@ -1496,10 +1514,13 @@ class CompanionBase(ABC):
             elif event_type == MeshEvents.CONTACT_UPDATED:
                 pass
             elif event_type == MeshEvents.NODE_DISCOVERED:
+                # Advert pipeline (single path): all adverts applied here; one event
+                # -> one store update and at most one advert_received (Bridge and Radio).
                 now = int(time.time())
                 contact = Contact.from_dict(data, now=now)
                 if len(contact.public_key) >= 7 and contact.name:
-                    applied = await self._apply_advert_to_stores(contact, None)
+                    inbound_path = data.get("inbound_path")
+                    applied = await self._apply_advert_to_stores(contact, inbound_path)
                     if applied is not None:
                         await self._fire_callbacks("advert_received", applied)
                 await self._fire_callbacks("node_discovered", data)

@@ -253,6 +253,7 @@ class TestCompanionBridgeBinaryReq:
 @pytest.mark.asyncio
 class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
     async def test_node_discovered_adds_contact_and_fires_advert_received(self):
+        """Single path: NODE_DISCOVERED event drives store + advert_received (Bridge and Radio)."""
         injector = MockPacketInjector()
         bridge = CompanionBridge(LocalIdentity(), injector)
         peer = LocalIdentity()
@@ -279,6 +280,30 @@ class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
         assert len(advert_received_calls) == 1
         assert advert_received_calls[0].name == "DiscoveredNode"
         assert advert_received_calls[0].public_key == peer.get_public_key()
+
+    async def test_one_node_discovered_event_produces_exactly_one_advert_received(self):
+        """Single-path guarantee: one NODE_DISCOVERED event yields exactly one
+        advert_received callback (no duplicate path, no duplicate push frames).
+        """
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        peer = LocalIdentity()
+        event_data = {
+            "public_key": peer.get_public_key().hex(),
+            "name": "SinglePathNode",
+            "contact_type": ADV_TYPE_CHAT,
+            "lat": 0.0,
+            "lon": 0.0,
+            "advert_timestamp": 1000,
+            "timestamp": 1000,
+            "snr": 0.0,
+            "rssi": 0,
+        }
+        advert_received_calls = []
+        bridge.on_advert_received(advert_received_calls.append)
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
+        assert len(advert_received_calls) == 1
+        assert advert_received_calls[0].name == "SinglePathNode"
 
     async def test_node_discovered_fires_node_discovered_even_when_filtered(self):
         injector = MockPacketInjector()
@@ -314,30 +339,38 @@ class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
         assert len(node_discovered_calls) == 1
         assert node_discovered_calls[0]["name"] == "RepeaterNode"
 
-    async def test_update_stores_from_advert_adds_contact_and_returns_it(self):
+    async def test_node_discovered_event_path_adds_contact_and_fires_advert_received(self):
+        """Event path with optional inbound_path: store updated, advert_received fired once."""
         injector = MockPacketInjector()
         bridge = CompanionBridge(LocalIdentity(), injector)
         peer = LocalIdentity()
         pub_key_hex = peer.get_public_key().hex()
-        packet = Packet()
-        packet.path_len = 0
-        packet.path = bytearray()
-        advert_data = {
+        event_data = {
             "public_key": pub_key_hex,
             "name": "AdvertNode",
-            "contact_type_id": ADV_TYPE_CHAT,
-            "latitude": 0.0,
-            "longitude": 0.0,
+            "contact_type": ADV_TYPE_CHAT,
+            "lat": 0.0,
+            "lon": 0.0,
             "advert_timestamp": 1000,
+            "timestamp": 1000,
+            "snr": 0.0,
+            "rssi": 0,
+            "inbound_path": b"\x01\x02\x03",
         }
-        contact = await bridge._update_stores_from_advert(packet, advert_data)
-        assert contact is not None
-        assert contact.name == "AdvertNode"
+        advert_received_calls = []
+
+        def on_advert(c):
+            advert_received_calls.append(c)
+
+        bridge.on_advert_received(on_advert)
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
         assert bridge.contacts.get_count() == 1
-        contact2 = await bridge._update_stores_from_advert(packet, advert_data)
-        assert contact2 is not None
-        assert contact2.name == "AdvertNode"
+        assert len(advert_received_calls) == 1
+        assert advert_received_calls[0].name == "AdvertNode"
+        # Second event (same contact): update, still one contact, advert_received again
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
         assert bridge.contacts.get_count() == 1
+        assert len(advert_received_calls) == 2
 
 
 # ---------------------------------------------------------------------------
