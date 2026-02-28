@@ -1554,6 +1554,10 @@ class CompanionBase(ABC):
         sender_key = bytes.fromhex(sender_key_hex) if sender_key_hex else b""
         # Handler publishes "message_text"; accept "text" for compatibility
         message_text = (data.get("message_text") or data.get("text") or "").rstrip("\x00")
+        # Extract SNR/RSSI from network info if available (same as channel path)
+        network_info = data.get("network_info", {})
+        snr = network_info.get("snr")
+        rssi = network_info.get("rssi")
         msg = QueuedMessage(
             sender_key=sender_key,
             txt_type=data.get("txt_type", data.get("flags", 0)),
@@ -1561,6 +1565,8 @@ class CompanionBase(ABC):
             text=message_text,
             is_channel=False,
             path_len=0,
+            snr=snr if snr is not None else 0.0,
+            rssi=rssi if rssi is not None else 0,
         )
         self.message_queue.push(msg)
         await self._fire_callbacks(
@@ -1570,6 +1576,8 @@ class CompanionBase(ABC):
             msg.timestamp,
             msg.txt_type,
             pkt_hash,
+            snr if snr is not None else 0.0,
+            rssi if rssi is not None else 0,
         )
 
     async def _handle_new_channel_message(self, data: dict) -> None:

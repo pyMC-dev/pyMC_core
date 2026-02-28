@@ -291,7 +291,9 @@ class CompanionFrameServer:
                 except Exception as e:
                     logger.warning("Push write error: %s", e)
 
-        async def on_message_received(sender_key, text, timestamp, txt_type, packet_hash=None):
+        async def on_message_received(
+            sender_key, text, timestamp, txt_type, packet_hash=None, snr=None, rssi=None
+        ):
             msg_dict = {
                 "sender_key": sender_key,
                 "text": text,
@@ -301,6 +303,8 @@ class CompanionFrameServer:
                 "channel_idx": 0,
                 "path_len": 0,
                 "packet_hash": packet_hash,
+                "snr": snr,
+                "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
             _write_push(bytes([PUSH_CODE_MSG_WAITING]))
@@ -377,6 +381,8 @@ class CompanionFrameServer:
                 "channel_idx": channel_idx,
                 "path_len": path_len,
                 "packet_hash": packet_hash,
+                "snr": snr,
+                "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
             _write_push(bytes([PUSH_CODE_MSG_WAITING]))
