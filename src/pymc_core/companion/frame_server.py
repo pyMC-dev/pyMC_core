@@ -72,6 +72,7 @@ from .constants import (
     FRAME_OUTBOUND_PREFIX,
     MAX_FRAME_SIZE,
     MAX_PATH_SIZE,
+    MAX_PAYLOAD_SIZE,
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_BINARY_RESPONSE,
@@ -285,6 +286,13 @@ class CompanionFrameServer:
         def _write_push(data: bytes) -> None:
             if self._client_writer and not self._client_writer.is_closing():
                 try:
+                    if len(data) > MAX_PAYLOAD_SIZE:
+                        logger.warning(
+                            "Push frame payload truncated from %s to %s",
+                            len(data),
+                            MAX_PAYLOAD_SIZE,
+                        )
+                        data = data[:MAX_PAYLOAD_SIZE]
                     frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
                     self._client_writer.write(frame)
                     asyncio.create_task(self._drain_writer())
@@ -481,7 +489,7 @@ class CompanionFrameServer:
             snr_byte += 256
         if rssi_byte < 0:
             rssi_byte += 256
-        payload_len = min(len(raw), MAX_FRAME_SIZE - 3)
+        payload_len = min(len(raw), MAX_PAYLOAD_SIZE - 3)  # 3 = code + snr + rssi
         data = bytes([PUSH_CODE_LOG_RX_DATA, snr_byte & 0xFF, rssi_byte & 0xFF]) + raw[:payload_len]
         try:
             frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
@@ -515,7 +523,7 @@ class CompanionFrameServer:
         if rssi_byte < 0:
             rssi_byte += 256
         path_len_byte = max(0, min(255, int(path_len) if path_len is not None else 0))
-        payload_max = MAX_FRAME_SIZE - 4
+        payload_max = MAX_PAYLOAD_SIZE - 4  # 4 = code + snr + rssi + path_len_byte
         payload_slice = bytes(payload[:payload_max]) if payload else b""
         data = (
             bytes(
@@ -551,8 +559,18 @@ class CompanionFrameServer:
                 logger.warning("Drain failed (connection lost): %s", e)
 
     def _write_frame(self, data: bytes) -> None:
-        """Send a frame to the connected client (outbound format)."""
+        """Send a frame to the connected client (outbound format).
+        Payload is truncated to MAX_PAYLOAD_SIZE to match firmware MAX_FRAME_SIZE (172).
+        """
         if self._client_writer and not self._client_writer.is_closing():
+            if len(data) > MAX_PAYLOAD_SIZE:
+                logger.warning(
+                    "Outbound frame payload truncated from %s to %s (MAX_FRAME_SIZE=%s)",
+                    len(data),
+                    MAX_PAYLOAD_SIZE,
+                    MAX_FRAME_SIZE,
+                )
+                data = data[:MAX_PAYLOAD_SIZE]
             frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
             self._client_writer.write(frame)
 

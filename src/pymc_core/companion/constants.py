@@ -220,7 +220,10 @@ ERR_CODE_ILLEGAL_ARG = 6
 # ---------------------------------------------------------------------------
 FRAME_OUTBOUND_PREFIX = 0x3E  # '>'
 FRAME_INBOUND_PREFIX = 0x3C  # '<'
-MAX_FRAME_SIZE = 512
+# Match firmware: writeFrame() refuses to send if len > MAX_FRAME_SIZE; BLE MTU
+# is set to this (e.g. BLEDevice::setMTU(MAX_FRAME_SIZE)). Frame = prefix(1) + len(2) + payload.
+MAX_FRAME_SIZE = 172
+MAX_PAYLOAD_SIZE = MAX_FRAME_SIZE - 3  # max bytes after prefix + 2-byte length
 PUB_KEY_SIZE = 32
 MAX_PATH_SIZE = 64
 

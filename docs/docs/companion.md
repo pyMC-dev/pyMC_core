@@ -442,6 +442,37 @@ The bridge registers internal handlers for these payload types:
 
 Note that `set_radio_params()` and `set_tx_power()` update in-memory prefs only — there is no physical radio to configure. This is correct: the repeater host owns the radio hardware.
 
+### Avoiding doubled messages
+
+When you have **multiple bridges** on the same repeater, the other bridge can receive the same logical message twice: once from local fan-out when one bridge injects a packet, and again when the repeater's radio receives that packet over the air. Deduplication uses a packet hash; if the data used for local delivery differs from the bytes sent over the air, the hashes differ and both copies appear.
+
+**Use one canonical byte representation** for both TX and local delivery:
+
+1. When your `packet_injector` is called with `pkt`, apply any in-place changes (e.g. flood scope) **before** serializing.
+2. Serialize once: `raw = pkt.write_to()`.
+3. Send `raw` on the radio.
+4. For local delivery to the other bridge, build a new packet from those **same** bytes and pass it:
+   `pkt2 = Packet(); pkt2.read_from(raw); await other_bridge.process_received_packet(pkt2)`.
+
+Then both local and OTA deliveries share the same packet hash and companion-side dedup collapses the duplicate.
+
+**Optional:** Feed the same `raw` bytes into the repeater's dispatcher RX path (the same entry the radio uses) instead of calling `other_bridge.process_received_packet(pkt)` directly. The dispatcher will track the packet hash; when the same bytes arrive over the air they are dropped as duplicates, and you deliver to bridges only from the dispatcher (single path, no double delivery).
+
+Example injector with serialize-once local delivery to another bridge:
+
+```python
+from pymc_core.protocol import Packet
+
+async def packet_injector(pkt, wait_for_ack=False):
+    raw = pkt.write_to()  # after any in-place changes (e.g. flood scope)
+    ok = await repeater.send_raw(raw)  # or dispatcher.send_packet with pre-serialized bytes
+    if ok and other_bridge:
+        pkt2 = Packet()
+        pkt2.read_from(raw)
+        await other_bridge.process_received_packet(pkt2)
+    return ok
+```
+
 ---
 
 ## CompanionFrameServer
@@ -457,7 +488,7 @@ All frames use a simple length-prefixed format:
 | App → Radio | `<` (0x3C) | 2-byte LE | Command byte + payload |
 | Radio → App | `>` (0x3E) | 2-byte LE | Response/push byte + payload |
 
-Maximum frame size: 512 bytes.
+Maximum frame size: 172 bytes (matches firmware; BLE MTU).
 
 ### Quick Start
 
@@ -952,7 +983,8 @@ PROTOCOL_CODE_ANON_REQ    = 0x07
 # Frame format
 FRAME_OUTBOUND_PREFIX = 0x3E  # '>' (radio → app)
 FRAME_INBOUND_PREFIX  = 0x3C  # '<' (app → radio)
-MAX_FRAME_SIZE        = 512
+MAX_FRAME_SIZE        = 172
+MAX_PAYLOAD_SIZE      = 169   # MAX_FRAME_SIZE - 3 (prefix + 2-byte length)
 
 # Error codes (returned by frame server)
 ERR_CODE_UNSUPPORTED_CMD = 1
