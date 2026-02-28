@@ -42,8 +42,6 @@ logger = logging.getLogger("CompanionBridge")
 # Bridge ACK handler: fires send_confirmed when ACK CRC matches a pending send
 # ---------------------------------------------------------------------------
 
-MAX_PENDING_ACK_CRCS = 64
-
 
 class _BridgeAckHandler:
     """Handles ACK packets (discrete and PATH-carried).
@@ -64,10 +62,7 @@ class _BridgeAckHandler:
 
     async def _apply_ack(self, crc: int) -> None:
         """If CRC is pending, clear it and fire send_confirmed."""
-        if crc not in self._bridge._pending_ack_crcs:
-            return
-        self._bridge._pending_ack_crcs.discard(crc)
-        await self._bridge._fire_callbacks("send_confirmed", crc)
+        await self._bridge._try_confirm_send(crc)
 
     async def process_path_ack_variants(self, packet: Packet) -> Optional[int]:
         """Decrypt PATH payload; update contact out_path (firmware pattern), return ACK CRC.
@@ -211,7 +206,6 @@ class CompanionBridge(CompanionBase):
         def _log(msg: str) -> None:
             logger.debug(f"[CompanionBridge] {msg}")
 
-        self._pending_ack_crcs: set[int] = set()
         ack_handler = _BridgeAckHandler(self)
 
         # Use shared factory for the core protocol handlers
@@ -269,10 +263,6 @@ class CompanionBridge(CompanionBase):
 
     def _get_text_handler(self) -> Any:
         return self._text_handler_ref
-
-    def _track_pending_ack(self, ack_crc: int) -> None:
-        if len(self._pending_ack_crcs) < MAX_PENDING_ACK_CRCS:
-            self._pending_ack_crcs.add(ack_crc)
 
     # -------------------------------------------------------------------------
     # RX Entry Point

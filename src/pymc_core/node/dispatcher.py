@@ -66,6 +66,9 @@ class Dispatcher:
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
 
+        # Optional listener for ACK received (e.g. companion send_confirmed)
+        self._ack_received_listener: Optional[Callable[[int], Awaitable[None] | None]] = None
+
         # Raw packet callbacks: single callback (legacy) and list of subscribers (after parse)
         self.raw_packet_callback: Optional[Callable[[Packet, bytes], Awaitable[None] | None]] = None
         self._raw_packet_subscribers: List[Callable[..., Any]] = []
@@ -262,6 +265,13 @@ class Dispatcher:
         self, callback: Callable[[Packet], Awaitable[None] | None]
     ) -> None:
         self.packet_sent_callback = callback
+
+    def set_ack_received_listener(
+        self,
+        callback: Optional[Callable[[int], Awaitable[None] | None]],
+    ) -> None:
+        """Set optional listener for ACK CRCs (e.g. companion send_confirmed)."""
+        self._ack_received_listener = callback
 
     def set_raw_packet_callback(
         self, callback: Callable[[Packet, bytes], Awaitable[None] | None]
@@ -578,7 +588,7 @@ class Dispatcher:
     # All ACK processing logic is delegated to the AckHandler.
     # ------------------------------------------------------------------
 
-    def _register_ack_received(self, crc: int) -> None:
+    async def _register_ack_received(self, crc: int) -> None:
         """Record that an ACK with the given CRC was received."""
         ts = asyncio.get_running_loop().time()
         self._recent_acks[crc] = ts
@@ -587,6 +597,9 @@ class Dispatcher:
         if evt := self._waiting_acks.pop(crc, None):
             self._log(f"ACK matched! CRC {crc:08X}")
             evt.set()
+
+        if self._ack_received_listener:
+            await self._invoke_ack_listener(crc)
 
     async def run_forever(self) -> None:
         """Run the dispatcher maintenance loop indefinitely (call this in an asyncio task)."""
@@ -629,6 +642,16 @@ class Dispatcher:
             await cb(pkt)
         else:
             cb(pkt)
+
+    async def _invoke_ack_listener(self, crc: int) -> None:
+        """Invoke ack-received listener (sync or async)."""
+        cb = self._ack_received_listener
+        if cb is None:
+            return
+        if asyncio.iscoroutinefunction(cb):
+            await cb(crc)
+        else:
+            cb(crc)
 
     async def _invoke_enhanced_raw_callback(
         self, callback, pkt: Packet, data: bytes, analysis: dict

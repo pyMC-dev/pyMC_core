@@ -201,6 +201,7 @@ class CompanionRadio(CompanionBase):
     def import_private_key(self, key: bytes) -> bool:
         try:
             self._identity = LocalIdentity(seed=key)
+            self._pending_ack_crcs.clear()
             self.node = MeshNode(
                 radio=self._radio,
                 local_identity=self._identity,
@@ -239,6 +240,7 @@ class CompanionRadio(CompanionBase):
         dispatcher = self.node.dispatcher
         dispatcher.set_packet_received_callback(self._on_packet_received)
         dispatcher.set_packet_sent_callback(self._on_packet_sent)
+        dispatcher.set_ack_received_listener(self._on_ack_received)
         if (
             hasattr(dispatcher, "protocol_response_handler")
             and dispatcher.protocol_response_handler
@@ -251,6 +253,10 @@ class CompanionRadio(CompanionBase):
         route_type = pkt.get_route_type()
         is_flood = route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD)
         self.stats.record_rx(is_flood=is_flood)
+
+    async def _on_ack_received(self, crc: int) -> None:
+        """Called by dispatcher when an ACK CRC is received; fire send_confirmed if pending."""
+        await self._try_confirm_send(crc)
 
     async def _on_packet_sent(self, pkt: Any) -> None:
         pass

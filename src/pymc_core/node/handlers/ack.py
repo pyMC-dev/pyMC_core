@@ -1,4 +1,5 @@
-from typing import Callable, Optional
+import asyncio
+from typing import Awaitable, Callable, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_ACK
@@ -20,9 +21,11 @@ class AckHandler(BaseHandler):
     def __init__(self, log_fn, dispatcher=None):
         self.log = log_fn
         self.dispatcher = dispatcher
-        self._ack_received_callback: Optional[Callable[[int], None]] = None
+        self._ack_received_callback: Optional[Callable[[int], Awaitable[None] | None]] = None
 
-    def set_ack_received_callback(self, callback: Callable[[int], None]):
+    def set_ack_received_callback(
+        self, callback: Optional[Callable[[int], Awaitable[None] | None]]
+    ):
         """Set callback to notify dispatcher when ACK is received."""
         self._ack_received_callback = callback
 
@@ -162,5 +165,8 @@ class AckHandler(BaseHandler):
     async def _notify_ack_received(self, crc: int):
         """Notify the dispatcher that an ACK was received."""
         if self._ack_received_callback:
-            # Call the callback directly since _register_ack_received is synchronous
-            self._ack_received_callback(crc)
+            cb = self._ack_received_callback
+            if asyncio.iscoroutinefunction(cb):
+                await cb(crc)
+            else:
+                cb(crc)

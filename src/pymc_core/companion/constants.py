@@ -88,6 +88,7 @@ DEFAULT_OFFLINE_QUEUE_SIZE = 512
 DEFAULT_MAX_CHANNELS = 40
 CONTACT_NAME_SIZE = 32
 MAX_SIGN_DATA_SIZE = 8192  # 8KB signing buffer (matches firmware)
+MAX_PENDING_ACK_CRCS = 64
 
 # ===========================================================================
 # Frame Protocol Constants (MeshCore Companion Radio Protocol)

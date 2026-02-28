@@ -243,7 +243,7 @@ class TestDispatcherACKSystem:
         dispatcher._waiting_acks[crc] = ack_event
 
         # Simulate receiving ACK
-        dispatcher._register_ack_received(crc)
+        await dispatcher._register_ack_received(crc)
 
         # Event should be set
         assert ack_event.is_set()

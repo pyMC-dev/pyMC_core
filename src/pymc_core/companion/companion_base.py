@@ -50,6 +50,7 @@ from .constants import (
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
     DEFAULT_RESPONSE_TIMEOUT_MS,
+    MAX_PENDING_ACK_CRCS,
     MAX_SIGN_DATA_SIZE,
     PROTOCOL_CODE_ANON_REQ,
     PROTOCOL_CODE_BINARY_REQ,
@@ -189,6 +190,8 @@ class CompanionBase(ABC):
         self._pending_binary_requests: dict[str, dict] = {}
         # Pending path discovery tags for matching responses
         self._pending_discovery_tags: set[int] = set()
+        # Pending ACK CRCs for send_confirmed (Bridge and Radio)
+        self._pending_ack_crcs: set[int] = set()
 
         # GRP_TXT dedup by packet hash: match Mesh.cpp (!_tables->hasSeen(pkt));
         # companion queues one frame per logical message like the firmware.
@@ -1476,7 +1479,17 @@ class CompanionBase(ABC):
             text_handler.set_command_response_callback(None)
 
     def _track_pending_ack(self, ack_crc: int) -> None:
-        """Hook for subclasses to track pending ACK CRCs. Default is a no-op."""
+        """Track pending ACK CRC for send_confirmed (capped)."""
+        if len(self._pending_ack_crcs) < MAX_PENDING_ACK_CRCS:
+            self._pending_ack_crcs.add(ack_crc)
+
+    async def _try_confirm_send(self, crc: int) -> bool:
+        """If CRC is pending, discard it and fire send_confirmed. Returns True if fired."""
+        if crc not in self._pending_ack_crcs:
+            return False
+        self._pending_ack_crcs.discard(crc)
+        await self._fire_callbacks("send_confirmed", crc)
+        return True
 
     def sync_next_message(self) -> Optional[QueuedMessage]:
         """Pop and return the next queued message, or None."""
