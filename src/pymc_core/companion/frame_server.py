@@ -152,35 +152,6 @@ def _build_advert_push_frames(contact: Contact) -> tuple[bytes, Optional[bytes]]
     return (short, full)
 
 
-def _contact_from_dict(d: dict) -> Contact:
-    """Build a Contact from a dict (e.g. legacy callback payload)."""
-    pub = d.get("public_key", b"")
-    if isinstance(pub, str):
-        pub = bytes.fromhex(pub) if pub else b""
-    elif not isinstance(pub, bytes):
-        pub = b""
-    pub = pub[:32].ljust(32, b"\x00")
-    out_path = d.get("out_path", b"")
-    if isinstance(out_path, str):
-        out_path = bytes.fromhex(out_path) if out_path else b""
-    elif isinstance(out_path, (list, bytearray)):
-        out_path = bytes(out_path)
-    else:
-        out_path = bytes(out_path) if out_path else b""
-    return Contact(
-        public_key=pub,
-        name=(d.get("name") or ""),
-        adv_type=d.get("adv_type", 0),
-        flags=d.get("flags", 0),
-        out_path_len=d.get("out_path_len", -1),
-        out_path=out_path,
-        last_advert_timestamp=d.get("last_advert_timestamp", d.get("last_advert", 0)),
-        lastmod=d.get("lastmod", 0),
-        gps_lat=float(d.get("gps_lat", 0)),
-        gps_lon=float(d.get("gps_lon", 0)),
-    )
-
-
 class CompanionFrameServer:
     """TCP server for the MeshCore companion frame protocol.
 
@@ -348,7 +319,7 @@ class CompanionFrameServer:
                         pubkey = b""
                     if len(pubkey) < 32:
                         return
-                    contact = _contact_from_dict(contact)
+                    contact = Contact.from_dict(contact)
                 else:
                     pubkey = getattr(
                         contact,

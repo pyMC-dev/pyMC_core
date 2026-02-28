@@ -143,6 +143,8 @@ class AdvertHandler(BaseHandler):
                         "contact_type": contact_type_id,
                         "lat": lat,
                         "lon": lon,
+                        "advert_timestamp": advert_timestamp,
+                        "timestamp": int(time.time()),
                         "snr": advert_data["snr"],
                         "rssi": advert_data["rssi"],
                     }

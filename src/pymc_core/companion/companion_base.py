@@ -595,6 +595,54 @@ class CompanionBase(ABC):
         """Check if overwrite-oldest is enabled. Mirrors C++ shouldOverwriteWhenFull."""
         return bool(self.prefs.autoadd_config & AUTOADD_OVERWRITE_OLDEST)
 
+    async def _apply_advert_to_stores(
+        self, contact: Contact, inbound_path: Optional[bytes] = None
+    ) -> Optional[Contact]:
+        """Apply advert to ContactStore and PathCache. Shared by Bridge and NODE_DISCOVERED.
+
+        Mirrors C++ BaseChatMesh::onAdvertRecv (existing update, auto-add filter,
+        overwrite when full). Returns the Contact if added or updated, None otherwise.
+        Path cache is updated for all valid contacts (pub_key >= 7, name non-empty).
+        """
+        try:
+            if len(contact.public_key) < 7 or not contact.name:
+                return None
+            inbound_path = inbound_path or b""
+            self.path_cache.update(
+                AdvertPath(
+                    public_key_prefix=contact.public_key[:7],
+                    name=contact.name,
+                    path_len=len(inbound_path),
+                    path=inbound_path,
+                    recv_timestamp=int(time.time()),
+                )
+            )
+            existing = self.contacts.get_by_key(contact.public_key)
+            if existing is not None:
+                contact.out_path_len = existing.out_path_len
+                contact.out_path = existing.out_path
+                contact.flags = existing.flags
+                contact.sync_since = existing.sync_since
+                self.contacts.update(contact)
+                return contact
+            if not self.should_auto_add_contact_type(contact.adv_type):
+                logger.debug("Auto-add filtered: type %d not allowed", contact.adv_type)
+                return None
+            if self.should_overwrite_when_full() and self.contacts.is_full():
+                ok, overwritten = self.contacts.add_or_overwrite(contact)
+                if ok and overwritten:
+                    await self._fire_callbacks("contact_deleted", overwritten)
+                elif not ok:
+                    await self._fire_callbacks("contacts_full")
+                return contact if ok else None
+            added = self.contacts.add(contact)
+            if not added and self.contacts.is_full():
+                await self._fire_callbacks("contacts_full")
+            return contact if added else None
+        except Exception as e:
+            logger.error("Error applying advert to stores: %s", e)
+            return None
+
     # -------------------------------------------------------------------------
     # Push Callbacks
     # -------------------------------------------------------------------------
@@ -1448,6 +1496,12 @@ class CompanionBase(ABC):
             elif event_type == MeshEvents.CONTACT_UPDATED:
                 pass
             elif event_type == MeshEvents.NODE_DISCOVERED:
+                now = int(time.time())
+                contact = Contact.from_dict(data, now=now)
+                if len(contact.public_key) >= 7 and contact.name:
+                    applied = await self._apply_advert_to_stores(contact, None)
+                    if applied is not None:
+                        await self._fire_callbacks("advert_received", applied)
                 await self._fire_callbacks("node_discovered", data)
             elif event_type == MeshEvents.TELEMETRY_UPDATED:
                 await self._fire_callbacks("telemetry_response", data)

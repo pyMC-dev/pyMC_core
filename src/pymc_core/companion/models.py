@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -21,6 +22,77 @@ class Contact:
     gps_lat: float = 0.0  # degrees
     gps_lon: float = 0.0  # degrees
     sync_since: int = 0  # for filtered iteration
+
+    @classmethod
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        *,
+        now: Optional[int] = None,
+    ) -> "Contact":
+        """Build a Contact from a dict (event_data, advert_data, or serialized Contact).
+
+        event_data uses: public_key, name, contact_type (id), lat, lon,
+        advert_timestamp, timestamp.
+        advert_data uses: public_key, name, contact_type_id, latitude, longitude,
+        flags, advert_timestamp, timestamp.
+        Serialized Contact dicts (ContactStore.to_dicts) use the same keys as the
+        dataclass: gps_lat, gps_lon, last_advert_timestamp, lastmod, out_path,
+        out_path_len, sync_since.
+        """
+        if now is None:
+            now = int(time.time())
+        pub = d.get("public_key", b"")
+        if isinstance(pub, str):
+            pub = bytes.fromhex(pub) if pub else b""
+        elif not isinstance(pub, bytes):
+            pub = b""
+        pub = pub[:32].ljust(32, b"\x00")
+        name = (d.get("name") or "") or ""
+        adv_type_raw = d.get("contact_type_id", d.get("adv_type", d.get("contact_type", 0)))
+        if isinstance(adv_type_raw, int):
+            adv_type = adv_type_raw
+        elif adv_type_raw is None:
+            adv_type = 0
+        else:
+            try:
+                adv_type = int(adv_type_raw)
+            except (TypeError, ValueError):
+                adv_type = 0
+        gps_lat = float(d.get("lat", d.get("latitude", d.get("gps_lat", 0.0))))
+        gps_lon = float(d.get("lon", d.get("longitude", d.get("gps_lon", 0.0))))
+        last_advert_ts = d.get("advert_timestamp", d.get("last_advert_timestamp", 0))
+        last_advert_ts = int(last_advert_ts) if last_advert_ts is not None else 0
+        if last_advert_ts > now:
+            last_advert_ts = now
+        lastmod_val = d.get("timestamp", d.get("lastmod", now))
+        lastmod_val = int(lastmod_val) if lastmod_val is not None else now
+        flags_val = d.get("flags", 0)
+        flags_val = int(flags_val) if flags_val is not None else 0
+        out_path = d.get("out_path", b"")
+        if isinstance(out_path, str):
+            out_path = bytes.fromhex(out_path) if out_path else b""
+        elif isinstance(out_path, (list, bytearray)):
+            out_path = bytes(out_path)
+        else:
+            out_path = bytes(out_path) if out_path else b""
+        out_path_len_val = d.get("out_path_len", -1)
+        out_path_len_val = int(out_path_len_val) if out_path_len_val is not None else -1
+        sync_since_val = d.get("sync_since", 0)
+        sync_since_val = int(sync_since_val) if sync_since_val is not None else 0
+        return cls(
+            public_key=pub,
+            name=name,
+            adv_type=adv_type,
+            flags=flags_val,
+            out_path_len=out_path_len_val,
+            out_path=out_path,
+            last_advert_timestamp=last_advert_ts,
+            lastmod=lastmod_val,
+            gps_lat=gps_lat,
+            gps_lon=gps_lon,
+            sync_since=sync_since_val,
+        )
 
 
 @dataclass

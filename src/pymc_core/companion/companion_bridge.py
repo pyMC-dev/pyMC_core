@@ -35,7 +35,7 @@ from .constants import (
     DEFAULT_MAX_CONTACTS,
     DEFAULT_OFFLINE_QUEUE_SIZE,
 )
-from .models import AdvertPath, Contact
+from .models import Contact
 
 logger = logging.getLogger("CompanionBridge")
 
@@ -306,77 +306,20 @@ class CompanionBridge(CompanionBase):
     async def _update_stores_from_advert(self, packet: Packet, advert_data: dict):
         """Update ContactStore and PathCache from advert result.
 
-        Mirrors C++ BaseChatMesh::onAdvertRecv (BaseChatMesh.cpp:106-170):
-        - Existing contacts are always updated (name, GPS, etc.)
-        - New contacts are subject to auto-add type filtering
-        - When store is full, overwrite-oldest replaces the oldest non-favourite
-
-        Returns the Contact or None.
+        Builds Contact and inbound path from packet, then delegates to
+        _apply_advert_to_stores. Returns the Contact if added or updated, None otherwise.
         """
         try:
-            pub_key = bytes.fromhex(advert_data.get("public_key", ""))
-            if len(pub_key) < 7:
-                return None
-            name = advert_data.get("name", "")
-            if not name:
+            contact = Contact.from_dict(advert_data, now=int(time.time()))
+            if len(contact.public_key) < 7 or not contact.name:
                 return None
             path_len = getattr(packet, "path_len", 0) or 0
             path = getattr(packet, "path", bytearray()) or bytearray()
             effective_len = path_len if path_len > 0 else len(path)
             inbound_path = bytes(path[:effective_len]) if effective_len > 0 else b""
-            now = int(time.time())
-            last_advert_ts = advert_data.get("advert_timestamp", 0)
-            if last_advert_ts > now:
-                last_advert_ts = now
-            adv_type = advert_data.get("contact_type_id", 0)
-            contact = Contact(
-                public_key=pub_key,
-                name=name,
-                adv_type=adv_type,
-                gps_lat=advert_data.get("latitude", 0.0),
-                gps_lon=advert_data.get("longitude", 0.0),
-                lastmod=now,
-                last_advert_timestamp=last_advert_ts,
-                out_path_len=-1,
-                out_path=b"",
-            )
-
-            existing = self.contacts.get_by_key(pub_key)
-            if existing is not None:
-                # Always update existing contacts (C++ BaseChatMesh.cpp:158-167).
-                # Preserve fields that adverts don't carry: the firmware only
-                # updates name, type, gps, last_advert_timestamp, lastmod.
-                contact.out_path_len = existing.out_path_len
-                contact.out_path = existing.out_path
-                contact.flags = existing.flags
-                contact.sync_since = existing.sync_since
-                self.contacts.update(contact)
-            elif not self.should_auto_add_contact_type(adv_type):
-                # Type not allowed — still fire callback so app sees the advert
-                logger.debug("Auto-add filtered: type %d not allowed", adv_type)
-            elif self.should_overwrite_when_full() and self.contacts.is_full():
-                ok, overwritten = self.contacts.add_or_overwrite(contact)
-                if ok and overwritten:
-                    await self._fire_callbacks("contact_deleted", overwritten)
-                elif not ok:
-                    await self._fire_callbacks("contacts_full")
-            else:
-                added = self.contacts.add(contact)
-                if not added and self.contacts.is_full():
-                    await self._fire_callbacks("contacts_full")
-
-            self.path_cache.update(
-                AdvertPath(
-                    public_key_prefix=pub_key[:7],
-                    name=name,
-                    path_len=len(inbound_path),
-                    path=inbound_path,
-                    recv_timestamp=int(time.time()),
-                )
-            )
-            return contact
+            return await self._apply_advert_to_stores(contact, inbound_path)
         except Exception as e:
-            logger.error(f"Error updating stores from advert: {e}")
+            logger.error("Error updating stores from advert: %s", e)
             return None
 
     # -------------------------------------------------------------------------

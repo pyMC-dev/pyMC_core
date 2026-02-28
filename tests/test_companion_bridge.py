@@ -3,6 +3,7 @@
 import pytest
 
 from pymc_core.companion import CompanionBridge
+from pymc_core.companion.constants import ADV_TYPE_CHAT, AUTOADD_CHAT
 from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import LocalIdentity, Packet
@@ -242,6 +243,101 @@ class TestCompanionBridgeBinaryReq:
         assert result.success is True
         assert result.expected_ack is not None
         assert len(injector.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# NODE_DISCOVERED -> advert pipeline (contact store + advert_received)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
+    async def test_node_discovered_adds_contact_and_fires_advert_received(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        peer = LocalIdentity()
+        pub_key_hex = peer.get_public_key().hex()
+        event_data = {
+            "public_key": pub_key_hex,
+            "name": "DiscoveredNode",
+            "contact_type": ADV_TYPE_CHAT,
+            "lat": 52.0,
+            "lon": -1.0,
+            "advert_timestamp": 1000,
+            "timestamp": 1001,
+            "snr": 5.0,
+            "rssi": -80,
+        }
+        advert_received_calls = []
+
+        def on_advert(c):
+            advert_received_calls.append(c)
+
+        bridge.on_advert_received(on_advert)
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
+        assert bridge.contacts.get_count() == 1
+        assert len(advert_received_calls) == 1
+        assert advert_received_calls[0].name == "DiscoveredNode"
+        assert advert_received_calls[0].public_key == peer.get_public_key()
+
+    async def test_node_discovered_fires_node_discovered_even_when_filtered(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        bridge.prefs.manual_add_contacts = 1
+        bridge.prefs.autoadd_config = AUTOADD_CHAT
+        peer = LocalIdentity()
+        event_data = {
+            "public_key": peer.get_public_key().hex(),
+            "name": "RepeaterNode",
+            "contact_type": 2,
+            "lat": 0.0,
+            "lon": 0.0,
+            "advert_timestamp": 1000,
+            "timestamp": 1000,
+            "snr": 0.0,
+            "rssi": 0,
+        }
+        node_discovered_calls = []
+        advert_received_calls = []
+
+        def on_node(data):
+            node_discovered_calls.append(data)
+
+        def on_advert(c):
+            advert_received_calls.append(c)
+
+        bridge.on_node_discovered(on_node)
+        bridge.on_advert_received(on_advert)
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
+        assert bridge.contacts.get_count() == 0
+        assert len(advert_received_calls) == 0
+        assert len(node_discovered_calls) == 1
+        assert node_discovered_calls[0]["name"] == "RepeaterNode"
+
+    async def test_update_stores_from_advert_adds_contact_and_returns_it(self):
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        peer = LocalIdentity()
+        pub_key_hex = peer.get_public_key().hex()
+        packet = Packet()
+        packet.path_len = 0
+        packet.path = bytearray()
+        advert_data = {
+            "public_key": pub_key_hex,
+            "name": "AdvertNode",
+            "contact_type_id": ADV_TYPE_CHAT,
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "advert_timestamp": 1000,
+        }
+        contact = await bridge._update_stores_from_advert(packet, advert_data)
+        assert contact is not None
+        assert contact.name == "AdvertNode"
+        assert bridge.contacts.get_count() == 1
+        contact2 = await bridge._update_stores_from_advert(packet, advert_data)
+        assert contact2 is not None
+        assert contact2.name == "AdvertNode"
+        assert bridge.contacts.get_count() == 1
 
 
 # ---------------------------------------------------------------------------
