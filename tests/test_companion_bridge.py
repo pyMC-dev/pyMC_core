@@ -6,8 +6,14 @@ from pymc_core.companion import CompanionBridge
 from pymc_core.companion.constants import ADV_TYPE_CHAT, AUTOADD_CHAT
 from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
-from pymc_core.protocol import LocalIdentity, Packet
-from pymc_core.protocol.constants import PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD
+from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet
+from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RESPONSE,
+    PAYLOAD_TYPE_TXT_MSG,
+    ROUTE_TYPE_FLOOD,
+)
 
 
 def _make_peer_contact(name: str) -> Contact:
@@ -304,6 +310,52 @@ class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
         await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
         assert len(advert_received_calls) == 1
         assert advert_received_calls[0].name == "SinglePathNode"
+
+    async def test_path_packet_updates_contact_path_and_fires_contact_path_updated_once(self):
+        """PATH packet that decrypts updates contact out_path and fires contact_path_updated."""
+        injector = MockPacketInjector()
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        bridge = CompanionBridge(local_identity, injector)
+        bridge.contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+
+        path_len_byte = 2
+        path_bytes = bytes([0x01, 0x02])
+        extra_type = PAYLOAD_TYPE_RESPONSE
+        extra = bytes([0, 0, 0, 0, 0x00])
+        plaintext = bytes([path_len_byte]) + path_bytes + bytes([extra_type]) + extra
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+        payload = bytes([our_hash, src_hash]) + encrypted
+
+        pkt = Packet()
+        pkt.header = (ROUTE_TYPE_FLOOD << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        path_updated_calls = []
+
+        async def on_path_updated(contact):
+            path_updated_calls.append(contact)
+
+        bridge.on_contact_path_updated(on_path_updated)
+        await bridge.process_received_packet(pkt)
+
+        assert len(path_updated_calls) == 1
+        assert path_updated_calls[0].public_key == peer_pubkey
+        assert path_updated_calls[0].out_path_len == path_len_byte
+        assert path_updated_calls[0].out_path == path_bytes
+        contact = bridge.contacts.get_by_key(peer_pubkey)
+        assert contact is not None
+        assert contact.out_path_len == path_len_byte
+        assert contact.out_path == path_bytes
 
     async def test_node_discovered_fires_node_discovered_even_when_filtered(self):
         injector = MockPacketInjector()

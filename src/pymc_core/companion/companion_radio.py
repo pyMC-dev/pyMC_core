@@ -248,6 +248,9 @@ class CompanionRadio(CompanionBase):
             dispatcher.protocol_response_handler.set_binary_response_callback(
                 self._on_binary_response
             )
+            dispatcher.protocol_response_handler.set_contact_path_updated_callback(
+                self._on_contact_path_updated
+            )
 
     async def _on_packet_received(self, pkt: Any) -> None:
         route_type = pkt.get_route_type()

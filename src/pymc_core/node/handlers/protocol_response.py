@@ -167,6 +167,18 @@ class ProtocolResponseHandler:
         self._login_response_handler: Optional[Any] = None
         # Packet injector for sending reciprocal PATH packets (mirrors C++ Mesh.cpp:168-169)
         self._packet_injector: Optional[Callable] = None
+        # Optional: notify when contact out_path is updated from decrypted PATH
+        # (e.g. companion persist).
+        self._contact_path_updated_callback: Optional[Callable[..., Any]] = None
+
+    def set_contact_path_updated_callback(self, callback: Optional[Callable[..., Any]]) -> None:
+        """Set callback when contact out_path is updated from a decrypted PATH packet.
+
+        Signature: (contact_pubkey: bytes, path_len: int, path_bytes: bytes)
+        -> None | Awaitable[None].
+        Called after _update_contact_path when the contact was found and updated.
+        """
+        self._contact_path_updated_callback = callback
 
     def set_login_response_handler(self, handler: Any) -> None:
         """Set login handler ref for checking active login state."""
@@ -337,16 +349,18 @@ class ProtocolResponseHandler:
         src_hash: int,
         path_len_byte: int,
         decrypted: bytes,
-    ) -> None:
+    ) -> bool:
         """Update contact out_path from decrypted PATH data (firmware onContactPathRecv pattern).
 
         When a PATH packet is successfully decrypted, store the return path
         on the contact so that subsequent requests use sendDirect() instead
         of sendFlood().  This mirrors C++ ``BaseChatMesh::onContactPathRecv``.
+
+        Returns True if the contact was found and updated, False otherwise.
         """
         try:
             if path_len_byte > MAX_PATH_SIZE:
-                return
+                return False
             out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
             contact_obj = self._contact_book.get_by_key(contact_pubkey)
             if contact_obj is not None:
@@ -357,13 +371,16 @@ class ProtocolResponseHandler:
                     f"[ProtocolResponse] Updated out_path for 0x{src_hash:02X}: "
                     f"path_len={path_len_byte}"
                 )
+                return True
             else:
                 self._log(
                     f"[ProtocolResponse] Cannot update out_path for 0x{src_hash:02X}: "
                     f"contact not found by key"
                 )
+                return False
         except Exception as e:
             self._log(f"[ProtocolResponse] Failed to update out_path: {e}")
+            return False
 
     async def _send_reciprocal_path(
         self,
@@ -492,7 +509,16 @@ class ProtocolResponseHandler:
 
                     # Firmware pattern (onContactPathRecv): update contact out_path
                     # so subsequent requests use sendDirect() instead of sendFlood().
-                    self._update_contact_path(contact_pubkey, src_hash, path_len_byte, decrypted)
+                    out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+                    if self._update_contact_path(
+                        contact_pubkey, src_hash, path_len_byte, decrypted
+                    ):
+                        if self._contact_path_updated_callback is not None:
+                            cb_result = self._contact_path_updated_callback(
+                                contact_pubkey, path_len_byte, out_path_bytes
+                            )
+                            if asyncio.iscoroutine(cb_result):
+                                await cb_result
 
                     # Firmware pattern (Mesh.cpp:168-169): send reciprocal PATH back
                     # to the sender so it learns the route to us.  Without this, the

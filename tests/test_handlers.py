@@ -14,7 +14,7 @@ from pymc_core.node.handlers import (
     TextMessageHandler,
     TraceHandler,
 )
-from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
+from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -344,8 +344,66 @@ class TestProtocolResponseHandler:
         result = self.handler._parse_telemetry_response(data)
         assert result is None
 
+    def test_set_contact_path_updated_callback(self):
+        """set_contact_path_updated_callback stores the callback."""
+        cb = MagicMock()
+        self.handler.set_contact_path_updated_callback(cb)
+        assert self.handler._contact_path_updated_callback is cb
+        self.handler.set_contact_path_updated_callback(None)
+        assert self.handler._contact_path_updated_callback is None
 
-# Trace Handler Tests
+    @pytest.mark.asyncio
+    async def test_contact_path_updated_callback_invoked_on_path_update(self):
+        """PATH decrypts and updates contact path; contact_path_updated callback is invoked."""
+        from pymc_core.companion.contact_store import ContactStore
+        from pymc_core.companion.models import Contact
+
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        contacts = ContactStore(5)
+        contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+        handler.set_binary_response_callback(lambda *a, **k: None)
+
+        path_len_byte = 2
+        path_bytes = bytes([0x01, 0x02])
+        extra_type = PAYLOAD_TYPE_RESPONSE
+        extra = bytes([0, 0, 0, 0, 0x00])  # tag(4) + 1 byte (not login response)
+        plaintext = bytes([path_len_byte]) + path_bytes + bytes([extra_type]) + extra
+
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+        payload = bytes([our_hash, src_hash]) + encrypted
+
+        pkt = Packet()
+        pkt.header = (0 << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        callback_calls = []
+
+        async def on_path_updated(pub: bytes, path_len: int, path_bytes_arg: bytes) -> None:
+            callback_calls.append((pub, path_len, path_bytes_arg))
+
+        handler.set_contact_path_updated_callback(on_path_updated)
+
+        await handler(pkt)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0][0] == peer_pubkey
+        assert callback_calls[0][1] == path_len_byte
+        assert callback_calls[0][2] == path_bytes
+
+
 class TestTraceHandler:
     def setup_method(self):
         self.log_fn = MagicMock()

@@ -359,13 +359,16 @@ class CompanionFrameServer:
             except Exception as e:
                 logger.warning("Persist contact after advert failed: %s", e)
 
-        async def on_contact_path_updated(pub_key, path_len, path):
-            if isinstance(pub_key, bytes) and len(pub_key) >= 32:
-                _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + pub_key[:32])
+        async def on_contact_path_updated(contact):
+            if (
+                hasattr(contact, "public_key")
+                and isinstance(contact.public_key, bytes)
+                and len(contact.public_key) >= 32
+            ):
+                _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + contact.public_key[:32])
             try:
-                c = self.bridge.contacts.get_by_key(pub_key) if isinstance(pub_key, bytes) else None
-                if c is not None:
-                    await self._persist_contact(c)
+                if contact is not None:
+                    await self._persist_contact(contact)
             except Exception as e:
                 logger.warning("Persist contact after path update failed: %s", e)
 

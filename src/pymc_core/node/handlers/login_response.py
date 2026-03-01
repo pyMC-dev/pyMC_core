@@ -95,13 +95,12 @@ class LoginResponseHandler(BaseHandler):
         # Find stored password and matching contact(s)
         if lookup_hash not in self._active_login_passwords:
             # This might be a telemetry response, not a login response
-            # Forward to protocol response handler if available
+            # Forward to protocol response handler if available (only for RESPONSE packets;
+            # PATH packets are already handled by PathHandler before we are called).
             if self._protocol_response_handler:
-                # Create a fake PATH packet format that
-                # ProtocolResponseHandler expects
-                # PATH format: dest_hash(1) + src_hash(1) + encrypted_data
-                # RESPONSE format is already: dest_hash(1) + src_hash(1) + encrypted_data
-                # So we can directly forward the packet to the protocol response handler
+                pkt_type = (packet.header >> 2) & 0x0F
+                if pkt_type == PAYLOAD_TYPE_PATH:
+                    return  # PathHandler already invoked protocol_response_handler for this packet
                 try:
                     await self._protocol_response_handler(packet)
                     return

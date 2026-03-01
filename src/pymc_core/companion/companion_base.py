@@ -662,6 +662,19 @@ class CompanionBase(ABC):
     def on_contact_path_updated(self, callback: Callable) -> None:
         self._push_callbacks["contact_path_updated"].append(callback)
 
+    async def _on_contact_path_updated(self, pub: bytes, path_len: int, path_bytes: bytes) -> None:
+        """Called by ProtocolResponseHandler when contact's out_path is updated from a PATH packet.
+        Converts (pub, path_len, path_bytes) to a Contact and fires user callbacks with (contact).
+        """
+        contact = self.get_contact_by_key(pub)
+        if contact is None:
+            contact = Contact(
+                public_key=pub,
+                out_path_len=path_len,
+                out_path=path_bytes,
+            )
+        await self._fire_callbacks("contact_path_updated", contact)
+
     def on_send_confirmed(self, callback: Callable) -> None:
         self._push_callbacks["send_confirmed"].append(callback)
 

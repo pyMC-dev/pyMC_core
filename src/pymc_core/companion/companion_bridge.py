@@ -65,8 +65,10 @@ class _BridgeAckHandler:
         await self._bridge._try_confirm_send(crc)
 
     async def process_path_ack_variants(self, packet: Packet) -> Optional[int]:
-        """Decrypt PATH payload; update contact out_path (firmware pattern), return ACK CRC.
-        Tries every contact matching src_hash (same as TXT_MSG) so we use the correct key.
+        """Decrypt PATH payload and return ACK CRC if present.
+
+        Path update and contact_path_updated are handled by ProtocolResponseHandler;
+        this only extracts ACK for send_confirmed.
         """
         from ..protocol import CryptoUtils, Identity
 
@@ -117,27 +119,7 @@ class _BridgeAckHandler:
                     src_hash,
                 )
                 continue
-            path_bytes = bytes(decrypted[1 : 1 + path_len])
-            # Firmware pattern: onContactPathRecv stores out_path so replies can use sendDirect()
-            # Update the underlying Contact (store expects Contact with bytes public_key, not proxy)
-            contact_obj = self._bridge.contacts.get_by_key(pub)
-            if contact_obj:
-                contact_obj.out_path_len = path_len
-                contact_obj.out_path = path_bytes
-                self._bridge.contacts.update(contact_obj)
-                logger.debug(
-                    "process_path_ack_variants: updated out_path for src=0x%02x "
-                    "contact=%s path_len=%d",
-                    src_hash,
-                    getattr(contact, "name", "?"),
-                    path_len,
-                )
-            else:
-                logger.debug(
-                    "process_path_ack_variants: get_by_key returned None for src=0x%02x",
-                    src_hash,
-                )
-            await self._bridge._fire_callbacks("contact_path_updated", pub, path_len, path_bytes)
+            # Path update and contact_path_updated are handled by ProtocolResponseHandler
             # If this PATH carries an ACK, return it so send_confirmed can fire
             extra_start = 1 + path_len
             if len(decrypted) >= extra_start + 1 + 4 and decrypted[extra_start] == PAYLOAD_TYPE_ACK:
@@ -250,6 +232,9 @@ class CompanionBridge(CompanionBase):
         self._text_handler_ref = core.text_handler
         core.protocol_response_handler.set_binary_response_callback(self._on_binary_response)
         core.protocol_response_handler.set_packet_injector(self._packet_injector)
+        core.protocol_response_handler.set_contact_path_updated_callback(
+            self._on_contact_path_updated
+        )
 
     # -------------------------------------------------------------------------
     # Handler accessors (used by CompanionBase concrete send methods)

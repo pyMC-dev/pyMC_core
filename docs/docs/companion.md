@@ -115,13 +115,13 @@ async def main():
 
 
 # --- Callbacks ---
-def on_msg(sender_key, text, timestamp, txt_type):
+def on_msg(sender_key, text, timestamp, txt_type, *args):
     print(f"DM from {sender_key[:8].hex()}: {text}")
 
 def on_advert(contact):
     print(f"Discovered: {contact.name} (type={contact.adv_type})")
 
-def on_chan_msg(channel_name, sender_name, text, timestamp, path_len, channel_idx):
+def on_chan_msg(channel_name, sender_name, text, timestamp, path_len, channel_idx, *args):
     print(f"[{channel_name}] {sender_name}: {text}")
 
 def on_ack(ack_crc):
@@ -387,7 +387,7 @@ async def main():
     )
 
     bridge.on_message_received(
-        lambda key, text, ts, tt: print(f"Bridge msg: {text}")
+        lambda key, text, ts, tt, *args: print(f"Bridge msg: {text}")
     )
 
     await bridge.start()
@@ -796,7 +796,7 @@ companion.set_channel(0, name="Emergency", secret=b"shared_channel_secret_______
 companion.set_channel(1, name="General",   secret=b"another_shared_secret___________")
 
 companion.on_channel_message_received(
-    lambda ch_name, sender, text, ts, path_len, idx:
+    lambda ch_name, sender, text, ts, path_len, idx, *args:
         print(f"[{ch_name}] {sender}: {text}")
 )
 
@@ -808,11 +808,13 @@ await companion.send_channel_message(0, "Emergency broadcast")
 ## Push Callbacks Reference
 
 Register callbacks to receive asynchronous events. Both sync and async functions are supported.
+Callbacks for `on_message_received` and `on_channel_message_received` receive optional trailing args
+`(packet_hash, snr, rssi)` when available; use `*args` to ignore them.
 
 | Registration Method | Callback Signature |
 |---|---|
-| `on_message_received` | `(sender_key: bytes, text: str, timestamp: int, txt_type: int)` |
-| `on_channel_message_received` | `(channel_name: str, sender_name: str, text: str, timestamp: int, path_len: int, channel_idx: int)` |
+| `on_message_received` | `(sender_key: bytes, text: str, timestamp: int, txt_type: int [, packet_hash, snr, rssi])` |
+| `on_channel_message_received` | `(channel_name: str, sender_name: str, text: str, timestamp: int, path_len: int, channel_idx: int [, packet_hash, snr, rssi])` |
 | `on_advert_received` | `(contact: Contact)` |
 | `on_contact_path_updated` | `(contact: Contact)` |
 | `on_send_confirmed` | `(ack_crc: int)` |

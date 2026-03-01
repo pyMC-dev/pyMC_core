@@ -248,6 +248,32 @@ class TestCompanionRadioPathAndControl:
         assert result is True
         assert len(radio.sent) == 1
 
+    async def test_contact_path_updated_fired_when_handler_callback_invoked(self):
+        """Radio wires protocol_response_handler contact_path_updated to _fire_callbacks."""
+        radio = MockRadio()
+        comp = CompanionRadio(radio, LocalIdentity())
+        path_updated_calls = []
+
+        async def on_path_updated(contact):
+            path_updated_calls.append(contact)
+
+        comp.on_contact_path_updated(on_path_updated)
+        proto = comp.node.dispatcher.protocol_response_handler
+        assert proto is not None
+        assert proto._contact_path_updated_callback is not None
+
+        pub = b"\x22" * 32
+        path_len = 2
+        path_bytes = bytes([0x01, 0x02])
+        cb_result = proto._contact_path_updated_callback(pub, path_len, path_bytes)
+        if hasattr(cb_result, "__await__"):
+            await cb_result
+
+        assert len(path_updated_calls) == 1
+        assert path_updated_calls[0].public_key == pub
+        assert path_updated_calls[0].out_path_len == path_len
+        assert path_updated_calls[0].out_path == path_bytes
+
 
 # ---------------------------------------------------------------------------
 # Stats and config
