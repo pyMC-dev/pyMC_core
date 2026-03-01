@@ -5,7 +5,8 @@ import pytest
 from pymc_core.companion import CompanionRadio
 from pymc_core.companion.constants import ADV_TYPE_CHAT
 from pymc_core.companion.models import Contact
-from pymc_core.protocol import LocalIdentity
+from pymc_core.protocol import LocalIdentity, Packet
+from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK
 
 
 def _make_peer_contact(name: str) -> Contact:
@@ -65,6 +66,16 @@ class TestCompanionRadioInit:
         assert comp.node.contacts is comp.contacts
         assert comp.node.contacts.get_by_name("Alice") is not None
 
+    def test_initial_contacts_populates_store_on_boot(self):
+        radio = MockRadio()
+        identity = LocalIdentity()
+        alice = _make_peer_contact("Alice")
+        bob = _make_peer_contact("Bob")
+        comp = CompanionRadio(radio, identity, node_name="TestNode", initial_contacts=[alice, bob])
+        assert comp.contacts.get_count() == 2
+        assert comp.get_contact_by_name("Alice") is not None
+        assert comp.get_contact_by_name("Bob") is not None
+
 
 @pytest.mark.asyncio
 class TestCompanionRadioLifecycle:
@@ -85,6 +96,35 @@ class TestCompanionRadioLifecycle:
         await comp.start()
         await comp.stop()
         assert "already running" in caplog.text.lower() or True
+
+    async def test_rx_log_data_callback_fired_on_raw_packet(self):
+        """CompanionRadio fires on_rx_log_data(snr, rssi, raw_bytes) for each RX."""
+        radio = MockRadio()
+        comp = CompanionRadio(radio, LocalIdentity())
+        log_calls = []
+
+        def on_log(snr: float, rssi: int, raw: bytes) -> None:
+            log_calls.append((snr, rssi, raw))
+
+        comp.on_rx_log_data(on_log)
+        await comp.start()
+
+        # Build minimal valid packet (ACK) so dispatcher parses and notifies raw subscribers
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ACK << 2)
+        pkt.payload = bytearray(b"\x01\x02\x03\x04")
+        pkt.payload_len = 4
+        pkt.path_len = 0
+        raw = pkt.write_to()
+
+        await comp.node.dispatcher._process_received_packet(raw, rssi=-75, snr=6.0)
+        await comp.stop()
+
+        assert len(log_calls) == 1
+        snr, rssi, data = log_calls[0]
+        assert snr == 6.0
+        assert rssi == -75
+        assert data == raw
 
 
 # ---------------------------------------------------------------------------

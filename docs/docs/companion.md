@@ -143,6 +143,7 @@ CompanionRadio(
     max_channels: int = 40,
     offline_queue_size: int = 512,
     radio_config: dict | None = None,
+    initial_contacts: iterable of Contact | None = None,  # optional bulk load on boot
 )
 ```
 
@@ -191,6 +192,15 @@ contact  = companion.get_contact_by_name("Alice")
 # Add / update / remove
 companion.add_update_contact(Contact(public_key=key, name="Bob"))
 companion.remove_contact(pub_key_bytes)
+
+# Populate on boot: pass initial_contacts into the constructor (CompanionRadio or CompanionBridge).
+# Replaces the need to call the store after construction.
+contacts_from_prefs = [Contact(public_key=k, name=name) for ...]  # e.g. from _load_prefs or a file
+companion = CompanionRadio(radio, identity, node_name="myNode", initial_contacts=contacts_from_prefs)
+await companion.start()
+
+# If your data is dicts (e.g. JSON/DB), load after construction:
+companion.contacts.load_from_dicts([{"public_key": key_hex, "name": "Bob"}, ...])
 
 # Reset routing path (force re-discovery)
 companion.reset_path(pub_key_bytes)
@@ -271,6 +281,10 @@ companion.set_advert_latlon(37.7749, -122.4194)          # GPS coordinates
 companion.set_radio_params(915_000_000, 250_000, 10, 5)  # freq, bw, SF, CR
 companion.set_tx_power(22)                                # dBm
 companion.set_tuning_params(rx_delay=0.0, airtime_factor=0.0)
+
+# Fetch current radio configuration (frequency, bandwidth, SF, CR, TX power, tuning)
+radio_params = companion.get_radio_params()
+# {'frequency_hz': 915000000, 'bandwidth_hz': 250000, 'spreading_factor': 10, ...}
 
 # Time management (transient, not persisted)
 device_time = companion.get_time()                        # Unix timestamp
@@ -414,6 +428,7 @@ CompanionBridge(
     offline_queue_size: int = 512,
     radio_config: dict | None = None,
     authenticate_callback: Callable | None = None,  # (hash, pw) -> (bool, int)
+    initial_contacts: iterable of Contact | None = None,  # optional bulk load on boot
 )
 ```
 
@@ -440,7 +455,7 @@ The bridge registers internal handlers for these payload types:
 
 `CompanionBridge` exposes the same messaging, contact, channel, path, signing, stats, and configuration APIs as `CompanionRadio` (inherited from `CompanionBase`). The only behavioral difference is that all TX goes through the `packet_injector` instead of an owned radio.
 
-Note that `set_radio_params()` and `set_tx_power()` update in-memory prefs only — there is no physical radio to configure. This is correct: the repeater host owns the radio hardware.
+Note that **CompanionBridge does not own the radio**. `set_radio_params()` and `set_tx_power()` update in-memory prefs only; there is no physical radio to configure. `get_radio_params()` and `get_self_info()` return those in-memory prefs, not the repeater's actual hardware configuration.
 
 ### Avoiding doubled messages
 
@@ -824,6 +839,7 @@ Callbacks for `on_message_received` and `on_channel_message_received` receive op
 | `on_telemetry_response` | `(event_data)` |
 | `on_status_response` | `(status_data)` |
 | `on_raw_data_received` | `(raw_data)` |
+| `on_rx_log_data` | `(snr: float, rssi: int, raw_bytes: bytes)` — **CompanionRadio only**; same data as PUSH 0x88 LOG_RX_DATA |
 | `on_binary_response` | `(tag: bytes, data: bytes, parsed: dict\|None, request_type: int\|None)` |
 | `on_path_discovery_response` | `(tag: bytes, contact_pubkey: bytes, out_path: bytes, in_path: bytes)` |
 
@@ -881,6 +897,7 @@ class NodePrefs:
     autoadd_config: int = 0
     rx_delay_base: float = 0.0
     airtime_factor: float = 0.0
+    client_repeat: int = 0   # reported in CMD_DEVICE_QUERY device info frame (byte 80)
 ```
 
 ### SentResult

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..node.node import MeshNode
 from ..protocol import LocalIdentity, Packet
@@ -66,6 +66,7 @@ class CompanionRadio(CompanionBase):
         max_channels: int = DEFAULT_MAX_CHANNELS,
         offline_queue_size: int = DEFAULT_OFFLINE_QUEUE_SIZE,
         radio_config: Optional[dict] = None,
+        initial_contacts: Optional[Iterable[Any]] = None,
     ) -> None:
         """Initialise the companion radio."""
         self._init_companion_stores(
@@ -76,6 +77,7 @@ class CompanionRadio(CompanionBase):
             max_channels=max_channels,
             offline_queue_size=offline_queue_size,
             radio_config=radio_config,
+            initial_contacts=initial_contacts,
         )
         self._radio = radio
         self._dispatcher_task: Optional[asyncio.Task] = None
@@ -131,6 +133,10 @@ class CompanionRadio(CompanionBase):
 
     async def stop(self) -> None:
         self._running = False
+        try:
+            self.node.dispatcher.remove_raw_packet_subscriber(self._on_raw_packet_rx_log)
+        except Exception:
+            pass
         if self._dispatcher_task:
             self._dispatcher_task.cancel()
             try:
@@ -241,6 +247,7 @@ class CompanionRadio(CompanionBase):
         dispatcher.set_packet_received_callback(self._on_packet_received)
         dispatcher.set_packet_sent_callback(self._on_packet_sent)
         dispatcher.set_ack_received_listener(self._on_ack_received)
+        dispatcher.add_raw_packet_subscriber(self._on_raw_packet_rx_log)
         if (
             hasattr(dispatcher, "protocol_response_handler")
             and dispatcher.protocol_response_handler
@@ -256,6 +263,12 @@ class CompanionRadio(CompanionBase):
         route_type = pkt.get_route_type()
         is_flood = route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD)
         self.stats.record_rx(is_flood=is_flood)
+
+    async def _on_raw_packet_rx_log(self, pkt: Any, data: bytes, analysis: Any) -> None:
+        """Dispatcher raw-packet subscriber: fire rx_log_data(snr, rssi, raw_bytes)."""
+        snr = getattr(pkt, "snr", getattr(pkt, "_snr", 0.0))
+        rssi = getattr(pkt, "rssi", getattr(pkt, "_rssi", 0))
+        await self._fire_callbacks("rx_log_data", snr, rssi, data)
 
     async def _on_ack_received(self, crc: int) -> None:
         """Called by dispatcher when an ACK CRC is received; fire send_confirmed if pending."""

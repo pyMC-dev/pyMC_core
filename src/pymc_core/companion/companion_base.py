@@ -15,7 +15,7 @@ import struct
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from ..node.events import EventService, EventSubscriber, MeshEvents
 from ..protocol import LocalIdentity, Packet, PacketBuilder
@@ -81,6 +81,7 @@ PUSH_CALLBACK_KEYS = [
     "telemetry_response",
     "status_response",
     "raw_data_received",
+    "rx_log_data",  # raw RX with SNR/RSSI (CompanionRadio only; matches PUSH 0x88)
     "binary_response",
     "path_discovery_response",
     "contact_deleted",
@@ -153,6 +154,7 @@ class CompanionBase(ABC):
         max_channels: int = DEFAULT_MAX_CHANNELS,
         offline_queue_size: int = DEFAULT_OFFLINE_QUEUE_SIZE,
         radio_config: Optional[dict] = None,
+        initial_contacts: Optional[Iterable[Contact]] = None,
     ) -> None:
         """Initialize shared stores, prefs, event service, and push callbacks."""
         self._identity = identity
@@ -205,6 +207,10 @@ class CompanionBase(ABC):
 
         # Allow subclasses to restore persisted preferences on startup.
         self._load_prefs()
+
+        # Optional bulk load of contacts (e.g. from persistence on boot).
+        if initial_contacts is not None:
+            self.contacts.load_from(initial_contacts)
 
     # -------------------------------------------------------------------------
     # Preference Persistence Hooks
@@ -364,6 +370,23 @@ class CompanionBase(ABC):
     def get_tuning_params(self) -> tuple[float, float]:
         """Return the current (rx_delay, airtime_factor) tuning parameters."""
         return (self.prefs.rx_delay_base, self.prefs.airtime_factor)
+
+    def get_radio_params(self) -> dict:
+        """Return current radio configuration (frequency, bandwidth, SF, CR, TX power, tuning).
+
+        Use this to fetch the radio configuration details. Keys match the arguments
+        to set_radio_params/set_tx_power/set_tuning_params: frequency_hz, bandwidth_hz,
+        spreading_factor, coding_rate, tx_power_dbm, rx_delay_base, airtime_factor.
+        """
+        return {
+            "frequency_hz": self.prefs.frequency_hz,
+            "bandwidth_hz": self.prefs.bandwidth_hz,
+            "spreading_factor": self.prefs.spreading_factor,
+            "coding_rate": self.prefs.coding_rate,
+            "tx_power_dbm": self.prefs.tx_power_dbm,
+            "rx_delay_base": self.prefs.rx_delay_base,
+            "airtime_factor": self.prefs.airtime_factor,
+        }
 
     def get_time(self) -> int:
         """Return the current device time as a Unix timestamp."""
@@ -695,6 +718,15 @@ class CompanionBase(ABC):
 
     def on_raw_data_received(self, callback: Callable) -> None:
         self._push_callbacks["raw_data_received"].append(callback)
+
+    def on_rx_log_data(self, callback: Callable) -> None:
+        """Register callback for raw RX with SNR/RSSI (CompanionRadio only).
+
+        Callback(snr: float, rssi: int, raw_bytes: bytes). Same data as
+        PUSH_CODE_LOG_RX_DATA (0x88). Only fired when using CompanionRadio;
+        CompanionBridge does not own the radio.
+        """
+        self._push_callbacks["rx_log_data"].append(callback)
 
     def on_binary_response(self, callback: Callable) -> None:
         """Register callback for PUSH 0x8C. Callback(tag_bytes, response_data)."""

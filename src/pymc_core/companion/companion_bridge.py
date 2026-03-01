@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from ..node.handlers import create_core_handlers
 from ..node.handlers.login_server import LoginServerHandler
@@ -162,6 +162,7 @@ class CompanionBridge(CompanionBase):
         offline_queue_size: int = DEFAULT_OFFLINE_QUEUE_SIZE,
         radio_config: Optional[dict] = None,
         authenticate_callback: Optional[Callable[..., tuple[bool, int]]] = None,
+        initial_contacts: Optional[Iterable[Any]] = None,
     ) -> None:
         """Initialise the companion bridge."""
         self._init_companion_stores(
@@ -172,6 +173,7 @@ class CompanionBridge(CompanionBase):
             max_channels=max_channels,
             offline_queue_size=offline_queue_size,
             radio_config=radio_config,
+            initial_contacts=initial_contacts,
         )
         self._packet_injector = packet_injector
 

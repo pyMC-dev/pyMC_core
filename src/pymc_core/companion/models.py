@@ -125,6 +125,8 @@ class NodePrefs:
     autoadd_config: int = 0
     rx_delay_base: float = 0.0
     airtime_factor: float = 0.0
+    # Reported in CMD_DEVICE_QUERY device info frame (byte 80).
+    client_repeat: int = 0
 
 
 @dataclass

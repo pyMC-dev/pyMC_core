@@ -1,5 +1,7 @@
 """Tests for CompanionBridge (repeater-integrated companion with packet_injector)."""
 
+import asyncio
+
 import pytest
 
 from pymc_core.companion import CompanionBridge
@@ -8,6 +10,7 @@ from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet
 from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RESPONSE,
@@ -82,6 +85,42 @@ class TestCompanionBridgeLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Channel updated callback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCompanionBridgeChannelUpdated:
+    async def test_set_channel_and_remove_channel_fire_channel_updated(self):
+        """set_channel and remove_channel fire on_channel_updated(idx, channel_or_none)."""
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        events = []
+
+        def on_channel_updated(idx: int, ch) -> None:
+            events.append((idx, ch))
+
+        bridge.on_channel_updated(on_channel_updated)
+        await bridge.start()
+
+        ok = bridge.set_channel(0, "General", b"secret_________________________")
+        assert ok is True
+        await asyncio.sleep(0)
+        assert len(events) == 1
+        assert events[0][0] == 0
+        assert events[0][1] is not None
+        assert events[0][1].name == "General"
+
+        ok = bridge.remove_channel(0)
+        assert ok is True
+        await asyncio.sleep(0)
+        assert len(events) == 2
+        assert events[1] == (0, None)
+
+        await bridge.stop()
+
+
+# ---------------------------------------------------------------------------
 # process_received_packet
 # ---------------------------------------------------------------------------
 
@@ -114,6 +153,36 @@ class TestCompanionBridgeProcessReceivedPacket:
         pkt.payload_len = 0
         await bridge.process_received_packet(pkt)
         assert True
+
+    async def test_process_received_packet_fires_raw_data_received(self):
+        """CompanionBridge fires on_raw_data_received(raw_bytes, snr, rssi) for each packet."""
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        raw_calls = []
+
+        def on_raw(raw: bytes, snr, rssi) -> None:
+            raw_calls.append((raw, snr, rssi))
+
+        bridge.on_raw_data_received(on_raw)
+        await bridge.start()
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ACK << 2)
+        pkt.payload = bytearray(b"\x01\x02\x03\x04")
+        pkt.payload_len = 4
+        pkt.path_len = 0
+        pkt._snr = 6.0
+        pkt._rssi = -75
+
+        await bridge.process_received_packet(pkt)
+        await bridge.stop()
+
+        assert len(raw_calls) == 1
+        raw_bytes, snr, rssi = raw_calls[0]
+        expected_raw = pkt.write_to()
+        assert raw_bytes == expected_raw
+        assert snr == 6.0
+        assert rssi == -75
 
 
 # ---------------------------------------------------------------------------
