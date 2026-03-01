@@ -5,6 +5,7 @@ from Crypto.Cipher import AES
 from nacl.bindings import (
     crypto_scalarmult,
     crypto_scalarmult_base,
+    crypto_scalarmult_ed25519_base_noclamp,
     crypto_sign_ed25519_pk_to_curve25519,
     crypto_sign_ed25519_sk_to_curve25519,
 )
@@ -94,6 +95,13 @@ class CryptoUtils:
             raise ValueError("seed must be 32 bytes")
         h = hashlib.sha512(seed).digest()
         return CryptoUtils.x25519_clamp_scalar(h[:32]) + h[32:64]
+
+    @staticmethod
+    def ed25519_public_from_meshcore_64(meshcore_private_64: bytes) -> bytes:
+        """Derive Ed25519 public key from 64-byte MeshCore private key format."""
+        if len(meshcore_private_64) != 64:
+            raise ValueError("meshcore_private_64 must be 64 bytes")
+        return crypto_scalarmult_ed25519_base_noclamp(meshcore_private_64[:32])
 
     @staticmethod
     def scalarmult(private_key: bytes, public_key: bytes) -> bytes:
