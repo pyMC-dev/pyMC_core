@@ -44,6 +44,7 @@ from .constants import (
     CMD_SEND_CONTROL_DATA,
     CMD_SEND_LOGIN,
     CMD_SEND_PATH_DISCOVERY_REQ,
+    CMD_SEND_RAW_DATA,
     CMD_SEND_SELF_ADVERT,
     CMD_SEND_STATUS_REQ,
     CMD_SEND_TELEMETRY_REQ,
@@ -86,6 +87,7 @@ from .constants import (
     PUSH_CODE_NEW_ADVERT,
     PUSH_CODE_PATH_DISCOVERY_RESPONSE,
     PUSH_CODE_PATH_UPDATED,
+    PUSH_CODE_RAW_DATA,
     PUSH_CODE_SEND_CONFIRMED,
     PUSH_CODE_STATUS_RESPONSE,
     PUSH_CODE_TELEMETRY_RESPONSE,
@@ -431,6 +433,19 @@ class CompanionFrameServer:
         async def on_contacts_full():
             _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
 
+        async def on_raw_data_received(payload_bytes: bytes, snr: float, rssi: int) -> None:
+            """Push PUSH_CODE_RAW_DATA (0x84): code, SNR byte, RSSI byte, 0xFF, payload."""
+            snr_byte = max(-128, min(127, int(round(snr * 4))))
+            rssi_byte = max(-128, min(127, int(rssi)))
+            payload_len = min(len(payload_bytes), MAX_PAYLOAD_SIZE - 4)
+            data = (
+                bytes([PUSH_CODE_RAW_DATA])
+                + struct.pack("<bb", snr_byte, rssi_byte)
+                + bytes([0xFF])
+                + payload_bytes[:payload_len]
+            )
+            _write_push(data)
+
         self.bridge.on_message_received(on_message_received)
         self.bridge.on_channel_message_received(on_channel_message_received)
         self.bridge.on_send_confirmed(on_send_confirmed)
@@ -440,6 +455,7 @@ class CompanionFrameServer:
         self.bridge.on_path_discovery_response(on_path_discovery_response)
         self.bridge.on_contact_deleted(on_contact_deleted)
         self.bridge.on_contacts_full(on_contacts_full)
+        self.bridge.on_raw_data_received(on_raw_data_received)
 
     # -------------------------------------------------------------------------
     # Public push methods (called directly by host application)
@@ -800,6 +816,8 @@ class CompanionFrameServer:
                 await self._cmd_get_autoadd_config(data)
             elif cmd == CMD_SET_OTHER_PARAMS:
                 await self._cmd_set_other_params(data)
+            elif cmd == CMD_SEND_RAW_DATA:
+                await self._cmd_send_raw_data(data)
             else:
                 logger.warning(
                     "Companion unsupported cmd 0x%02x (%s) len=%s",
@@ -1728,3 +1746,21 @@ class CompanionFrameServer:
         multi_acks = data[3] if len(data) >= 4 else 0
         self.bridge.set_other_params(manual_add, telemetry_modes, advert_loc_policy, multi_acks)
         self._write_ok()
+
+    async def _cmd_send_raw_data(self, data: bytes) -> None:
+        """Handle CMD_SEND_RAW_DATA (25). Format: [path_len][path][payload] (min 4-byte payload)."""
+        if len(data) < 6:
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
+        path_len_byte = data[0]
+        path_len = path_len_byte - 256 if path_len_byte >= 128 else path_len_byte
+        if path_len < 0 or path_len > MAX_PATH_SIZE or 1 + path_len + 4 > len(data):
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
+        path = data[1 : 1 + path_len]
+        payload = data[1 + path_len :]
+        result = await self.bridge.send_raw_data_direct(path, payload)
+        if result.success:
+            self._write_ok()
+        else:
+            self._write_err(ERR_CODE_TABLE_FULL)

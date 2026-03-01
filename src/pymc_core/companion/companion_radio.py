@@ -248,6 +248,7 @@ class CompanionRadio(CompanionBase):
         dispatcher.set_packet_sent_callback(self._on_packet_sent)
         dispatcher.set_ack_received_listener(self._on_ack_received)
         dispatcher.add_raw_packet_subscriber(self._on_raw_packet_rx_log)
+        dispatcher.raw_data_received_callback = self._on_raw_custom_received
         if (
             hasattr(dispatcher, "protocol_response_handler")
             and dispatcher.protocol_response_handler
@@ -273,6 +274,13 @@ class CompanionRadio(CompanionBase):
     async def _on_ack_received(self, crc: int) -> None:
         """Called by dispatcher when an ACK CRC is received; fire send_confirmed if pending."""
         await self._try_confirm_send(crc)
+
+    async def _on_raw_custom_received(self, pkt: Packet) -> None:
+        """Dispatcher RAW_CUSTOM handler: fire raw_data_received(payload, snr, rssi)."""
+        payload = bytes(pkt.payload) if pkt.payload else b""
+        snr = pkt.get_snr() if hasattr(pkt, "get_snr") else getattr(pkt, "_snr", 0)
+        rssi = pkt.rssi if hasattr(pkt, "rssi") else getattr(pkt, "_rssi", 0)
+        await self._fire_callbacks("raw_data_received", payload, snr, rssi)
 
     async def _on_packet_sent(self, pkt: Any) -> None:
         pass

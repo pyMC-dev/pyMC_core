@@ -573,6 +573,7 @@ The frame server handles the following companion radio protocol commands:
 | `CMD_SHARE_CONTACT` | 16 | Share a contact to the mesh |
 | `CMD_EXPORT_CONTACT` | 17 | Export contact as 73-byte blob |
 | `CMD_IMPORT_CONTACT` | 18 | Import contact from blob |
+| `CMD_SEND_RAW_DATA` | 25 | Send raw payload on given direct path |
 | `CMD_GET_BATT_AND_STORAGE` | 20 | Get battery/storage info |
 | `CMD_SET_TUNING_PARAMS` | 21 | Set RX delay and airtime factor |
 | `CMD_DEVICE_QUERY` | 22 | Return device model/version |
@@ -602,9 +603,10 @@ The frame server sends unsolicited push frames to the companion app when events 
 | Push Code | Value | Description |
 |---|---|---|
 | `PUSH_CODE_ADVERT` | 0x80 | Contact advertisement received |
-| `PUSH_CODE_MSG_WAITING` | 0x82 | New message queued |
-| `PUSH_CODE_SEND_CONFIRMED` | 0x84 | ACK received for a sent message |
-| `PUSH_CODE_PATH_UPDATED` | 0x86 | Contact path updated |
+| `PUSH_CODE_MSG_WAITING` | 0x83 | New message queued |
+| `PUSH_CODE_SEND_CONFIRMED` | 0x82 | ACK received for a sent message |
+| `PUSH_CODE_RAW_DATA` | 0x84 | Raw custom payload received (SNR, RSSI, 0xFF, payload) |
+| `PUSH_CODE_PATH_UPDATED` | 0x81 | Contact path updated |
 | `PUSH_CODE_LOG_RX_DATA` | 0x88 | Raw RX packet (diagnostics) |
 | `PUSH_CODE_TRACE_DATA` | 0x89 | Trace path response |
 | `PUSH_CODE_NEW_ADVERT` | 0x8A | New (previously unknown) contact discovered |
@@ -838,7 +840,7 @@ Callbacks for `on_message_received` and `on_channel_message_received` receive op
 | `on_login_result` | `(result_data)` |
 | `on_telemetry_response` | `(event_data)` |
 | `on_status_response` | `(status_data)` |
-| `on_raw_data_received` | `(raw_data)` |
+| `on_raw_data_received` | `(payload: bytes, snr: float, rssi: int)` — raw custom packet received |
 | `on_rx_log_data` | `(snr: float, rssi: int, raw_bytes: bytes)` — **CompanionRadio only**; same data as PUSH 0x88 LOG_RX_DATA |
 | `on_binary_response` | `(tag: bytes, data: bytes, parsed: dict\|None, request_type: int\|None)` |
 | `on_path_discovery_response` | `(tag: bytes, contact_pubkey: bytes, out_path: bytes, in_path: bytes)` |
@@ -1026,7 +1028,7 @@ MAX_PATH_SIZE               = 64
 
 ## Unimplemented MeshCore Companion Features
 
-The following protocol-level features from the MeshCore companion radio firmware (`examples/companion_radio/`) are **not yet implemented** in pyMC_core:
+The following protocol-level features from the MeshCore companion radio firmware (`examples/companion_radio/`) are **not yet implemented** in pyMC_core. CMD_SEND_RAW_DATA (25) and PUSH_CODE_RAW_DATA (0x84) for raw custom packets are implemented.
 
 | Feature | Firmware Reference | Description |
 |---|---|---|

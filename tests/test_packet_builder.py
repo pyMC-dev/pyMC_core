@@ -1,5 +1,10 @@
 from pymc_core import LocalIdentity
-from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT
+from pymc_core.protocol.constants import (
+    MAX_PACKET_PAYLOAD,
+    PAYLOAD_TYPE_ACK,
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_RAW_CUSTOM,
+)
 from pymc_core.protocol.packet_builder import PacketBuilder
 
 
@@ -51,3 +56,24 @@ def test_packet_builder_create_direct_advert():
 
     assert direct_advert is not None
     assert direct_advert.get_payload_type() == PAYLOAD_TYPE_ADVERT
+
+
+def test_packet_builder_create_raw_data():
+    """Test creating raw custom packets (PAYLOAD_TYPE_RAW_CUSTOM)."""
+    data = b"\x01\x02\x03\x04"
+    pkt = PacketBuilder.create_raw_data(data)
+    assert pkt is not None
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_RAW_CUSTOM
+    assert pkt.payload == bytearray(data)
+    assert pkt.payload_len == len(data)
+    assert pkt.path_len == 0
+    assert pkt.path == bytearray()
+
+
+def test_packet_builder_create_raw_data_too_large_raises():
+    """Test create_raw_data raises when data exceeds MAX_PACKET_PAYLOAD."""
+    import pytest
+
+    data = bytes(MAX_PACKET_PAYLOAD + 1)
+    with pytest.raises(ValueError, match="exceeds MAX_PACKET_PAYLOAD"):
+        PacketBuilder.create_raw_data(data)

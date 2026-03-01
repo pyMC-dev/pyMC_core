@@ -26,6 +26,8 @@ from ..protocol.constants import (
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
     ADVERT_FLAG_IS_SENSOR,
+    MAX_PACKET_PAYLOAD,
+    MAX_PATH_SIZE,
     PAYLOAD_TYPE_CONTROL,
     REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
@@ -86,6 +88,7 @@ PUSH_CALLBACK_KEYS = [
     "path_discovery_response",
     "contact_deleted",
     "contacts_full",
+    "channel_updated",
 ]
 
 
@@ -457,7 +460,18 @@ class CompanionBase(ABC):
             secret = secret + b"\x00" * (32 - len(secret))
         elif len(secret) > 32:
             secret = secret[:32]
-        return self.channels.set(idx, Channel(name=name[:32], secret=secret))
+        ok = self.channels.set(idx, Channel(name=name[:32], secret=secret))
+        if ok:
+            ch = self.channels.get(idx)
+            self._schedule_fire_callbacks("channel_updated", idx, ch)
+        return ok
+
+    def remove_channel(self, idx: int) -> bool:
+        """Remove the channel at the given index. Fires on_channel_updated(idx, None)."""
+        ok = self.channels.remove(idx)
+        if ok:
+            self._schedule_fire_callbacks("channel_updated", idx, None)
+        return ok
 
     # -------------------------------------------------------------------------
     # Signing Pipeline
@@ -743,6 +757,10 @@ class CompanionBase(ABC):
     def on_contacts_full(self, callback: Callable) -> None:
         """Register callback for PUSH 0x90 (contacts store full). Callback()."""
         self._push_callbacks["contacts_full"].append(callback)
+
+    def on_channel_updated(self, callback: Callable) -> None:
+        """Register callback for channel set/remove. Callback(idx: int, channel_or_none)."""
+        self._push_callbacks["channel_updated"].append(callback)
 
     def register_binary_request(
         self,
@@ -1199,6 +1217,32 @@ class CompanionBase(ABC):
             return SentResult(success=success)
         except Exception as e:
             logger.error(f"Error sending raw data: {e}")
+            return SentResult(success=False)
+
+    async def send_raw_data_direct(self, path: bytes, payload: bytes) -> SentResult:
+        """Send a raw custom packet (PAYLOAD_TYPE_RAW_CUSTOM) on the given direct path.
+
+        No encryption or contact lookup; path and payload are supplied by the caller.
+        Matches firmware CMD_SEND_RAW_DATA behaviour.
+        """
+        if len(payload) < 4:
+            return SentResult(success=False)
+        if len(path) > MAX_PATH_SIZE:
+            return SentResult(success=False)
+        if len(payload) > MAX_PACKET_PAYLOAD:
+            return SentResult(success=False)
+        try:
+            pkt = PacketBuilder.create_raw_data(payload)
+            pkt.path = bytearray(path)
+            pkt.path_len = len(path)
+            success = await self._send_packet(pkt, wait_for_ack=False)
+            if success:
+                self.stats.record_tx(is_flood=False)
+            else:
+                self.stats.record_tx_error()
+            return SentResult(success=success)
+        except Exception as e:
+            logger.error(f"Error sending raw data direct: {e}")
             return SentResult(success=False)
 
     async def send_trace_path(
@@ -1690,3 +1734,11 @@ class CompanionBase(ABC):
                     callback(*args)
             except Exception as e:
                 logger.error(f"Error in {event_name} callback: {e}")
+
+    def _schedule_fire_callbacks(self, event_name: str, *args: Any) -> None:
+        """Schedule _fire_callbacks from sync code (e.g. set_channel). No-op if no running loop."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._fire_callbacks(event_name, *args))
+        except RuntimeError:
+            pass

@@ -69,6 +69,9 @@ class Dispatcher:
         # Optional listener for ACK received (e.g. companion send_confirmed)
         self._ack_received_listener: Optional[Callable[[int], Awaitable[None] | None]] = None
 
+        # Optional callback for PAYLOAD_TYPE_RAW_CUSTOM (companion raw_data_received)
+        self.raw_data_received_callback: Optional[Callable[[Packet], Awaitable[None]]] = None
+
         # Raw packet callbacks: single callback (legacy) and list of subscribers (after parse)
         self.raw_packet_callback: Optional[Callable[[Packet, bytes], Awaitable[None] | None]] = None
         self._raw_packet_subscribers: List[Callable[..., Any]] = []
@@ -216,6 +219,17 @@ class Dispatcher:
         control_handler = ControlHandler(self._log)
         self.register_handler(ControlHandler.payload_type(), control_handler)
         self.control_handler = control_handler
+
+        # --- RAW_CUSTOM handler: deliver to companion if direct and callback set ---
+        from ..protocol.constants import PAYLOAD_TYPE_RAW_CUSTOM
+
+        async def raw_custom_handler(pkt: Packet) -> None:
+            if not pkt.is_route_direct():
+                return
+            if self.raw_data_received_callback:
+                await self._invoke_callback(self.raw_data_received_callback, pkt)
+
+        self.register_handler(PAYLOAD_TYPE_RAW_CUSTOM, raw_custom_handler)
 
         self._logger.info("Default handlers registered.")
 

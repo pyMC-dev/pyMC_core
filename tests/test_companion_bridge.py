@@ -10,9 +10,9 @@ from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet
 from pymc_core.protocol.constants import (
-    PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RAW_CUSTOM,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TXT_MSG,
     ROUTE_TYPE_FLOOD,
@@ -155,19 +155,19 @@ class TestCompanionBridgeProcessReceivedPacket:
         assert True
 
     async def test_process_received_packet_fires_raw_data_received(self):
-        """CompanionBridge fires on_raw_data_received(raw_bytes, snr, rssi) for each packet."""
+        """CompanionBridge fires on_raw_data_received(payload, snr, rssi) for RAW_CUSTOM packets."""
         injector = MockPacketInjector()
         bridge = CompanionBridge(LocalIdentity(), injector)
         raw_calls = []
 
-        def on_raw(raw: bytes, snr, rssi) -> None:
-            raw_calls.append((raw, snr, rssi))
+        def on_raw(payload: bytes, snr, rssi) -> None:
+            raw_calls.append((payload, snr, rssi))
 
         bridge.on_raw_data_received(on_raw)
         await bridge.start()
 
         pkt = Packet()
-        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ACK << 2)
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_RAW_CUSTOM << 2)
         pkt.payload = bytearray(b"\x01\x02\x03\x04")
         pkt.payload_len = 4
         pkt.path_len = 0
@@ -178,9 +178,8 @@ class TestCompanionBridgeProcessReceivedPacket:
         await bridge.stop()
 
         assert len(raw_calls) == 1
-        raw_bytes, snr, rssi = raw_calls[0]
-        expected_raw = pkt.write_to()
-        assert raw_bytes == expected_raw
+        payload_bytes, snr, rssi = raw_calls[0]
+        assert payload_bytes == b"\x01\x02\x03\x04"
         assert snr == 6.0
         assert rssi == -75
 
@@ -244,6 +243,24 @@ class TestCompanionBridgeSendAndShare:
         result = await bridge.share_contact(key)
         assert result is True
         assert len(injector.calls) == 1
+
+    async def test_send_raw_data_direct_injects_packet(self):
+        """send_raw_data_direct builds RAW_CUSTOM packet and sends via injector."""
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        await bridge.start()
+        path = b"\x42"
+        payload = b"\x01\x02\x03\x04"
+        result = await bridge.send_raw_data_direct(path, payload)
+        await bridge.stop()
+        assert result.success is True
+        assert len(injector.calls) == 1
+        pkt, wait_for_ack = injector.calls[0]
+        assert (pkt.header >> 2) & 0x0F == PAYLOAD_TYPE_RAW_CUSTOM
+        assert pkt.path == bytearray(path)
+        assert pkt.path_len == len(path)
+        assert bytes(pkt.payload) == payload
+        assert wait_for_ack is False
 
 
 # ---------------------------------------------------------------------------

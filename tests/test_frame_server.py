@@ -1,15 +1,20 @@
 """Tests for CompanionFrameServer and advert push frame construction."""
 
 import struct
+from unittest.mock import Mock
+
+import pytest
 
 from pymc_core.companion.constants import (
+    ERR_CODE_TABLE_FULL,
+    ERR_CODE_UNSUPPORTED_CMD,
     MAX_PATH_SIZE,
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_NEW_ADVERT,
 )
-from pymc_core.companion.frame_server import _build_advert_push_frames
-from pymc_core.companion.models import Contact
+from pymc_core.companion.frame_server import CompanionFrameServer, _build_advert_push_frames
+from pymc_core.companion.models import Contact, SentResult
 
 
 def test_build_advert_push_frames_short_only_when_no_name():
@@ -97,3 +102,56 @@ def test_build_advert_push_frames_name_truncated_to_32_bytes():
     name_slice = full[36 + MAX_PATH_SIZE : 36 + MAX_PATH_SIZE + 32]
     assert len(name_slice) == 32
     assert name_slice == b"A" * 32
+
+
+class _MockBridgeSendRawDirect:
+    """Minimal bridge for CMD_SEND_RAW_DATA tests."""
+
+    def __init__(self, success: bool = True):
+        self.calls = []
+        self._success = success
+
+    async def send_raw_data_direct(self, path: bytes, payload: bytes):
+        self.calls.append((path, payload))
+        return SentResult(success=self._success)
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_valid_writes_ok():
+    """Valid CMD_SEND_RAW_DATA -> _write_ok."""
+    bridge = _MockBridgeSendRawDirect(success=True)
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    data = bytes([1, 0x42]) + b"\x01\x02\x03\x04"
+    await server._cmd_send_raw_data(data)
+    assert bridge.calls == [(b"\x42", b"\x01\x02\x03\x04")]
+    server._write_ok.assert_called_once()
+    server._write_err.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_invalid_len_writes_unsupported():
+    """Invalid CMD_SEND_RAW_DATA len < 6 -> ERR_CODE_UNSUPPORTED_CMD."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    await server._cmd_send_raw_data(b"\x00\x00\x00")
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_UNSUPPORTED_CMD)
+    server._write_ok.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_send_failure_writes_table_full():
+    """send_raw_data_direct returns False -> ERR_CODE_TABLE_FULL."""
+    bridge = _MockBridgeSendRawDirect(success=False)
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    data = bytes([1, 0x42]) + b"\x01\x02\x03\x04"
+    await server._cmd_send_raw_data(data)
+    assert len(bridge.calls) == 1
+    server._write_err.assert_called_once_with(ERR_CODE_TABLE_FULL)
+    server._write_ok.assert_not_called()

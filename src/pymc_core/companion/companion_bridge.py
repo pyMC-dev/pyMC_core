@@ -22,6 +22,7 @@ from ..protocol.constants import (
     PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RAW_CUSTOM,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TXT_MSG,
     ROUTE_TYPE_FLOOD,
@@ -140,6 +141,28 @@ class _BridgeAckHandler:
 
 
 # ---------------------------------------------------------------------------
+# Raw custom payload handler: fires raw_data_received (PUSH 0x84)
+# ---------------------------------------------------------------------------
+
+
+class _RawCustomHandler:
+    """Handles PAYLOAD_TYPE_RAW_CUSTOM packets; fires raw_data_received(payload, snr, rssi)."""
+
+    def __init__(self, bridge: "CompanionBridge") -> None:
+        self._bridge = bridge
+
+    @staticmethod
+    def payload_type() -> int:
+        return PAYLOAD_TYPE_RAW_CUSTOM
+
+    async def __call__(self, packet: Packet) -> None:
+        payload_bytes = bytes(packet.payload) if packet.payload else b""
+        snr = packet.get_snr() if hasattr(packet, "get_snr") else getattr(packet, "_snr", 0)
+        rssi = packet.rssi if hasattr(packet, "rssi") else getattr(packet, "_rssi", 0)
+        await self._bridge._fire_callbacks("raw_data_received", payload_bytes, snr, rssi)
+
+
+# ---------------------------------------------------------------------------
 # Main CompanionBridge class
 # ---------------------------------------------------------------------------
 
@@ -227,6 +250,7 @@ class CompanionBridge(CompanionBase):
             PAYLOAD_TYPE_ANON_REQ: login_server_handler,
             PAYLOAD_TYPE_GRP_TXT: core.group_text_handler,
             PAYLOAD_TYPE_RESPONSE: core.login_response_handler,
+            PAYLOAD_TYPE_RAW_CUSTOM: _RawCustomHandler(self),
         }
 
         self._protocol_response_handler = core.protocol_response_handler

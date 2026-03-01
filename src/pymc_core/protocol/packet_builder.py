@@ -23,6 +23,7 @@ from .constants import (
     PAYLOAD_TYPE_GRP_DATA,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RAW_CUSTOM,
     PAYLOAD_TYPE_REQ,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
@@ -642,6 +643,21 @@ class PacketBuilder:
         pkt.payload = bytearray(payload)
         pkt.payload_len = len(payload)
         return pkt
+
+    @staticmethod
+    def create_raw_data(data: bytes) -> Packet:
+        """
+        Create a raw custom packet (PAYLOAD_TYPE_RAW_CUSTOM) with no encryption.
+
+        Route type is always DIRECT (consistent with firmware CMD_SEND_RAW_DATA).
+        Caller must set pkt.path and pkt.path_len for direct routing.
+        """
+        if len(data) > MAX_PACKET_PAYLOAD:
+            raise ValueError(
+                f"Raw data length {len(data)} exceeds MAX_PACKET_PAYLOAD ({MAX_PACKET_PAYLOAD})"
+            )
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_RAW_CUSTOM, route_type="direct")
+        return PacketBuilder._create_packet(header, data)
 
     @staticmethod
     def create_path_return(
