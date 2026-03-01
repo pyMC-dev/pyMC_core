@@ -88,6 +88,14 @@ class CryptoUtils:
         return bytes(s)
 
     @staticmethod
+    def ed25519_expand_seed_to_meshcore_64(seed: bytes) -> bytes:
+        """Expand a 32-byte Ed25519 seed to 64-byte MeshCore/orlp format."""
+        if len(seed) != 32:
+            raise ValueError("seed must be 32 bytes")
+        h = hashlib.sha512(seed).digest()
+        return CryptoUtils.x25519_clamp_scalar(h[:32]) + h[32:64]
+
+    @staticmethod
     def scalarmult(private_key: bytes, public_key: bytes) -> bytes:
         """ECDH shared secret calculation (X25519)."""
         return crypto_scalarmult(private_key, public_key)

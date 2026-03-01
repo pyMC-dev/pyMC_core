@@ -573,6 +573,8 @@ The frame server handles the following companion radio protocol commands:
 | `CMD_SHARE_CONTACT` | 16 | Share a contact to the mesh |
 | `CMD_EXPORT_CONTACT` | 17 | Export contact as 73-byte blob |
 | `CMD_IMPORT_CONTACT` | 18 | Import contact from blob |
+| `CMD_EXPORT_PRIVATE_KEY` | 23 | Export private/signing key (64-byte MeshCore format) |
+| `CMD_IMPORT_PRIVATE_KEY` | 24 | Import private key (stub/no-op; key set from config) |
 | `CMD_SEND_RAW_DATA` | 25 | Send raw payload on given direct path |
 | `CMD_GET_BATT_AND_STORAGE` | 20 | Get battery/storage info |
 | `CMD_SET_TUNING_PARAMS` | 21 | Set RX delay and airtime factor |

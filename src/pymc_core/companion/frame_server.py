@@ -19,12 +19,14 @@ import sys
 import time
 from typing import Any, Callable, Optional
 
+from ..protocol import CryptoUtils
 from .constants import (
     ADV_TYPE_CHAT,
     CMD_ADD_UPDATE_CONTACT,
     CMD_APP_START,
     CMD_DEVICE_QUERY,
     CMD_EXPORT_CONTACT,
+    CMD_EXPORT_PRIVATE_KEY,
     CMD_GET_ADVERT_PATH,
     CMD_GET_AUTOADD_CONFIG,
     CMD_GET_BATT_AND_STORAGE,
@@ -35,6 +37,7 @@ from .constants import (
     CMD_GET_DEVICE_TIME,
     CMD_GET_STATS,
     CMD_IMPORT_CONTACT,
+    CMD_IMPORT_PRIVATE_KEY,
     CMD_LOGOUT,
     CMD_REMOVE_CONTACT,
     CMD_RESET_PATH,
@@ -110,6 +113,7 @@ from .constants import (
     RESP_CODE_EXPORT_CONTACT,
     RESP_CODE_NO_MORE_MESSAGES,
     RESP_CODE_OK,
+    RESP_CODE_PRIVATE_KEY,
     RESP_CODE_SELF_INFO,
     RESP_CODE_SENT,
     RESP_CODE_STATS,
@@ -802,6 +806,10 @@ class CompanionFrameServer:
                 await self._cmd_share_contact(data)
             elif cmd == CMD_EXPORT_CONTACT:
                 await self._cmd_export_contact(data)
+            elif cmd == CMD_EXPORT_PRIVATE_KEY:
+                await self._cmd_export_private_key(data)
+            elif cmd == CMD_IMPORT_PRIVATE_KEY:
+                await self._cmd_import_private_key(data)
             elif cmd == CMD_SET_TUNING_PARAMS:
                 await self._cmd_set_tuning_params(data)
             elif cmd == CMD_LOGOUT:
@@ -1686,6 +1694,26 @@ class CompanionFrameServer:
             self._write_err(ERR_CODE_NOT_FOUND)
             return
         self._write_frame(bytes([RESP_CODE_EXPORT_CONTACT]) + raw)
+
+    async def _cmd_export_private_key(self, data: bytes) -> None:
+        """Export private/signing key as 64-byte MeshCore format (RESP_CODE_PRIVATE_KEY + 64 bytes).
+
+        For PyNaCl 32-byte seeds we expand to MeshCore 64-byte format (SHA-512 + clamp) so
+        the client's ed25519_derive_pub yields the same public key and signing works.
+        """
+        identity = self.bridge._identity
+        key_bytes = identity.get_signing_key_bytes()
+        if len(key_bytes) == 32:
+            key_bytes = CryptoUtils.ed25519_expand_seed_to_meshcore_64(key_bytes)
+        elif len(key_bytes) < 64:
+            key_bytes = key_bytes.ljust(64, b"\x00")
+        else:
+            key_bytes = key_bytes[:64]
+        self._write_frame(bytes([RESP_CODE_PRIVATE_KEY]) + key_bytes)
+
+    async def _cmd_import_private_key(self, data: bytes) -> None:
+        """Stub/no-op: private key is set from config; dynamic import may be supported later."""
+        self._write_ok()
 
     async def _cmd_set_tuning_params(self, data: bytes) -> None:
         if len(data) < 8:
