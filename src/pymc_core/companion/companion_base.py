@@ -687,6 +687,15 @@ class CompanionBase(ABC):
     # Push Callbacks
     # -------------------------------------------------------------------------
 
+    def clear_push_callbacks(self) -> None:
+        """Remove all registered push callbacks.
+
+        Called by FrameServer between client connections so that stale
+        closures from a previous connection are not invoked on the next one.
+        """
+        for key in self._push_callbacks:
+            self._push_callbacks[key].clear()
+
     def on_message_received(self, callback: Callable) -> None:
         self._push_callbacks["message_received"].append(callback)
 
@@ -701,15 +710,17 @@ class CompanionBase(ABC):
 
     async def _on_contact_path_updated(self, pub: bytes, path_len: int, path_bytes: bytes) -> None:
         """Called by ProtocolResponseHandler when contact's out_path is updated from a PATH packet.
-        Converts (pub, path_len, path_bytes) to a Contact and fires user callbacks with (contact).
+
+        Matches companion firmware behaviour: PATH updates are only applied
+        (and pushed to the client) for contacts that already exist in the
+        store.  Unknown public keys are silently ignored.
         """
         contact = self.get_contact_by_key(pub)
         if contact is None:
-            contact = Contact(
-                public_key=pub,
-                out_path_len=path_len,
-                out_path=path_bytes,
-            )
+            return  # Firmware does not send PATH for non-contacts
+        contact.out_path_len = path_len
+        contact.out_path = path_bytes
+        self.contacts.update(contact)
         await self._fire_callbacks("contact_path_updated", contact)
 
     def on_send_confirmed(self, callback: Callable) -> None:

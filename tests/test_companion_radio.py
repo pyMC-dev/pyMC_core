@@ -303,6 +303,10 @@ class TestCompanionRadioPathAndControl:
         assert proto._contact_path_updated_callback is not None
 
         pub = b"\x22" * 32
+        # Contact must exist in the store; path updates for unknown contacts
+        # are silently dropped (matches companion firmware behaviour).
+        comp.contacts.add(Contact(public_key=pub, name="test"))
+
         path_len = 2
         path_bytes = bytes([0x01, 0x02])
         cb_result = proto._contact_path_updated_callback(pub, path_len, path_bytes)
