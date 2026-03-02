@@ -369,7 +369,7 @@ class Packet:
             different routing or content types produce different hashes.
         """
         return PacketHashingUtils.calculate_packet_hash(
-            self.get_payload_type(), self.path_len, self.payload
+            self.get_payload_type(), self.path_len, self.payload[: self.payload_len]
         )
 
     def get_packet_hash_hex(self, length: Optional[int] = None) -> str:
@@ -386,7 +386,7 @@ class Packet:
         return PacketHashingUtils.calculate_packet_hash_string(
             payload_type=self.get_payload_type(),
             path_len=self.path_len,
-            payload=self.payload,
+            payload=self.payload[: self.payload_len],
             length=length,
         )
 
@@ -407,7 +407,7 @@ class Packet:
             sufficient uniqueness for ACK correlation in the mesh network.
         """
         return PacketHashingUtils.calculate_crc(
-            self.get_payload_type(), self.path_len, self.payload
+            self.get_payload_type(), self.path_len, self.payload[: self.payload_len]
         )
 
     def get_raw_length(self) -> int:
