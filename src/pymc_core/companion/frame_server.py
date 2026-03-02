@@ -289,7 +289,7 @@ class CompanionFrameServer:
     def _setup_push_callbacks(self) -> None:
         """Subscribe to bridge events and send PUSH frames to connected client."""
 
-        def _write_push(data: bytes) -> None:
+        async def _write_push(data: bytes) -> None:
             if self._client_writer and not self._client_writer.is_closing():
                 try:
                     if len(data) > MAX_PAYLOAD_SIZE:
@@ -301,7 +301,7 @@ class CompanionFrameServer:
                         data = data[:MAX_PAYLOAD_SIZE]
                     frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
                     self._client_writer.write(frame)
-                    asyncio.create_task(self._drain_writer())
+                    await self._drain_writer()
                 except Exception as e:
                     logger.warning("Push write error: %s", e)
 
@@ -321,7 +321,7 @@ class CompanionFrameServer:
                 "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
-            _write_push(bytes([PUSH_CODE_MSG_WAITING]))
+            await _write_push(bytes([PUSH_CODE_MSG_WAITING]))
 
         async def on_send_confirmed(crc):
             data = struct.pack(
@@ -330,7 +330,7 @@ class CompanionFrameServer:
                 struct.pack("<I", crc)[:4],
                 0,
             )
-            _write_push(data)
+            await _write_push(data)
 
         async def on_advert_received(contact):
             try:
@@ -354,10 +354,9 @@ class CompanionFrameServer:
                     if not isinstance(pubkey, bytes) or len(pubkey) < 32:
                         return
                 short, full = await asyncio.to_thread(_build_advert_push_frames, contact)
-                _write_push(short)
+                await _write_push(short)
                 if full is not None:
-                    await asyncio.sleep(0)
-                    _write_push(full)
+                    await _write_push(full)
             except Exception as e:
                 logger.exception("advert_received callback error: %s", e)
             try:
@@ -371,7 +370,7 @@ class CompanionFrameServer:
                 and isinstance(contact.public_key, bytes)
                 and len(contact.public_key) >= 32
             ):
-                _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + contact.public_key[:32])
+                await _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + contact.public_key[:32])
             try:
                 if contact is not None:
                     await self._persist_contact(contact)
@@ -402,7 +401,7 @@ class CompanionFrameServer:
                 "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
-            _write_push(bytes([PUSH_CODE_MSG_WAITING]))
+            await _write_push(bytes([PUSH_CODE_MSG_WAITING]))
 
         async def on_binary_response(tag_bytes, response_data, parsed=None, request_type=None):
             frame = (
@@ -410,7 +409,7 @@ class CompanionFrameServer:
                 + (tag_bytes if isinstance(tag_bytes, bytes) else struct.pack("<I", tag_bytes))
                 + response_data
             )
-            _write_push(frame)
+            await _write_push(frame)
 
         async def on_path_discovery_response(tag_bytes, contact_pubkey, out_path, in_path):
             pub_key_prefix = (
@@ -428,14 +427,14 @@ class CompanionFrameServer:
                 + bytes([len(in_path)])
                 + in_path
             )
-            _write_push(frame)
+            await _write_push(frame)
 
         async def on_contact_deleted(pub_key):
             if isinstance(pub_key, bytes) and len(pub_key) >= 32:
-                _write_push(bytes([PUSH_CODE_CONTACT_DELETED]) + pub_key[:32])
+                await _write_push(bytes([PUSH_CODE_CONTACT_DELETED]) + pub_key[:32])
 
         async def on_contacts_full():
-            _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
+            await _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
 
         async def on_raw_data_received(payload_bytes: bytes, snr: float, rssi: int) -> None:
             """Push PUSH_CODE_RAW_DATA (0x84): code, SNR byte, RSSI byte, 0xFF, payload."""
@@ -448,7 +447,7 @@ class CompanionFrameServer:
                 + bytes([0xFF])
                 + payload_bytes[:payload_len]
             )
-            _write_push(data)
+            await _write_push(data)
 
         self.bridge.on_message_received(on_message_received)
         self.bridge.on_channel_message_received(on_channel_message_received)
@@ -465,7 +464,7 @@ class CompanionFrameServer:
     # Public push methods (called directly by host application)
     # -------------------------------------------------------------------------
 
-    def push_trace_data(
+    async def push_trace_data(
         self,
         path_len: int,
         flags: int,
@@ -498,12 +497,25 @@ class CompanionFrameServer:
         try:
             frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
             self._client_writer.write(frame)
-            asyncio.create_task(self._drain_writer())
+            await self._drain_writer()
         except Exception as e:
             logger.debug("push_trace_data error: %s", e)
 
     def push_rx_raw(self, snr: float, rssi: int, raw: bytes) -> None:
-        """Push raw RX packet to client (PUSH_CODE_LOG_RX_DATA 0x88)."""
+        """Push raw RX packet to client (PUSH_CODE_LOG_RX_DATA 0x88).
+
+        Schedules the push on the event loop so it works when called from sync
+        context (e.g. repeater RX callback). For backpressure from async code,
+        use ``await self.push_rx_raw_async(snr, rssi, raw)`` instead.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._push_rx_raw_impl(snr, rssi, raw))
+        except RuntimeError:
+            pass  # no running loop
+
+    async def _push_rx_raw_impl(self, snr: float, rssi: int, raw: bytes) -> None:
+        """Implementation of push_rx_raw; write + drain for backpressure."""
         if not self._client_writer or self._client_writer.is_closing():
             return
         snr_byte = max(-128, min(127, int(round(snr * 4))))
@@ -517,9 +529,13 @@ class CompanionFrameServer:
         try:
             frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
             self._client_writer.write(frame)
-            asyncio.create_task(self._drain_writer())
+            await self._drain_writer()
         except Exception as e:
             logger.debug("Push RX raw error: %s", e)
+
+    async def push_rx_raw_async(self, snr: float, rssi: int, raw: bytes) -> None:
+        """Push raw RX packet to client with backpressure (await in async code)."""
+        await self._push_rx_raw_impl(snr, rssi, raw)
 
     async def push_control_data(
         self,
@@ -1186,7 +1202,7 @@ class CompanionFrameServer:
             snr_len = path_len >> path_sz
             path_snrs = bytes(snr_len)
             final_snr_byte = 0
-            self.push_trace_data(
+            await self.push_trace_data(
                 path_len,
                 flags,
                 tag,

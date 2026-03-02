@@ -625,14 +625,16 @@ The frame server sends unsolicited push frames to the companion app when events 
 The frame server exposes methods for the host application to push data to the connected companion app:
 
 ```python
-# Push trace data from the repeater
-server.push_trace_data(
+# Push trace data from the repeater (await for backpressure)
+await server.push_trace_data(
     path_len=3, flags=0, tag=42, auth_code=0,
     path_hashes=b"...", path_snrs=b"...", final_snr_byte=0
 )
 
-# Push raw RX packet for diagnostics logging
+# Push raw RX packet for diagnostics logging (sync: schedules send, works without await)
 server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"...")
+# Or from async code with backpressure:
+await server.push_rx_raw_async(snr=-5.0, rssi=-100, raw=b"...")
 
 # Push control data
 await server.push_control_data(

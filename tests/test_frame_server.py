@@ -1,7 +1,8 @@
 """Tests for CompanionFrameServer and advert push frame construction."""
 
+import asyncio
 import struct
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -155,3 +156,75 @@ async def test_cmd_send_raw_data_send_failure_writes_table_full():
     assert len(bridge.calls) == 1
     server._write_err.assert_called_once_with(ERR_CODE_TABLE_FULL)
     server._write_ok.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_trace_data_and_push_rx_raw_are_async_and_await_drain():
+    """push_trace_data and push_rx_raw_async await drain for backpressure."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    writer = Mock()
+    writer.write = Mock()
+    writer.is_closing = Mock(return_value=False)
+    writer.drain = AsyncMock(return_value=None)
+    server._client_writer = writer
+
+    await server.push_trace_data(
+        path_len=1,
+        flags=0,
+        tag=1,
+        auth_code=0,
+        path_hashes=b"\x00",
+        path_snrs=b"\x00",
+        final_snr_byte=0,
+    )
+    writer.write.assert_called_once()
+    writer.drain.assert_awaited_once()
+
+    writer.reset_mock()
+    writer.drain = AsyncMock(return_value=None)
+
+    await server.push_rx_raw_async(snr=-5.0, rssi=-100, raw=b"abc")
+    writer.write.assert_called_once()
+    writer.drain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_push_burst_serialized_by_drain():
+    """Multiple pushes in succession each await drain; no concurrent drain tasks."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    drain_calls = []
+
+    async def track_drain():
+        drain_calls.append(1)
+        await asyncio.sleep(0)
+
+    writer = Mock()
+    writer.write = Mock()
+    writer.is_closing = Mock(return_value=False)
+    writer.drain = AsyncMock(side_effect=track_drain)
+    server._client_writer = writer
+
+    for i in range(5):
+        await server.push_rx_raw_async(snr=0.0, rssi=-80, raw=bytes([i]))
+
+    assert len(drain_calls) == 5
+    assert writer.write.call_count == 5
+
+
+@pytest.mark.asyncio
+async def test_push_rx_raw_sync_schedules_push():
+    """Sync push_rx_raw() schedules push so callers without await still send."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    writer = Mock()
+    writer.write = Mock()
+    writer.is_closing = Mock(return_value=False)
+    writer.drain = AsyncMock(return_value=None)
+    server._client_writer = writer
+
+    server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"abc")  # sync call, no await
+    await asyncio.sleep(0)  # let the scheduled task run
+    writer.write.assert_called_once()
+    writer.drain.assert_awaited_once()
