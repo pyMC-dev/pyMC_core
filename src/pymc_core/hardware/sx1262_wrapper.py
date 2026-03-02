@@ -174,6 +174,9 @@ class SX1262Radio(LoRaRadio):
         self.NUM_NOISE_FLOOR_SAMPLES = 20
         self.SAMPLING_THRESHOLD = 10  # Only sample if RSSI < noise_floor + threshold
 
+        # Radio metrics
+        self.crc_error_count = 0
+
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
             f"power={tx_power}dBm, sf={spreading_factor}, "
@@ -389,7 +392,8 @@ class SX1262Radio(LoRaRadio):
 
                             # Check CRC error FIRST - if CRC failed, don't read FIFO
                             if irqStat & self.lora.IRQ_CRC_ERR:
-                                logger.warning("[RX] CRC error detected - discarding packet")
+                                self.crc_error_count += 1
+                                logger.warning("[RX] CRC error detected - discarding packet (total: %d)", self.crc_error_count)
                             elif irqStat & self.lora.IRQ_RX_DONE:
                                 (
                                     payloadLengthRx,
@@ -1348,6 +1352,7 @@ class SX1262Radio(LoRaRadio):
             "last_rssi": self.last_rssi,
             "last_snr": self.last_snr,
             "last_signal_rssi": self.last_signal_rssi,
+            "crc_error_count": self.crc_error_count,
         }
 
         if self._initialized and self.lora:
