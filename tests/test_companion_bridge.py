@@ -538,3 +538,86 @@ class TestCompanionBridgeDeduplication:
         assert msg is not None
         assert msg.text == "Hello"
         assert bridge.sync_next_message() is None
+
+
+# ---------------------------------------------------------------------------
+# Radio settings — read-only in bridge mode
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeRadioReadOnly:
+    """Bridge radio settings come from the host and cannot be changed by clients."""
+
+    RADIO_CONFIG = {
+        "frequency": 869618000,
+        "bandwidth": 62500,
+        "spreading_factor": 12,
+        "coding_rate": 7,
+        "tx_power": 22,
+    }
+
+    def _make_bridge(self, radio_config=None):
+        return CompanionBridge(
+            LocalIdentity(),
+            MockPacketInjector(),
+            radio_config=radio_config or self.RADIO_CONFIG,
+        )
+
+    def test_bridge_set_radio_params_is_noop(self):
+        bridge = self._make_bridge()
+        # Record original values
+        orig_freq = bridge.prefs.frequency_hz
+        orig_bw = bridge.prefs.bandwidth_hz
+        orig_sf = bridge.prefs.spreading_factor
+        orig_cr = bridge.prefs.coding_rate
+
+        # Attempt to change — should be a no-op
+        result = bridge.set_radio_params(915000000, 250000, 10, 5)
+        assert result is True
+        assert bridge.prefs.frequency_hz == orig_freq
+        assert bridge.prefs.bandwidth_hz == orig_bw
+        assert bridge.prefs.spreading_factor == orig_sf
+        assert bridge.prefs.coding_rate == orig_cr
+
+    def test_bridge_set_tx_power_is_noop(self):
+        bridge = self._make_bridge()
+        orig_power = bridge.prefs.tx_power_dbm
+
+        result = bridge.set_tx_power(5)
+        assert result is True
+        assert bridge.prefs.tx_power_dbm == orig_power
+
+    def test_bridge_radio_config_applied(self):
+        """Radio prefs reflect the radio_config dict passed at construction."""
+        bridge = self._make_bridge()
+        assert bridge.prefs.frequency_hz == 869618000
+        assert bridge.prefs.bandwidth_hz == 62500
+        assert bridge.prefs.spreading_factor == 12
+        assert bridge.prefs.coding_rate == 7
+        assert bridge.prefs.tx_power_dbm == 22
+
+    def test_bridge_radio_config_survives_load_prefs(self):
+        """Host radio config takes precedence over values restored by _load_prefs."""
+
+        class _StalePrefsLoader(CompanionBridge):
+            """Simulates a persistence layer that restores stale radio prefs."""
+
+            def _load_prefs(self):
+                self.prefs.frequency_hz = 111111
+                self.prefs.bandwidth_hz = 222222
+                self.prefs.spreading_factor = 6
+                self.prefs.coding_rate = 5
+                self.prefs.tx_power_dbm = -9
+
+        bridge = _StalePrefsLoader(
+            LocalIdentity(),
+            MockPacketInjector(),
+            radio_config=self.RADIO_CONFIG,
+        )
+
+        # Host config must override the stale values from _load_prefs
+        assert bridge.prefs.frequency_hz == 869618000
+        assert bridge.prefs.bandwidth_hz == 62500
+        assert bridge.prefs.spreading_factor == 12
+        assert bridge.prefs.coding_rate == 7
+        assert bridge.prefs.tx_power_dbm == 22
