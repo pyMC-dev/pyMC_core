@@ -198,17 +198,6 @@ class CompanionBridge(CompanionBase):
             radio_config=radio_config,
             initial_contacts=initial_contacts,
         )
-
-        # Radio settings are authoritative from the host — re-apply after
-        # _load_prefs() so persisted values never overwrite the host config.
-        rc = self._radio_config
-        if rc:
-            self.prefs.frequency_hz = rc.get("frequency", self.prefs.frequency_hz)
-            self.prefs.bandwidth_hz = rc.get("bandwidth", self.prefs.bandwidth_hz)
-            self.prefs.spreading_factor = rc.get("spreading_factor", self.prefs.spreading_factor)
-            self.prefs.coding_rate = rc.get("coding_rate", self.prefs.coding_rate)
-            self.prefs.tx_power_dbm = rc.get("power", rc.get("tx_power", self.prefs.tx_power_dbm))
-
         self._packet_injector = packet_injector
 
         async def _handler_send_packet(pkt: Packet, wait_for_ack: bool = False) -> bool:
@@ -341,20 +330,6 @@ class CompanionBridge(CompanionBase):
     @property
     def is_running(self) -> bool:
         return self._running
-
-    # -------------------------------------------------------------------------
-    # Radio settings — read-only in bridge mode
-    # -------------------------------------------------------------------------
-
-    def set_radio_params(self, freq_hz: int, bw_hz: int, sf: int, cr: int) -> bool:
-        """No-op: bridge radio belongs to the host."""
-        logger.debug("set_radio_params ignored in bridge mode")
-        return True
-
-    def set_tx_power(self, power_dbm: int) -> bool:
-        """No-op: bridge radio belongs to the host."""
-        logger.debug("set_tx_power ignored in bridge mode")
-        return True
 
     # -------------------------------------------------------------------------
     # Key Management
