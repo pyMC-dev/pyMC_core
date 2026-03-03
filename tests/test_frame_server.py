@@ -159,15 +159,11 @@ async def test_cmd_send_raw_data_send_failure_writes_table_full():
 
 
 @pytest.mark.asyncio
-async def test_push_trace_data_and_push_rx_raw_are_async_and_await_drain():
-    """push_trace_data and push_rx_raw_async await drain for backpressure."""
+async def test_push_trace_data_enqueues_frame():
+    """push_trace_data enqueues a correctly formatted trace frame."""
     bridge = _MockBridgeSendRawDirect()
     server = CompanionFrameServer(bridge, "hash", port=0)
-    writer = Mock()
-    writer.write = Mock()
-    writer.is_closing = Mock(return_value=False)
-    writer.drain = AsyncMock(return_value=None)
-    server._client_writer = writer
+    server._write_queue = asyncio.Queue(maxsize=256)
 
     await server.push_trace_data(
         path_len=1,
@@ -178,53 +174,76 @@ async def test_push_trace_data_and_push_rx_raw_are_async_and_await_drain():
         path_snrs=b"\x00",
         final_snr_byte=0,
     )
-    writer.write.assert_called_once()
-    writer.drain.assert_awaited_once()
-
-    writer.reset_mock()
-    writer.drain = AsyncMock(return_value=None)
-
-    await server.push_rx_raw_async(snr=-5.0, rssi=-100, raw=b"abc")
-    writer.write.assert_called_once()
-    writer.drain.assert_awaited_once()
+    assert not server._write_queue.empty()
+    frame = server._write_queue.get_nowait()
+    # Frame format: FRAME_OUTBOUND_PREFIX + 2-byte LE length + payload
+    assert frame[0] == 0x3E  # FRAME_OUTBOUND_PREFIX
+    _ = struct.unpack("<H", frame[1:3])[0]  # payload length
+    assert frame[3] == 0x89  # PUSH_CODE_TRACE_DATA
 
 
 @pytest.mark.asyncio
-async def test_push_burst_serialized_by_drain():
-    """Multiple pushes in succession each await drain; no concurrent drain tasks."""
+async def test_push_rx_raw_enqueues_frame():
+    """push_rx_raw enqueues a correctly formatted RX raw frame."""
     bridge = _MockBridgeSendRawDirect()
     server = CompanionFrameServer(bridge, "hash", port=0)
-    drain_calls = []
+    server._write_queue = asyncio.Queue(maxsize=256)
 
-    async def track_drain():
-        drain_calls.append(1)
-        await asyncio.sleep(0)
+    server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"abc")
+    assert not server._write_queue.empty()
+    frame = server._write_queue.get_nowait()
+    assert frame[0] == 0x3E  # FRAME_OUTBOUND_PREFIX
+    assert frame[3] == 0x88  # PUSH_CODE_LOG_RX_DATA
 
-    writer = Mock()
-    writer.write = Mock()
-    writer.is_closing = Mock(return_value=False)
-    writer.drain = AsyncMock(side_effect=track_drain)
-    server._client_writer = writer
+
+@pytest.mark.asyncio
+async def test_push_burst_all_enqueued():
+    """Multiple rapid pushes all land in the queue."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_queue = asyncio.Queue(maxsize=256)
 
     for i in range(5):
-        await server.push_rx_raw_async(snr=0.0, rssi=-80, raw=bytes([i]))
+        server.push_rx_raw(snr=0.0, rssi=-80, raw=bytes([i]))
+    assert server._write_queue.qsize() == 5
 
-    assert len(drain_calls) == 5
-    assert writer.write.call_count == 5
+
+def test_push_rx_raw_sync_enqueues_immediately():
+    """Sync push_rx_raw() enqueues immediately with no event loop scheduling."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_queue = asyncio.Queue(maxsize=256)
+
+    server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"abc")
+    assert server._write_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
-async def test_push_rx_raw_sync_schedules_push():
-    """Sync push_rx_raw() schedules push so callers without await still send."""
-    bridge = _MockBridgeSendRawDirect()
+async def test_writer_loop_writes_and_drains():
+    """_writer_loop writes enqueued frames and drains."""
+    bridge = Mock()
+    bridge.get_time = Mock(return_value=12345)
     server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_queue = asyncio.Queue(maxsize=256)
+
     writer = Mock()
     writer.write = Mock()
+    writer.drain = AsyncMock()
     writer.is_closing = Mock(return_value=False)
-    writer.drain = AsyncMock(return_value=None)
-    server._client_writer = writer
+    writer.close = Mock()
 
-    server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"abc")  # sync call, no await
-    await asyncio.sleep(0)  # let the scheduled task run
+    # Enqueue a frame only; schedule sentinel after a yield so the queue
+    # appears empty when _writer_loop checks after writing the frame,
+    # which triggers the drain path.
+    server._enqueue_frame(bytes([0x01]))
+
+    async def _send_sentinel():
+        await asyncio.sleep(0)  # Yield so writer loop processes frame first
+        server._write_queue.put_nowait(None)
+
+    asyncio.create_task(_send_sentinel())
+
+    await server._writer_loop(writer)
+
     writer.write.assert_called_once()
     writer.drain.assert_awaited_once()

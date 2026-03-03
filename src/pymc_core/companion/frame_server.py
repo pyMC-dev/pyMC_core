@@ -197,7 +197,8 @@ class CompanionFrameServer:
         self._server: Optional[asyncio.Server] = None
         self._client_writer: Optional[asyncio.StreamWriter] = None
         self._client_reader: Optional[asyncio.StreamReader] = None
-        self._write_lock: asyncio.Lock = asyncio.Lock()
+        self._write_queue: Optional[asyncio.Queue] = None
+        self._writer_task: Optional[asyncio.Task] = None
         self._app_target_ver = 0
 
         # Pre-compute padded device info bytes for _cmd_device_query. Version string
@@ -239,6 +240,20 @@ class CompanionFrameServer:
 
     async def stop(self) -> None:
         """Stop the TCP server and disconnect any client."""
+        # Signal writer task to stop and wait for it
+        if self._write_queue is not None:
+            try:
+                self._write_queue.put_nowait(None)  # Sentinel
+            except asyncio.QueueFull:
+                pass
+        if self._writer_task is not None:
+            self._writer_task.cancel()
+            try:
+                await self._writer_task
+            except asyncio.CancelledError:
+                pass
+            self._writer_task = None
+        self._write_queue = None
         if self._client_writer:
             try:
                 self._client_writer.close()
@@ -293,22 +308,9 @@ class CompanionFrameServer:
         # don't accumulate across reconnections.
         self.bridge.clear_push_callbacks()
 
-        async def _write_push(data: bytes) -> None:
-            async with self._write_lock:
-                if self._client_writer and not self._client_writer.is_closing():
-                    try:
-                        if len(data) > MAX_PAYLOAD_SIZE:
-                            logger.warning(
-                                "Push frame payload truncated from %s to %s",
-                                len(data),
-                                MAX_PAYLOAD_SIZE,
-                            )
-                            data = data[:MAX_PAYLOAD_SIZE]
-                        frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
-                        self._client_writer.write(frame)
-                        await self._drain_writer()
-                    except Exception as e:
-                        logger.warning("Push write error: %s", e)
+        def _write_push(data: bytes) -> None:
+            """Enqueue a push frame. Sync, non-blocking."""
+            self._enqueue_frame(data)
 
         async def on_message_received(
             sender_key, text, timestamp, txt_type, packet_hash=None, snr=None, rssi=None
@@ -326,16 +328,16 @@ class CompanionFrameServer:
                 "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
-            await _write_push(bytes([PUSH_CODE_MSG_WAITING]))
+            _write_push(bytes([PUSH_CODE_MSG_WAITING]))
 
-        async def on_send_confirmed(crc):
+        def on_send_confirmed(crc):
             data = struct.pack(
                 "<B4sI",
                 PUSH_CODE_SEND_CONFIRMED,
                 struct.pack("<I", crc)[:4],
                 0,
             )
-            await _write_push(data)
+            _write_push(data)
 
         async def on_advert_received(contact):
             try:
@@ -349,9 +351,9 @@ class CompanionFrameServer:
                 if not isinstance(pubkey, bytes) or len(pubkey) < 32:
                     return
                 short, full = await asyncio.to_thread(_build_advert_push_frames, contact)
-                await _write_push(short)
+                _write_push(short)
                 if full is not None:
-                    await _write_push(full)
+                    _write_push(full)
             except Exception as e:
                 logger.exception("advert_received callback error: %s", e)
             try:
@@ -370,7 +372,7 @@ class CompanionFrameServer:
                 return
             if not self.bridge.contacts.get_by_key(contact.public_key):
                 return
-            await _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + contact.public_key[:32])
+            _write_push(bytes([PUSH_CODE_PATH_UPDATED]) + contact.public_key[:32])
             try:
                 await self._persist_contact(contact)
             except Exception as e:
@@ -400,17 +402,17 @@ class CompanionFrameServer:
                 "rssi": rssi,
             }
             await self._persist_companion_message(msg_dict)
-            await _write_push(bytes([PUSH_CODE_MSG_WAITING]))
+            _write_push(bytes([PUSH_CODE_MSG_WAITING]))
 
-        async def on_binary_response(tag_bytes, response_data, parsed=None, request_type=None):
+        def on_binary_response(tag_bytes, response_data, parsed=None, request_type=None):
             frame = (
                 bytes([PUSH_CODE_BINARY_RESPONSE, 0])
                 + (tag_bytes if isinstance(tag_bytes, bytes) else struct.pack("<I", tag_bytes))
                 + response_data
             )
-            await _write_push(frame)
+            _write_push(frame)
 
-        async def on_path_discovery_response(tag_bytes, contact_pubkey, out_path, in_path):
+        def on_path_discovery_response(tag_bytes, contact_pubkey, out_path, in_path):
             pub_key_prefix = (
                 contact_pubkey
                 if isinstance(contact_pubkey, bytes)
@@ -426,16 +428,16 @@ class CompanionFrameServer:
                 + bytes([len(in_path)])
                 + in_path
             )
-            await _write_push(frame)
+            _write_push(frame)
 
-        async def on_contact_deleted(pub_key):
+        def on_contact_deleted(pub_key):
             if isinstance(pub_key, bytes) and len(pub_key) >= 32:
-                await _write_push(bytes([PUSH_CODE_CONTACT_DELETED]) + pub_key[:32])
+                _write_push(bytes([PUSH_CODE_CONTACT_DELETED]) + pub_key[:32])
 
-        async def on_contacts_full():
-            await _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
+        def on_contacts_full():
+            _write_push(bytes([PUSH_CODE_CONTACTS_FULL]))
 
-        async def on_raw_data_received(payload_bytes: bytes, snr: float, rssi: int) -> None:
+        def on_raw_data_received(payload_bytes: bytes, snr: float, rssi: int) -> None:
             """Push PUSH_CODE_RAW_DATA (0x84): code, SNR byte, RSSI byte, 0xFF, payload."""
             snr_byte = max(-128, min(127, int(round(snr * 4))))
             rssi_byte = max(-128, min(127, int(rssi)))
@@ -446,7 +448,7 @@ class CompanionFrameServer:
                 + bytes([0xFF])
                 + payload_bytes[:payload_len]
             )
-            await _write_push(data)
+            _write_push(data)
 
         self.bridge.on_message_received(on_message_received)
         self.bridge.on_channel_message_received(on_channel_message_received)
@@ -474,8 +476,12 @@ class CompanionFrameServer:
         final_snr_byte: int,
     ) -> None:
         """Push PUSH_CODE_TRACE_DATA (0x89) to client.  Matches firmware
-        ``onTraceRecv()`` frame format."""
-        if not self._client_writer or self._client_writer.is_closing():
+        ``onTraceRecv()`` frame format.
+
+        Kept as ``async def`` for backward-compatible call sites that
+        ``await`` it, but the body is synchronous (just enqueues).
+        """
+        if self._write_queue is None:
             return
         path_sz = flags & 0x03
         expected_snr_len = path_len >> path_sz
@@ -493,32 +499,14 @@ class CompanionFrameServer:
             + path_snrs
             + bytes([final_snr_byte & 0xFF])
         )
-        async with self._write_lock:
-            if not self._client_writer or self._client_writer.is_closing():
-                return
-            try:
-                frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
-                self._client_writer.write(frame)
-                await self._drain_writer()
-            except Exception as e:
-                logger.debug("push_trace_data error: %s", e)
+        self._enqueue_frame(data)
 
     def push_rx_raw(self, snr: float, rssi: int, raw: bytes) -> None:
         """Push raw RX packet to client (PUSH_CODE_LOG_RX_DATA 0x88).
 
-        Schedules the push on the event loop so it works when called from sync
-        context (e.g. repeater RX callback). For backpressure from async code,
-        use ``await self.push_rx_raw_async(snr, rssi, raw)`` instead.
+        Sync, non-blocking.  Safe to call from any context (async or sync).
         """
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._push_rx_raw_impl(snr, rssi, raw))
-        except RuntimeError:
-            pass  # no running loop
-
-    async def _push_rx_raw_impl(self, snr: float, rssi: int, raw: bytes) -> None:
-        """Implementation of push_rx_raw; write + drain for backpressure."""
-        if not self._client_writer or self._client_writer.is_closing():
+        if self._write_queue is None:
             return
         snr_byte = max(-128, min(127, int(round(snr * 4))))
         rssi_byte = max(-128, min(127, int(rssi)))
@@ -528,19 +516,11 @@ class CompanionFrameServer:
             rssi_byte += 256
         payload_len = min(len(raw), MAX_PAYLOAD_SIZE - 3)  # 3 = code + snr + rssi
         data = bytes([PUSH_CODE_LOG_RX_DATA, snr_byte & 0xFF, rssi_byte & 0xFF]) + raw[:payload_len]
-        async with self._write_lock:
-            if not self._client_writer or self._client_writer.is_closing():
-                return
-            try:
-                frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
-                self._client_writer.write(frame)
-                await self._drain_writer()
-            except Exception as e:
-                logger.debug("Push RX raw error: %s", e)
+        self._enqueue_frame(data)
 
     async def push_rx_raw_async(self, snr: float, rssi: int, raw: bytes) -> None:
-        """Push raw RX packet to client with backpressure (await in async code)."""
-        await self._push_rx_raw_impl(snr, rssi, raw)
+        """Push raw RX packet to client.  Async wrapper for backward compatibility."""
+        self.push_rx_raw(snr, rssi, raw)
 
     async def push_control_data(
         self,
@@ -550,8 +530,12 @@ class CompanionFrameServer:
         path_bytes: bytes,
         payload: bytes,
     ) -> None:
-        """Push CONTROL packet to client (PUSH_CODE_CONTROL_DATA 0x8E)."""
-        if not self._client_writer or self._client_writer.is_closing():
+        """Push CONTROL packet to client (PUSH_CODE_CONTROL_DATA 0x8E).
+
+        Kept as ``async def`` for backward-compatible call sites that
+        ``await`` it, but the body is synchronous (just enqueues).
+        """
+        if self._write_queue is None:
             logger.warning("Push control data skipped: no client connection")
             return
         # Discovery response (0x90): clear the no-op callback
@@ -580,50 +564,34 @@ class CompanionFrameServer:
             )
             + payload_slice
         )
-        async with self._write_lock:
-            if not self._client_writer or self._client_writer.is_closing():
-                return
-            try:
-                frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
-                self._client_writer.write(frame)
-                await self._drain_writer()
-                logger.debug(
-                    "Pushed control data 0x8E to client: payload_len=%s",
-                    len(payload_slice),
-                )
-            except Exception as e:
-                logger.warning("Push control data error: %s", e)
+        self._enqueue_frame(data)
+        logger.debug("Pushed control data 0x8E to client: payload_len=%s", len(payload_slice))
 
-    # -------------------------------------------------------------------------
-    # Frame I/O helpers
-    # -------------------------------------------------------------------------
+    def _enqueue_frame(self, data: bytes) -> None:
+        """Build an outbound frame and enqueue it for the writer task.
 
-    async def _drain_writer(self) -> bool:
-        """Drain the write buffer.  Returns *False* if the connection is lost."""
-        if self._client_writer:
-            try:
-                await self._client_writer.drain()
-                return True
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                logger.warning("Drain failed (connection lost): %s", e)
-                return False
-        return False
+        Sync, non-blocking.  On ``QueueFull`` the frame is dropped with a
+        warning — this provides natural backpressure shedding.
+        """
+        if self._write_queue is None:
+            return
+        if len(data) > MAX_PAYLOAD_SIZE:
+            logger.warning(
+                "Outbound frame payload truncated from %s to %s (MAX_FRAME_SIZE=%s)",
+                len(data),
+                MAX_PAYLOAD_SIZE,
+                MAX_FRAME_SIZE,
+            )
+            data = data[:MAX_PAYLOAD_SIZE]
+        frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
+        try:
+            self._write_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            logger.warning("Write queue full (%s); dropping frame", self._write_queue.maxsize)
 
     def _write_frame(self, data: bytes) -> None:
-        """Send a frame to the connected client (outbound format).
-        Payload is truncated to MAX_PAYLOAD_SIZE to match firmware MAX_FRAME_SIZE (172).
-        """
-        if self._client_writer and not self._client_writer.is_closing():
-            if len(data) > MAX_PAYLOAD_SIZE:
-                logger.warning(
-                    "Outbound frame payload truncated from %s to %s (MAX_FRAME_SIZE=%s)",
-                    len(data),
-                    MAX_PAYLOAD_SIZE,
-                    MAX_FRAME_SIZE,
-                )
-                data = data[:MAX_PAYLOAD_SIZE]
-            frame = bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(data)) + data
-            self._client_writer.write(frame)
+        """Alias for ``_enqueue_frame``; retained for subclass compatibility."""
+        self._enqueue_frame(data)
 
     def _write_ok(self) -> None:
         self._write_frame(bytes([RESP_CODE_OK]))
@@ -632,23 +600,70 @@ class CompanionFrameServer:
         self._write_frame(bytes([RESP_CODE_ERR, err_code]))
 
     # -------------------------------------------------------------------------
-    # Client handling
+    # Writer task
     # -------------------------------------------------------------------------
 
-    async def _heartbeat_loop(self) -> None:
-        """Send periodic ``RESP_CODE_CURR_TIME`` to keep the TCP connection alive."""
+    # Must exceed DEFAULT_MAX_CONTACTS (+2 for START/END) so that
+    # _cmd_get_contacts can enqueue the full contact dump without drops.
+    _WRITE_QUEUE_MAXSIZE = 2048
+    _DRAIN_BATCH = 10
+
+    async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
+        """Single writer task: pull frames from the queue, write to the
+        ``StreamWriter``, and drain periodically.
+
+        Integrates heartbeat via timeout on :pymethod:`asyncio.Queue.get` —
+        when no frames arrive within ``_heartbeat_interval`` seconds a
+        ``RESP_CODE_CURR_TIME`` heartbeat frame is generated automatically,
+        eliminating the need for a separate heartbeat task.
+
+        On any write/drain error the writer is closed, which causes the read
+        loop in :pymethod:`_handle_client` to receive EOF → clean disconnect.
+        """
+        frames_since_drain = 0
         try:
-            while self._client_writer and not self._client_writer.is_closing():
-                await asyncio.sleep(self._heartbeat_interval)
-                async with self._write_lock:
-                    if self._client_writer and not self._client_writer.is_closing():
-                        now = self.bridge.get_time()
-                        self._write_frame(bytes([RESP_CODE_CURR_TIME]) + struct.pack("<I", now))
-                        await self._drain_writer()
+            while True:
+                # Wait for a frame, or timeout for heartbeat ---------
+                try:
+                    frame = await asyncio.wait_for(
+                        self._write_queue.get(),
+                        timeout=self._heartbeat_interval,
+                    )
+                except asyncio.TimeoutError:
+                    # Heartbeat: send RESP_CODE_CURR_TIME
+                    now = self.bridge.get_time()
+                    hb_data = bytes([RESP_CODE_CURR_TIME]) + struct.pack("<I", now)
+                    frame = (
+                        bytes([FRAME_OUTBOUND_PREFIX]) + struct.pack("<H", len(hb_data)) + hb_data
+                    )
+
+                if frame is None:  # Sentinel → orderly shutdown
+                    break
+
+                # Write the frame ------------------------------------
+                writer.write(frame)
+                frames_since_drain += 1
+
+                # Drain when queue empties (natural batching) or every N frames
+                if self._write_queue.empty() or frames_since_drain >= self._DRAIN_BATCH:
+                    await writer.drain()
+                    frames_since_drain = 0
         except asyncio.CancelledError:
             pass
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.warning("Writer loop connection lost: %s", e)
         except Exception as e:
-            logger.debug("Heartbeat loop ended: %s", e)
+            logger.error("Writer loop error: %s", e, exc_info=True)
+        finally:
+            try:
+                if not writer.is_closing():
+                    writer.close()
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------------------
+    # Client handling
+    # -------------------------------------------------------------------------
 
     @staticmethod
     def _configure_socket(writer: asyncio.StreamWriter) -> None:
@@ -703,10 +718,11 @@ class CompanionFrameServer:
         self._client_reader = reader
         self._client_writer = writer
         self._configure_socket(writer)
+        self._write_queue = asyncio.Queue(maxsize=self._WRITE_QUEUE_MAXSIZE)
         self._setup_push_callbacks()
         logger.info("Companion client connected (port=%s)", self.port)
 
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._writer_task = asyncio.create_task(self._writer_loop(writer))
         disconnect_reason: Optional[str] = None
         try:
             while True:
@@ -730,11 +746,10 @@ class CompanionFrameServer:
                     disconnect_reason = "frame_too_long"
                     break
                 payload = await reader.readexactly(frame_len)
-                async with self._write_lock:
-                    await self._handle_cmd(payload)
-                    if not await self._drain_writer():
-                        disconnect_reason = "drain_failed"
-                        break
+                await self._handle_cmd(payload)
+                if self._writer_task.done():
+                    disconnect_reason = "writer_failed"
+                    break
         except asyncio.IncompleteReadError:
             disconnect_reason = "incomplete_read"
         except (ConnectionResetError, BrokenPipeError) as e:
@@ -743,11 +758,19 @@ class CompanionFrameServer:
             disconnect_reason = f"other: {type(e).__name__}: {e}"
             logger.error("Client handler error: %s", e, exc_info=True)
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+            if self._write_queue is not None:
+                try:
+                    self._write_queue.put_nowait(None)  # Sentinel
+                except asyncio.QueueFull:
+                    pass
+            if self._writer_task is not None:
+                self._writer_task.cancel()
+                try:
+                    await self._writer_task
+                except asyncio.CancelledError:
+                    pass
+                self._writer_task = None
+            self._write_queue = None
             if self._client_writer is writer:
                 self._client_writer = None
                 self._client_reader = None
@@ -965,8 +988,6 @@ class CompanionFrameServer:
         self._write_frame(bytes([RESP_CODE_CONTACTS_START]) + struct.pack("<I", len(contacts)))
         for i, c in enumerate(contacts):
             self._write_contact_frame(c)
-            if (i + 1) % 10 == 0:
-                await self._drain_writer()
         most_recent = max((c.lastmod for c in contacts), default=0)
         self._write_frame(bytes([RESP_CODE_END_OF_CONTACTS]) + struct.pack("<I", most_recent))
 
@@ -1127,7 +1148,6 @@ class CompanionFrameServer:
             return
         if ok:
             self._write_ok()
-            await self._drain_writer()
         else:
             self._write_err(ERR_CODE_TABLE_FULL)
 
@@ -1301,7 +1321,6 @@ class CompanionFrameServer:
             return
         pubkey = data[0:32]
         self._write_frame(bytes([RESP_CODE_SENT, 0]) + struct.pack("<II", 0, 15000))
-        await self._drain_writer()
         result = await self.bridge.send_status_request(pubkey)
         if not result.get("success"):
             self._write_frame(bytes([PUSH_CODE_STATUS_RESPONSE, 0]) + pubkey[:6])
@@ -1325,7 +1344,6 @@ class CompanionFrameServer:
         want_location = bool(flags & 0x02)
         want_environment = bool(flags & 0x04)
         self._write_frame(bytes([RESP_CODE_SENT, 0]) + struct.pack("<II", 0, 15000))
-        await self._drain_writer()
         result = await self.bridge.send_telemetry_request(
             pubkey,
             want_base=want_base,
@@ -1334,16 +1352,13 @@ class CompanionFrameServer:
         )
         if not result.get("success"):
             self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
-            await self._drain_writer()
             return
         telem_data = result.get("telemetry_data", {})
         raw_bytes = telem_data.get("raw_bytes", b"")
         if not raw_bytes:
             self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
-            await self._drain_writer()
             return
         self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6] + raw_bytes)
-        await self._drain_writer()
         logger.info("Telemetry push sent to client: %d bytes LPP", len(raw_bytes))
 
     async def _cmd_send_self_advert(self, data: bytes) -> None:
@@ -1367,7 +1382,6 @@ class CompanionFrameServer:
     async def _cmd_add_update_contact(self, data: bytes) -> None:
         if len(data) < 36:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
-            await self._drain_writer()
             return
         pubkey = data[0:32]
         adv_type = data[32]
@@ -1431,7 +1445,6 @@ class CompanionFrameServer:
                 + struct.pack("<I", lastmod)
             )
             self._write_frame(contact_frame)
-        await self._drain_writer()
         if ok:
             try:
                 await self._save_contacts()
@@ -1441,7 +1454,6 @@ class CompanionFrameServer:
     async def _cmd_remove_contact(self, data: bytes) -> None:
         if len(data) < 32:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
-            await self._drain_writer()
             return
         pubkey = data[:32]
         ok = self.bridge.remove_contact(pubkey)
@@ -1451,7 +1463,6 @@ class CompanionFrameServer:
             except Exception as e:
                 logger.warning("Save contacts after remove failed: %s", e)
         self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
-        await self._drain_writer()
 
     async def _cmd_reset_path(self, data: bytes) -> None:
         if len(data) < 32:
