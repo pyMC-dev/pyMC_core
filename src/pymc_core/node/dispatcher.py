@@ -190,6 +190,7 @@ class Dispatcher:
         self.text_message_handler = core.text_handler
         self.protocol_response_handler = core.protocol_response_handler
         self.login_response_handler = core.login_response_handler
+        self.group_text_handler = core.group_text_handler
         # Backward compat alias
         self.telemetry_response_handler = core.protocol_response_handler
 

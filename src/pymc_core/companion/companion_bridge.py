@@ -275,6 +275,12 @@ class CompanionBridge(CompanionBase):
     def _get_text_handler(self) -> Any:
         return self._text_handler_ref
 
+    def _sync_our_node_name_to_handlers(self) -> None:
+        """Sync current node name to group text handler for echo detection."""
+        handler = self._handlers.get(PAYLOAD_TYPE_GRP_TXT)
+        if handler is not None:
+            handler.set_our_node_name(self.prefs.node_name)
+
     # -------------------------------------------------------------------------
     # RX Entry Point
     # -------------------------------------------------------------------------

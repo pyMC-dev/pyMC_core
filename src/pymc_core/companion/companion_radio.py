@@ -173,6 +173,12 @@ class CompanionRadio(CompanionBase):
         super().set_advert_name(name)
         self.node.node_name = self.prefs.node_name
 
+    def _sync_our_node_name_to_handlers(self) -> None:
+        """Sync current node name to group text handler for echo detection."""
+        handler = getattr(self.node.dispatcher, "group_text_handler", None)
+        if handler is not None:
+            handler.set_our_node_name(self.prefs.node_name)
+
     def set_radio_params(self, freq_hz: int, bw_hz: int, sf: int, cr: int) -> bool:
         super().set_radio_params(freq_hz, bw_hz, sf, cr)
         if hasattr(self._radio, "configure_radio"):

@@ -259,9 +259,50 @@ class TestGroupTextHandler:
         self.send_packet_fn = AsyncMock()
         self.event_service = MockEventService()
         self.handler = GroupTextHandler(
-            self.local_identity, self.contacts, self.log_fn, self.send_packet_fn
+            self.local_identity,
+            self.contacts,
+            self.log_fn,
+            self.send_packet_fn,
+            channel_db=None,
+            event_service=self.event_service,
+            our_node_name="InitialName",
         )
-        # GroupTextHandler doesn't take event_service in constructor
+
+    def test_set_our_node_name_updates_stored_name(self):
+        """set_our_node_name updates the name used for echo detection."""
+        assert self.handler.our_node_name == "InitialName"
+        self.handler.set_our_node_name("NewName")
+        assert self.handler.our_node_name == "NewName"
+        self.handler.set_our_node_name(None)
+        assert self.handler.our_node_name is None
+
+    def test_is_own_message_uses_current_name_after_set_our_node_name(self):
+        """_is_own_message uses the current our_node_name after it is updated."""
+        self.handler.set_our_node_name("Howl 🏝️")
+        packet = Packet()
+        packet.decrypted = {"group_text_data": {"sender_name": "Howl 🏝️"}}
+        assert self.handler._is_own_message(packet) is True
+        packet.decrypted = {"group_text_data": {"sender_name": "Howl 🧱"}}
+        assert self.handler._is_own_message(packet) is False
+        # After updating name, old name no longer matches
+        self.handler.set_our_node_name("Howl 🧱")
+        assert self.handler._is_own_message(packet) is True
+
+    def test_is_own_message_false_when_sender_name_missing(self):
+        """_is_own_message returns False when packet has no sender_name in group_text_data."""
+        self.handler.set_our_node_name("Me")
+        packet = Packet()
+        packet.decrypted = {}
+        assert self.handler._is_own_message(packet) is False
+        packet.decrypted = {"group_text_data": {}}
+        assert self.handler._is_own_message(packet) is False
+
+    def test_is_own_message_false_when_no_match(self):
+        """_is_own_message returns False when sender name differs from our_node_name."""
+        self.handler.set_our_node_name("Me")
+        packet = Packet()
+        packet.decrypted = {"group_text_data": {"sender_name": "Other"}}
+        assert self.handler._is_own_message(packet) is False
 
     def test_payload_type(self):
         """Test group text handler payload type."""
@@ -273,7 +314,7 @@ class TestGroupTextHandler:
         assert self.handler.contacts == self.contacts
         assert self.handler.log == self.log_fn
         assert self.handler.send_packet == self.send_packet_fn
-        # GroupTextHandler doesn't store event_service
+        assert self.handler.our_node_name == "InitialName"
 
 
 # Login Response Handler Tests

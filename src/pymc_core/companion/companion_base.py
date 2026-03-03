@@ -334,6 +334,12 @@ class CompanionBase(ABC):
         """Set the node's advertised name (max 31 chars)."""
         self.prefs.node_name = name[:31]
         self._save_prefs()
+        self._sync_our_node_name_to_handlers()
+
+    def _sync_our_node_name_to_handlers(self) -> None:
+        """Sync node name to group text handler for echo detection.
+        No-op in base; override in Bridge/Radio."""
+        pass
 
     def set_advert_latlon(self, lat: float, lon: float) -> None:
         """Set the GPS coordinates included in advertisements."""

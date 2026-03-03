@@ -29,6 +29,10 @@ class GroupTextHandler(BaseHandler):
         self.event_service = event_service
         self.our_node_name = our_node_name  # Store our node name for echo detection
 
+    def set_our_node_name(self, name: str | None) -> None:
+        """Update the node name used for echo detection (e.g. after set_advert_name)."""
+        self.our_node_name = name
+
     def _get_channel_by_hash(self, channel_hash: int) -> Optional[dict]:
         """Find a channel by its hash (first byte of SHA256) from database.
 
