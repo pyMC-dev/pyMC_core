@@ -263,6 +263,15 @@ class KissModemWrapper(LoRaRadio):
         self.radio_config = radio_config or {}
         self.is_configured = False
 
+        # Radio configuration — instance attributes matching SX1262Wrapper
+        # convention.  Seeded from the config dict; updated by configure_radio().
+        self.frequency = self.radio_config.get("frequency", int(869.618 * 1000000))
+        self.tx_power = self.radio_config.get("power", self.radio_config.get("tx_power", 22))
+        self.spreading_factor = self.radio_config.get("spreading_factor", 8)
+        self.bandwidth = self.radio_config.get("bandwidth", int(62500))
+        self.coding_rate = self.radio_config.get("coding_rate", 8)
+        self.preamble_length = self.radio_config.get("preamble_length", 17)
+
         self.serial_conn: Optional[serial.Serial] = None
         self.is_connected = False
 
@@ -574,9 +583,18 @@ class KissModemWrapper(LoRaRadio):
         except Exception as e:
             logger.warning(f"Failed to query modem info: {e}")
 
-    def configure_radio(self) -> bool:
-        """
-        Configure radio parameters
+    def configure_radio(
+        self,
+        frequency: Optional[int] = None,
+        bandwidth: Optional[int] = None,
+        spreading_factor: Optional[int] = None,
+        coding_rate: Optional[int] = None,
+    ) -> bool:
+        """Configure radio parameters.
+
+        When called with keyword arguments (e.g. from CompanionRadio), those
+        values take precedence.  When called with no arguments the values are
+        read from ``self.radio_config`` (populated from config.yaml at init).
 
         Returns:
             True if configuration successful, False otherwise
@@ -586,12 +604,23 @@ class KissModemWrapper(LoRaRadio):
             return False
 
         try:
-            # Extract configuration parameters with defaults
-            # Support both "power" and "tx_power" for compatibility with different config styles
-            frequency_hz = self.radio_config.get("frequency", int(869.618 * 1000000))
-            bandwidth_hz = self.radio_config.get("bandwidth", int(62500))
-            sf = self.radio_config.get("spreading_factor", 8)
-            cr = self.radio_config.get("coding_rate", 8)
+            # Explicit kwargs take precedence, then radio_config dict, then defaults
+            frequency_hz = (
+                frequency
+                if frequency is not None
+                else self.radio_config.get("frequency", int(869.618 * 1000000))
+            )
+            bandwidth_hz = (
+                bandwidth
+                if bandwidth is not None
+                else self.radio_config.get("bandwidth", int(62500))
+            )
+            sf = (
+                spreading_factor
+                if spreading_factor is not None
+                else self.radio_config.get("spreading_factor", 8)
+            )
+            cr = coding_rate if coding_rate is not None else self.radio_config.get("coding_rate", 8)
             power = self.radio_config.get("power", self.radio_config.get("tx_power", 22))
 
             # Set radio parameters (frequency, bandwidth, SF, CR)
@@ -609,6 +638,13 @@ class KissModemWrapper(LoRaRadio):
                 return False
 
             # Note: Sync word is configured at firmware build time, not at runtime
+
+            # Sync instance attributes to match what was applied to hardware
+            self.frequency = frequency_hz
+            self.bandwidth = bandwidth_hz
+            self.spreading_factor = sf
+            self.coding_rate = cr
+            self.tx_power = power
 
             self.is_configured = True
             logger.info(
@@ -734,6 +770,27 @@ class KissModemWrapper(LoRaRadio):
                 "coding_rate": cr,
             }
         return None
+
+    def set_tx_power(self, power: int) -> bool:
+        """Set TX power in dBm.
+
+        Sends the command to the modem and updates the instance attribute
+        on success, matching the SX1262Wrapper interface.
+        """
+        if not self.is_connected:
+            logger.error("Cannot set TX power: not connected")
+            return False
+        try:
+            resp = self._send_command(CMD_SET_TX_POWER, bytes([power]))
+            if not resp or resp[0] == RESP_ERROR:
+                logger.error("Failed to set TX power")
+                return False
+            self.tx_power = power
+            logger.info(f"TX power set to {power} dBm")
+            return True
+        except Exception as e:
+            logger.error(f"Error setting TX power: {e}")
+            return False
 
     def get_tx_power(self) -> Optional[int]:
         """Get current TX power in dBm"""
