@@ -390,10 +390,38 @@ class SX1262Radio(LoRaRadio):
                             # Use the IRQ status stored by the interrupt handler
                             irqStat = self._last_irq_status
 
-                            # Check CRC error FIRST - if CRC failed, don't read FIFO
                             if irqStat & self.lora.IRQ_CRC_ERR:
                                 self.crc_error_count += 1
-                                logger.warning("[RX] CRC error detected - discarding packet (total: %d)", self.crc_error_count)
+                                
+                                try:
+
+                                    packet_rssi_dbm, snr_db, signal_rssi_dbm = self.lora.getSignalMetrics()
+                                    payloadLengthRx, rxStartBufferPointer = self.lora.getRxBufferStatus()
+                                    device_errors = self.lora.getDeviceErrors()
+                                    noise_floor = self.get_noise_floor()
+                                    raw_packet_hex = ""
+                                    if payloadLengthRx > 0 and payloadLengthRx < 256:
+                                        try:
+                                            buffer = self.lora.readBuffer(rxStartBufferPointer, payloadLengthRx)
+                                            raw_packet_hex = bytes(buffer).hex()
+                                        except Exception:
+                                            raw_packet_hex = "(read failed)"
+                                    
+                                    logger.warning(
+                                        "[RX] CRC error #%d - RSSI=%ddBm, SNR=%.1fdB, SignalRSSI=%ddBm, "
+                                        "Length=%d, NoiseFloor=%.1fdBm, DeviceErrors=0x%04X, IRQ=0x%04X, "
+                                        "RawData=%s",
+                                        self.crc_error_count,
+                                        int(packet_rssi_dbm), snr_db, int(signal_rssi_dbm),
+                                        payloadLengthRx, noise_floor, device_errors, irqStat,
+                                        raw_packet_hex[:64] + ("..." if len(raw_packet_hex) > 64 else "")
+                                    )
+                                except Exception as diag_err:
+                                    # Fallback if diagnostic collection fails
+                                    logger.warning(
+                                        "[RX] CRC error #%d - Unable to collect diagnostics: %s", 
+                                        self.crc_error_count, diag_err
+                                    )
                             elif irqStat & self.lora.IRQ_RX_DONE:
                                 (
                                     payloadLengthRx,
