@@ -414,7 +414,7 @@ class SX1262Radio(LoRaRadio):
                                         self.crc_error_count,
                                         int(packet_rssi_dbm), snr_db, int(signal_rssi_dbm),
                                         payloadLengthRx, noise_floor, device_errors, irqStat,
-                                        raw_packet_hex[:64] + ("..." if len(raw_packet_hex) > 64 else "")
+                                        raw_packet_hex
                                     )
                                 except Exception as diag_err:
                                     # Fallback if diagnostic collection fails
