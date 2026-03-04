@@ -1664,11 +1664,12 @@ class CompanionFrameServer:
         if len(data) < 10:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
-        freq = struct.unpack_from("<I", data, 0)[0]
+        # Frequency in kHz (match firmware self-info; client sends same encoding)
+        freq_khz = struct.unpack_from("<I", data, 0)[0]
         bw = struct.unpack_from("<I", data, 4)[0]
         sf = data[8]
         cr = data[9]
-        if not (300000 <= freq <= 2500000):
+        if not (100_000 <= freq_khz <= 2_500_000):
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         if not (7000 <= bw <= 500000):
@@ -1677,7 +1678,7 @@ class CompanionFrameServer:
         if not (5 <= sf <= 12) or not (5 <= cr <= 8):
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
-        self.bridge.set_radio_params(freq, bw, sf, cr)
+        self.bridge.set_radio_params(freq_khz * 1000, bw, sf, cr)
         self._write_ok()
 
     async def _cmd_set_tx_power(self, data: bytes) -> None:
@@ -1685,7 +1686,7 @@ class CompanionFrameServer:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         power = struct.unpack_from("<b", data, 0)[0]
-        if power < -9 or power > 20:
+        if power < -9 or power >= 30:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         self.bridge.set_tx_power(power)
