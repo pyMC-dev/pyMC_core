@@ -13,6 +13,7 @@ from ..protocol.constants import (  # Payload types
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
 )
+from ..protocol.packet_utils import PathUtils
 from ..protocol.transport_keys import calc_transport_code
 from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
 
@@ -394,6 +395,10 @@ class Dispatcher:
             self.packet_filter.blacklist(packet_hash)
             self._log(f"Blacklisted malformed packet (hash: {packet_hash})")
             return
+
+        # Packets at max hops for their path encoding must not be retransmitted
+        if PathUtils.is_path_at_max_hops(pkt.path_len):
+            pkt.mark_do_not_retransmit()
 
         ptype = pkt.header >> PH_TYPE_SHIFT
 

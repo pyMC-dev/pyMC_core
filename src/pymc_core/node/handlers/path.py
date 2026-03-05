@@ -77,7 +77,7 @@ class PathHandler:
             # Single summary line for PATH packet
             try:
                 payload = pkt.get_payload()
-                hop_count = pkt.path_len
+                hop_count = pkt.get_path_hash_count()
                 if len(payload) >= 2:
                     dest_hash = payload[0]
                     src_hash = payload[1]

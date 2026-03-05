@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Optional
 
 from ..protocol import CryptoUtils
+from ..protocol.packet_utils import PathUtils
 from .constants import (
     ADV_TYPE_CHAT,
     CMD_ADD_UPDATE_CONTACT,
@@ -61,6 +62,7 @@ from .constants import (
     CMD_SET_DEVICE_TIME,
     CMD_SET_FLOOD_SCOPE,
     CMD_SET_OTHER_PARAMS,
+    CMD_SET_PATH_HASH_MODE,
     CMD_SET_RADIO_PARAMS,
     CMD_SET_RADIO_TX_POWER,
     CMD_SET_TUNING_PARAMS,
@@ -888,6 +890,8 @@ class CompanionFrameServer:
                 await self._cmd_set_other_params(data)
             elif cmd == CMD_SEND_RAW_DATA:
                 await self._cmd_send_raw_data(data)
+            elif cmd == CMD_SET_PATH_HASH_MODE:
+                await self._cmd_set_path_hash_mode(data)
             else:
                 logger.warning(
                     "Companion unsupported cmd 0x%02x (%s) len=%s",
@@ -943,7 +947,7 @@ class CompanionFrameServer:
         # Layout must match MeshCore companion_radio MyMesh.cpp handleCmdFrame() CMD_DEVICE_QEURY:
         # [0]=RESP_CODE_DEVICE_INFO, [1]=FIRMWARE_VER_CODE, [2]=MAX_CONTACTS/2,
         # [3]=MAX_GROUP_CHANNELS, [4..7]=ble_pin, [8..19]=build_date(12), [20..59]=manufacturer(40),
-        # [60..79]=version(20), [80]=client_repeat.
+        # [60..79]=version(20), [80]=client_repeat, [81]=path_hash_mode (v10+).
         if len(data) >= 1:
             self._app_target_ver = data[0]
         firmware_ver = FIRMWARE_VER_CODE
@@ -955,8 +959,10 @@ class CompanionFrameServer:
         try:
             prefs = self.bridge.get_self_info()
             client_repeat = getattr(prefs, "client_repeat", 0) & 0xFF
+            path_hash_mode = getattr(prefs, "path_hash_mode", 0) & 0xFF
         except Exception:
             client_repeat = 0
+            path_hash_mode = 0
         frame = (
             bytes(
                 [
@@ -970,7 +976,7 @@ class CompanionFrameServer:
             + self._build_date_bytes
             + self._model_bytes
             + self._version_bytes
-            + bytes([client_repeat & 0xFF])
+            + bytes([client_repeat & 0xFF, path_hash_mode & 0xFF])
         )
         version_str = self._version_bytes.split(b"\x00")[0].decode("utf-8", errors="replace")
         logger.info(
@@ -1564,13 +1570,14 @@ class CompanionFrameServer:
         path_bytes = getattr(found, "path", None) or b""
         if not isinstance(path_bytes, bytes):
             path_bytes = bytes(path_bytes)
-        path_len = min(len(path_bytes), MAX_PATH_SIZE)
+        path_len_encoded = getattr(found, "path_len", 0) or 0
+        path_byte_len = PathUtils.get_path_byte_len(path_len_encoded)
         recv_ts = getattr(found, "recv_timestamp", 0)
         frame = (
             bytes([RESP_CODE_ADVERT_PATH])
             + struct.pack("<I", recv_ts)
-            + bytes([path_len])
-            + path_bytes[:path_len]
+            + bytes([path_len_encoded])
+            + path_bytes[:path_byte_len]
         )
         self._write_frame(frame)
 
@@ -1791,19 +1798,41 @@ class CompanionFrameServer:
         self._write_ok()
 
     async def _cmd_send_raw_data(self, data: bytes) -> None:
-        """Handle CMD_SEND_RAW_DATA (25). Format: [path_len][path][payload] (min 4-byte payload)."""
+        """Handle CMD_SEND_RAW_DATA (25).
+        Format: [path_len_encoded][path][payload] (min 4-byte payload)."""
         if len(data) < 6:
             self._write_err(ERR_CODE_UNSUPPORTED_CMD)
             return
         path_len_byte = data[0]
-        path_len = path_len_byte - 256 if path_len_byte >= 128 else path_len_byte
-        if path_len < 0 or path_len > MAX_PATH_SIZE or 1 + path_len + 4 > len(data):
+        if not PathUtils.is_valid_path_len(path_len_byte):
             self._write_err(ERR_CODE_UNSUPPORTED_CMD)
             return
-        path = data[1 : 1 + path_len]
-        payload = data[1 + path_len :]
-        result = await self.bridge.send_raw_data_direct(path, payload)
+        path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+        if 1 + path_byte_len + 4 > len(data):
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
+        path = data[1 : 1 + path_byte_len]
+        payload = data[1 + path_byte_len :]
+        result = await self.bridge.send_raw_data_direct(
+            path, payload, path_len_encoded=path_len_byte
+        )
         if result.success:
             self._write_ok()
         else:
             self._write_err(ERR_CODE_TABLE_FULL)
+
+    async def _cmd_set_path_hash_mode(self, data: bytes) -> None:
+        """Handle CMD_SET_PATH_HASH_MODE (61). Format: [subtype(0), mode(0-2)].
+
+        Mirrors MyMesh.cpp:1320-1327.  Subtype byte must be 0; mode values
+        0, 1, 2 select 1-byte, 2-byte, 3-byte path hashes respectively.
+        """
+        if len(data) < 2 or data[0] != 0:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        mode = data[1]
+        if mode >= 3:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        self.bridge.set_path_hash_mode(mode)
+        self._write_ok()

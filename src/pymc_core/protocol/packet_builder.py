@@ -35,7 +35,13 @@ from .constants import (
     TELEM_PERM_LOCATION,
 )
 from .identity import Identity, LocalIdentity
-from .packet_utils import PacketDataUtils, PacketHeaderUtils, PacketValidationUtils, RouteTypeUtils
+from .packet_utils import (
+    PacketDataUtils,
+    PacketHeaderUtils,
+    PacketValidationUtils,
+    PathUtils,
+    RouteTypeUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -483,9 +489,10 @@ class PacketBuilder:
         if route_type == "direct" and out_path_len > 0:
             out_path = getattr(contact, "out_path", b"")
             if out_path:
-                path_bytes = out_path[:MAX_PATH_SIZE]
-                pkt.path = bytearray(path_bytes)
-                pkt.path_len = len(pkt.path)
+                pkt.set_path(
+                    out_path[:MAX_PATH_SIZE],
+                    out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
+                )
 
         return pkt
 
@@ -773,8 +780,23 @@ class PacketBuilder:
                     f"Path length {len(routing_path)} exceeds maximum {MAX_PATH_SIZE}, truncating"
                 )
                 routing_path = routing_path[:MAX_PATH_SIZE]
-            pkt.path = bytearray(routing_path)
-            pkt.path_len = len(pkt.path)
+            # Preserve encoded path_len from contact when using its stored path
+            contact_path_len = getattr(contact, "out_path_len", -1) if contact else -1
+            if (
+                out_path is None
+                and contact_path_len >= 0
+                and PathUtils.is_valid_path_len(contact_path_len)
+            ):
+                pkt.set_path(bytearray(routing_path), contact_path_len)
+            else:
+                # path_len encodes hop count in 6 bits (0-63); 64 would encode as 0
+                if len(routing_path) == 64:
+                    logger.warning(
+                        "Path length 64 exceeds encodable hop count 63 (1-byte hashes), "
+                        "truncating to 63 bytes"
+                    )
+                    routing_path = routing_path[:63]
+                pkt.set_path(bytearray(routing_path))
         else:
             pkt.path_len, pkt.path = 0, bytearray()
 
@@ -853,9 +875,10 @@ class PacketBuilder:
         packet = PacketBuilder._create_packet(header, payload)
 
         if route_type == "direct" and len(out_path) > 0:
-            path_bytes = out_path[:MAX_PATH_SIZE]
-            packet.path = bytearray(path_bytes)
-            packet.path_len = len(packet.path)
+            packet.set_path(
+                out_path[:MAX_PATH_SIZE],
+                out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
+            )
 
         return packet, timestamp
 

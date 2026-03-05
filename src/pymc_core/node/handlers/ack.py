@@ -3,6 +3,7 @@ from typing import Awaitable, Callable, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_ACK
+from ...protocol.packet_utils import PathUtils
 from .base import BaseHandler
 
 
@@ -141,14 +142,15 @@ class AckHandler(BaseHandler):
             return None
 
         path_length = payload[0]
+        path_byte_len = PathUtils.get_path_byte_len(path_length)
 
-        # Check if we have enough data for: path_length + path + extra_type + extra
-        min_required = 1 + path_length + 1 + 4  # +4 for ACK CRC
+        # Check if we have enough data for: path_byte_len + path + extra_type + extra
+        min_required = 1 + path_byte_len + 1 + 4  # +4 for ACK CRC
         if len(payload) < min_required:
             return None
 
         # Extract extra section
-        extra_start = 1 + path_length
+        extra_start = 1 + path_byte_len
         extra_type = payload[extra_start]
         extra_payload = payload[extra_start + 1 :]
 

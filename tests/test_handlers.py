@@ -444,6 +444,59 @@ class TestProtocolResponseHandler:
         assert callback_calls[0][1] == path_len_byte
         assert callback_calls[0][2] == path_bytes
 
+    @pytest.mark.asyncio
+    async def test_contact_path_updated_with_2byte_hashes(self):
+        """PATH with 2-byte hashes decrypts and updates contact path correctly."""
+        from pymc_core.companion.contact_store import ContactStore
+        from pymc_core.companion.models import Contact
+        from pymc_core.protocol.packet_utils import PathUtils
+
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        contacts = ContactStore(5)
+        contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+        handler.set_binary_response_callback(lambda *a, **k: None)
+
+        # 2 hops × 2-byte hashes = 4 bytes of path data
+        path_len_byte = PathUtils.encode_path_len(2, 2)  # 0x42
+        path_bytes = bytes([0x01, 0x02, 0x03, 0x04])
+        extra_type = PAYLOAD_TYPE_RESPONSE
+        extra = bytes([0, 0, 0, 0, 0x00])
+        plaintext = bytes([path_len_byte]) + path_bytes + bytes([extra_type]) + extra
+
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+        payload = bytes([our_hash, src_hash]) + encrypted
+
+        pkt = Packet()
+        pkt.header = (0 << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        callback_calls = []
+
+        async def on_path_updated(pub: bytes, path_len: int, path_bytes_arg: bytes) -> None:
+            callback_calls.append((pub, path_len, path_bytes_arg))
+
+        handler.set_contact_path_updated_callback(on_path_updated)
+
+        await handler(pkt)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0][0] == peer_pubkey
+        assert callback_calls[0][1] == path_len_byte  # encoded byte, not raw count
+        assert callback_calls[0][2] == path_bytes  # all 4 bytes of path data
+
 
 class TestTraceHandler:
     def setup_method(self):
