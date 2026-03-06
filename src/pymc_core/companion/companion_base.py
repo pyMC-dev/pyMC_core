@@ -338,10 +338,15 @@ class CompanionBase(ABC):
         self._save_prefs()
         self._sync_our_node_name_to_handlers()
 
+    def _get_group_text_handler(self) -> Optional[Any]:
+        """Return the group text handler for name sync, or None. Override in Radio/Bridge."""
+        return None
+
     def _sync_our_node_name_to_handlers(self) -> None:
-        """Sync node name to group text handler for echo detection.
-        No-op in base; override in Bridge/Radio."""
-        pass
+        """Sync node name to group text handler for echo detection."""
+        handler = self._get_group_text_handler()
+        if handler is not None:
+            handler.set_our_node_name(self.prefs.node_name)
 
     def set_advert_latlon(self, lat: float, lon: float) -> None:
         """Set the GPS coordinates included in advertisements."""

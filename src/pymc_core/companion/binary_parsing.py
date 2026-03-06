@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from .constants import BinaryReqType
+
+logger = logging.getLogger(__name__)
 
 
 def parse_binary_response(
@@ -74,7 +77,7 @@ def _parse_telemetry(data: bytes) -> dict:
             {"channel": d.channel, "type": d.type_id, "value": d.data} for d in frame.data
         ]
     except Exception:
-        pass
+        logger.debug("Optional LPP parse failed for telemetry", exc_info=True)
     return out
 
 
@@ -87,7 +90,7 @@ def _parse_mma(data: bytes) -> dict:
         frame = LppFrame.from_bytes(data)
         out["mma"] = [{"channel": d.channel, "type": d.type_id, "data": d.data} for d in frame.data]
     except Exception:
-        pass
+        logger.debug("Optional LPP parse failed for MMA", exc_info=True)
     return out
 
 
@@ -104,6 +107,7 @@ def _parse_owner_info(data: bytes) -> dict:
             "raw_text": text,
         }
     except Exception:
+        logger.debug("Owner info parse failed, returning fallback", exc_info=True)
         return {"raw_hex": data.hex(), "request_type": BinaryReqType.OWNER_INFO}
 
 

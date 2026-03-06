@@ -146,8 +146,10 @@ class PathUtils:
     def is_valid_path_len(path_len_byte: int) -> bool:
         """Validate an encoded path_len byte.
 
-        Returns False for hash_size == 4 (reserved) or if the total
-        path bytes would exceed MAX_PATH_SIZE.
+        Path length in bytes must never exceed MAX_PATH_SIZE (64): at most 64
+        one-byte hops, 32 two-byte hops, or 21 three-byte hops. Returns False
+        for hash_size == 4 (reserved) or if the total path bytes would exceed
+        MAX_PATH_SIZE.
         """
         hash_size = (path_len_byte >> PATH_HASH_SIZE_SHIFT) + 1
         if hash_size > 3:

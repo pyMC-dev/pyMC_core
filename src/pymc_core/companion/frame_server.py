@@ -212,6 +212,55 @@ class CompanionFrameServer:
         self._model_bytes = (device_model.encode("utf-8") + b"\x00")[:40].ljust(40, b"\x00")
         self._version_bytes = (device_version.encode("utf-8") + b"\x00")[:20].ljust(20, b"\x00")
 
+        # Command dispatch registry: cmd byte -> async handler(data)
+        self._cmd_handlers = {
+            CMD_APP_START: self._cmd_app_start,
+            CMD_DEVICE_QUERY: self._cmd_device_query,
+            CMD_GET_CONTACTS: self._cmd_get_contacts,
+            CMD_GET_CONTACT_BY_KEY: self._cmd_get_contact_by_key,
+            CMD_SEND_TXT_MSG: self._cmd_send_txt_msg,
+            CMD_SEND_CHANNEL_TXT_MSG: self._cmd_send_channel_txt_msg,
+            CMD_SYNC_NEXT_MESSAGE: self._cmd_sync_next_message,
+            CMD_SEND_LOGIN: self._cmd_send_login,
+            CMD_SEND_STATUS_REQ: self._cmd_send_status_req,
+            CMD_SEND_TELEMETRY_REQ: self._cmd_send_telemetry_req,
+            CMD_SEND_SELF_ADVERT: self._cmd_send_self_advert,
+            CMD_SET_ADVERT_NAME: self._cmd_set_advert_name,
+            CMD_SET_ADVERT_LATLON: self._cmd_set_advert_latlon,
+            CMD_ADD_UPDATE_CONTACT: self._cmd_add_update_contact,
+            CMD_REMOVE_CONTACT: self._cmd_remove_contact,
+            CMD_RESET_PATH: self._cmd_reset_path,
+            CMD_GET_BATT_AND_STORAGE: self._cmd_get_batt_and_storage,
+            CMD_GET_STATS: self._cmd_get_stats,
+            CMD_GET_ADVERT_PATH: self._cmd_get_advert_path,
+            CMD_IMPORT_CONTACT: self._cmd_import_contact,
+            CMD_GET_CHANNEL: self._cmd_get_channel,
+            CMD_SET_CHANNEL: self._cmd_set_channel,
+            CMD_SEND_BINARY_REQ: self._cmd_send_binary_req,
+            CMD_SEND_ANON_REQ: self._cmd_send_anon_req,
+            CMD_SEND_PATH_DISCOVERY_REQ: self._cmd_send_path_discovery_req,
+            CMD_SEND_CONTROL_DATA: self._cmd_send_control_data,
+            CMD_SEND_TRACE_PATH: self._cmd_send_trace_path,
+            CMD_SET_FLOOD_SCOPE: self._cmd_set_flood_scope,
+            CMD_GET_DEVICE_TIME: self._cmd_get_device_time,
+            CMD_SET_DEVICE_TIME: self._cmd_set_device_time,
+            CMD_SET_RADIO_PARAMS: self._cmd_set_radio_params,
+            CMD_SET_RADIO_TX_POWER: self._cmd_set_tx_power,
+            CMD_SHARE_CONTACT: self._cmd_share_contact,
+            CMD_EXPORT_CONTACT: self._cmd_export_contact,
+            CMD_EXPORT_PRIVATE_KEY: self._cmd_export_private_key,
+            CMD_IMPORT_PRIVATE_KEY: self._cmd_import_private_key,
+            CMD_SET_TUNING_PARAMS: self._cmd_set_tuning_params,
+            CMD_LOGOUT: self._cmd_logout,
+            CMD_GET_CUSTOM_VARS: self._cmd_get_custom_vars,
+            CMD_SET_CUSTOM_VAR: self._cmd_set_custom_var,
+            CMD_SET_AUTOADD_CONFIG: self._cmd_set_autoadd_config,
+            CMD_GET_AUTOADD_CONFIG: self._cmd_get_autoadd_config,
+            CMD_SET_OTHER_PARAMS: self._cmd_set_other_params,
+            CMD_SEND_RAW_DATA: self._cmd_send_raw_data,
+            CMD_SET_PATH_HASH_MODE: self._cmd_set_path_hash_mode,
+        }
+
     # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
@@ -802,96 +851,9 @@ class CompanionFrameServer:
             )
 
         try:
-            if cmd == CMD_APP_START:
-                await self._cmd_app_start(data)
-            elif cmd == CMD_DEVICE_QUERY:
-                await self._cmd_device_query(data)
-            elif cmd == CMD_GET_CONTACTS:
-                await self._cmd_get_contacts(data)
-            elif cmd == CMD_GET_CONTACT_BY_KEY:
-                await self._cmd_get_contact_by_key(data)
-            elif cmd == CMD_SEND_TXT_MSG:
-                await self._cmd_send_txt_msg(data)
-            elif cmd == CMD_SEND_CHANNEL_TXT_MSG:
-                await self._cmd_send_channel_txt_msg(data)
-            elif cmd == CMD_SYNC_NEXT_MESSAGE:
-                await self._cmd_sync_next_message(data)
-            elif cmd == CMD_SEND_LOGIN:
-                await self._cmd_send_login(data)
-            elif cmd == CMD_SEND_STATUS_REQ:
-                await self._cmd_send_status_req(data)
-            elif cmd == CMD_SEND_TELEMETRY_REQ:
-                await self._cmd_send_telemetry_req(data)
-            elif cmd == CMD_SEND_SELF_ADVERT:
-                await self._cmd_send_self_advert(data)
-            elif cmd == CMD_SET_ADVERT_NAME:
-                await self._cmd_set_advert_name(data)
-            elif cmd == CMD_SET_ADVERT_LATLON:
-                await self._cmd_set_advert_latlon(data)
-            elif cmd == CMD_ADD_UPDATE_CONTACT:
-                await self._cmd_add_update_contact(data)
-            elif cmd == CMD_REMOVE_CONTACT:
-                await self._cmd_remove_contact(data)
-            elif cmd == CMD_RESET_PATH:
-                await self._cmd_reset_path(data)
-            elif cmd == CMD_GET_BATT_AND_STORAGE:
-                await self._cmd_get_batt_and_storage(data)
-            elif cmd == CMD_GET_STATS:
-                await self._cmd_get_stats(data)
-            elif cmd == CMD_GET_ADVERT_PATH:
-                await self._cmd_get_advert_path(data)
-            elif cmd == CMD_IMPORT_CONTACT:
-                await self._cmd_import_contact(data)
-            elif cmd == CMD_GET_CHANNEL:
-                await self._cmd_get_channel(data)
-            elif cmd == CMD_SET_CHANNEL:
-                await self._cmd_set_channel(data)
-            elif cmd == CMD_SEND_BINARY_REQ:
-                await self._cmd_send_binary_req(data)
-            elif cmd == CMD_SEND_ANON_REQ:
-                await self._cmd_send_anon_req(data)
-            elif cmd == CMD_SEND_PATH_DISCOVERY_REQ:
-                await self._cmd_send_path_discovery_req(data)
-            elif cmd == CMD_SEND_CONTROL_DATA:
-                await self._cmd_send_control_data(data)
-            elif cmd == CMD_SEND_TRACE_PATH:
-                await self._cmd_send_trace_path(data)
-            elif cmd == CMD_SET_FLOOD_SCOPE:
-                await self._cmd_set_flood_scope(data)
-            elif cmd == CMD_GET_DEVICE_TIME:
-                await self._cmd_get_device_time(data)
-            elif cmd == CMD_SET_DEVICE_TIME:
-                await self._cmd_set_device_time(data)
-            elif cmd == CMD_SET_RADIO_PARAMS:
-                await self._cmd_set_radio_params(data)
-            elif cmd == CMD_SET_RADIO_TX_POWER:
-                await self._cmd_set_tx_power(data)
-            elif cmd == CMD_SHARE_CONTACT:
-                await self._cmd_share_contact(data)
-            elif cmd == CMD_EXPORT_CONTACT:
-                await self._cmd_export_contact(data)
-            elif cmd == CMD_EXPORT_PRIVATE_KEY:
-                await self._cmd_export_private_key(data)
-            elif cmd == CMD_IMPORT_PRIVATE_KEY:
-                await self._cmd_import_private_key(data)
-            elif cmd == CMD_SET_TUNING_PARAMS:
-                await self._cmd_set_tuning_params(data)
-            elif cmd == CMD_LOGOUT:
-                await self._cmd_logout(data)
-            elif cmd == CMD_GET_CUSTOM_VARS:
-                await self._cmd_get_custom_vars(data)
-            elif cmd == CMD_SET_CUSTOM_VAR:
-                await self._cmd_set_custom_var(data)
-            elif cmd == CMD_SET_AUTOADD_CONFIG:
-                await self._cmd_set_autoadd_config(data)
-            elif cmd == CMD_GET_AUTOADD_CONFIG:
-                await self._cmd_get_autoadd_config(data)
-            elif cmd == CMD_SET_OTHER_PARAMS:
-                await self._cmd_set_other_params(data)
-            elif cmd == CMD_SEND_RAW_DATA:
-                await self._cmd_send_raw_data(data)
-            elif cmd == CMD_SET_PATH_HASH_MODE:
-                await self._cmd_set_path_hash_mode(data)
+            handler = self._cmd_handlers.get(cmd)
+            if handler is not None:
+                await handler(data)
             else:
                 logger.warning(
                     "Companion unsupported cmd 0x%02x (%s) len=%s",
@@ -944,7 +906,7 @@ class CompanionFrameServer:
         self._write_frame(frame)
 
     async def _cmd_device_query(self, data: bytes) -> None:
-        # Layout must match MeshCore companion_radio MyMesh.cpp handleCmdFrame() CMD_DEVICE_QEURY:
+        # Layout must match MeshCore companion_radio MyMesh.cpp handleCmdFrame() CMD_DEVICE_QUEURY:
         # [0]=RESP_CODE_DEVICE_INFO, [1]=FIRMWARE_VER_CODE, [2]=MAX_CONTACTS/2,
         # [3]=MAX_GROUP_CHANNELS, [4..7]=ble_pin, [8..19]=build_date(12), [20..59]=manufacturer(40),
         # [60..79]=version(20), [80]=client_repeat, [81]=path_hash_mode (v10+).

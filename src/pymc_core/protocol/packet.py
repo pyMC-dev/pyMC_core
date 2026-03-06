@@ -405,7 +405,10 @@ class Packet:
         self.path_len = data[idx]
         idx += 1
         if not PathUtils.is_valid_path_len(self.path_len):
-            raise ValueError(f"invalid path_len encoding: 0x{self.path_len:02X}")
+            hash_size = PathUtils.get_path_hash_size(self.path_len)
+            if hash_size > 3:
+                raise ValueError(f"invalid path_len encoding: 0x{self.path_len:02X}")
+            raise ValueError("path_len too large")
 
         path_byte_len = self.get_path_byte_len()
         self._check_bounds(idx, path_byte_len, data_len, "truncated path")

@@ -21,12 +21,10 @@ from pymc_core.protocol.constants import (
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
     MAX_SUPPORTED_PAYLOAD_VERSION,
-    PATH_HASH_SIZE,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
-    PAYLOAD_TYPE_TXT_MSG,
     PAYLOAD_TYPE_TRACE,
-    PH_ROUTE_MASK,
+    PAYLOAD_TYPE_TXT_MSG,
     PH_TYPE_SHIFT,
     PH_VER_SHIFT,
     ROUTE_TYPE_DIRECT,
@@ -34,16 +32,12 @@ from pymc_core.protocol.constants import (
     ROUTE_TYPE_TRANSPORT_DIRECT,
     ROUTE_TYPE_TRANSPORT_FLOOD,
 )
-from pymc_core.protocol.packet_utils import (
-    PacketHashingUtils,
-    PacketHeaderUtils,
-    PacketValidationUtils,
-)
-
+from pymc_core.protocol.packet_utils import PacketHashingUtils, PacketValidationUtils
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_header(payload_type: int, route_type: int, version: int = 0) -> int:
     """Build a header byte from components (mirrors PacketHeaderUtils.make_header)."""
@@ -93,6 +87,7 @@ def _build_packet(
 # ===================================================================
 # 1. Basic hash correctness — matches reference C++ implementation
 # ===================================================================
+
 
 class TestPacketHashBasic:
     """Verify hash output matches the C++ reference for various packet types."""
@@ -177,6 +172,7 @@ class TestPacketHashBasic:
 # 2. Hash excludes header, path, route type, transport codes
 # ===================================================================
 
+
 class TestPacketHashExclusions:
     """Verify that fields NOT in the C++ hash don't affect the Python hash."""
 
@@ -193,7 +189,9 @@ class TestPacketHashExclusions:
         payload = b"path_test_data"
 
         pkt_no_path = _build_packet(PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD, payload)
-        pkt_with_path = _build_packet(PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD, payload, path=b"\xAA\xBB\xCC")
+        pkt_with_path = _build_packet(
+            PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD, payload, path=b"\xAA\xBB\xCC"
+        )
 
         assert pkt_no_path.calculate_packet_hash() == pkt_with_path.calculate_packet_hash()
 
@@ -238,6 +236,7 @@ class TestPacketHashExclusions:
 # ===================================================================
 # 3. payload_len truncation — hash must use only payload[:payload_len]
 # ===================================================================
+
 
 class TestPayloadLenTruncation:
     """Verify hash uses payload[:payload_len], not the full bytearray buffer."""
@@ -307,6 +306,7 @@ class TestPayloadLenTruncation:
 # 4. Flood forwarding: path append must not change duplicate detection
 # ===================================================================
 
+
 class TestFloodPathAppend:
     """Simulate flood forwarding and verify hash stability."""
 
@@ -362,6 +362,7 @@ class TestFloodPathAppend:
 # ===================================================================
 # 5. Direct forwarding: path consume must not change duplicate detection
 # ===================================================================
+
 
 class TestDirectPathConsume:
     """Simulate direct forwarding path consumption and verify hash stability."""
@@ -421,6 +422,7 @@ class TestDirectPathConsume:
 # ===================================================================
 # 6. Serialization round-trip preserves hash
 # ===================================================================
+
 
 class TestSerializationHashPreservation:
     """Verify that write_to → read_from round-trip preserves the packet hash."""
@@ -505,6 +507,7 @@ class TestSerializationHashPreservation:
 # 7. PacketHashingUtils standalone tests
 # ===================================================================
 
+
 class TestPacketHashingUtilsStandalone:
     """Test the static utility directly, confirming C++ compatibility."""
 
@@ -559,11 +562,12 @@ class TestPacketHashingUtilsStandalone:
 # 8. Edge cases and regression guards
 # ===================================================================
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_max_payload_hashes_correctly(self):
         """MAX_PACKET_PAYLOAD-sized payload should hash without error."""
         from pymc_core.protocol.constants import MAX_PACKET_PAYLOAD
+
         payload = bytes(range(256)) * (MAX_PACKET_PAYLOAD // 256 + 1)
         payload = payload[:MAX_PACKET_PAYLOAD]
 
@@ -619,6 +623,7 @@ class TestEdgeCases:
 # 9. Bad / malformed packets — must be rejected by validation
 # ===================================================================
 
+
 class TestBadPacketDeserialization:
     """Verify that read_from rejects malformed wire data."""
 
@@ -639,27 +644,34 @@ class TestBadPacketDeserialization:
         """Version > MAX_SUPPORTED_PAYLOAD_VERSION should be rejected."""
         bad_version = MAX_SUPPORTED_PAYLOAD_VERSION + 1
         # Craft header with unsupported version in bits 6-7
-        header = ROUTE_TYPE_FLOOD | (PAYLOAD_TYPE_TXT_MSG << PH_TYPE_SHIFT) | (bad_version << PH_VER_SHIFT)
+        header = (
+            ROUTE_TYPE_FLOOD
+            | (PAYLOAD_TYPE_TXT_MSG << PH_TYPE_SHIFT)
+            | (bad_version << PH_VER_SHIFT)
+        )
         wire = bytes([header, 0])  # header + path_len=0, no payload
         pkt = Packet()
         with pytest.raises(ValueError, match="Unsupported packet version"):
             pkt.read_from(wire)
 
     def test_path_len_exceeds_max(self):
-        """path_len > MAX_PATH_SIZE (64) must be rejected."""
+        """Encoded path_len that decodes to > MAX_PATH_SIZE (64) bytes must be rejected."""
+        from pymc_core.protocol.packet_utils import PathUtils
+
         header = _make_header(PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD)
-        bad_path_len = MAX_PATH_SIZE + 1  # 65
-        wire = bytes([header, bad_path_len]) + bytes(bad_path_len) + b"payload"
+        # 33 hops × 2 bytes = 66 path bytes (exceeds MAX_PATH_SIZE)
+        bad_path_len = PathUtils.encode_path_len(hash_size=2, hash_count=33)
+        wire = bytes([header, bad_path_len]) + bytes(66) + b"payload"
         pkt = Packet()
         with pytest.raises(ValueError, match="path_len too large"):
             pkt.read_from(wire)
 
     def test_path_len_255_rejected(self):
-        """path_len=255 (max uint8) must be rejected."""
+        """path_len=255 (reserved hash_size 4) must be rejected."""
         header = _make_header(PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD)
         wire = bytes([header, 0xFF]) + bytes(255)
         pkt = Packet()
-        with pytest.raises(ValueError, match="path_len too large"):
+        with pytest.raises(ValueError, match="invalid path_len encoding"):
             pkt.read_from(wire)
 
     def test_truncated_path_rejected(self):
@@ -696,13 +708,18 @@ class TestBadPacketDeserialization:
             pkt.read_from(wire)
 
     def test_path_len_exact_max_accepted(self):
-        """path_len == MAX_PATH_SIZE should be accepted (boundary test)."""
+        """Encoded path_len that decodes to exactly MAX_PATH_SIZE (64) bytes should be accepted."""
+        from pymc_core.protocol.packet_utils import PathUtils
+
         header = _make_header(PAYLOAD_TYPE_TXT_MSG, ROUTE_TYPE_FLOOD)
+        # 32 hops × 2 bytes = 64 path bytes (exactly MAX_PATH_SIZE)
+        path_len_byte = PathUtils.encode_path_len(hash_size=2, hash_count=32)
         path_data = bytes(MAX_PATH_SIZE)
-        wire = bytes([header, MAX_PATH_SIZE]) + path_data + b"ok"
+        wire = bytes([header, path_len_byte]) + path_data + b"ok"
         pkt = Packet()
         pkt.read_from(wire)
-        assert pkt.path_len == MAX_PATH_SIZE
+        assert pkt.path_len == path_len_byte
+        assert len(pkt.path) == MAX_PATH_SIZE
         assert pkt.payload == bytearray(b"ok")
 
 
@@ -772,6 +789,7 @@ class TestBadPacketCorruptedWireData:
         or raise ValueError — never crash with an unhandled exception.
         """
         import random
+
         rng = random.Random(42)  # deterministic seed
         for _ in range(100):
             length = rng.randint(0, 300)

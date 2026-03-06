@@ -136,7 +136,7 @@ class CompanionRadio(CompanionBase):
         try:
             self.node.dispatcher.remove_raw_packet_subscriber(self._on_raw_packet_rx_log)
         except Exception:
-            pass
+            logger.debug("Remove raw packet subscriber during stop failed", exc_info=True)
         if self._dispatcher_task:
             self._dispatcher_task.cancel()
             try:
@@ -173,11 +173,9 @@ class CompanionRadio(CompanionBase):
         super().set_advert_name(name)
         self.node.node_name = self.prefs.node_name
 
-    def _sync_our_node_name_to_handlers(self) -> None:
-        """Sync current node name to group text handler for echo detection."""
-        handler = getattr(self.node.dispatcher, "group_text_handler", None)
-        if handler is not None:
-            handler.set_our_node_name(self.prefs.node_name)
+    def _get_group_text_handler(self):
+        """Return the group text handler for name sync."""
+        return getattr(self.node.dispatcher, "group_text_handler", None)
 
     def set_radio_params(self, freq_hz: int, bw_hz: int, sf: int, cr: int) -> bool:
         super().set_radio_params(freq_hz, bw_hz, sf, cr)
