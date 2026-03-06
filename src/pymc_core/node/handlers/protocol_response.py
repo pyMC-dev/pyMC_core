@@ -9,14 +9,10 @@ import struct
 from typing import Any, Callable, Dict, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet
-from ...protocol.constants import (
-    MAX_PATH_SIZE,
-    PAYLOAD_TYPE_PATH,
-    PAYLOAD_TYPE_RESPONSE,
-    ROUTE_TYPE_DIRECT,
-)
+from ...protocol.constants import PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE, ROUTE_TYPE_DIRECT
 from ...protocol.crypto import CIPHER_BLOCK_SIZE, CIPHER_MAC_SIZE
 from ...protocol.packet_builder import PacketBuilder
+from ...protocol.packet_utils import PathUtils
 
 # ---------------------------------------------------------------------------
 # Built-in CayenneLPP decoder (no external dependency)
@@ -283,10 +279,14 @@ class ProtocolResponseHandler:
                     # PATH packet: decrypted is path_len(1)+path(N)+extra_type(1)+extra
                     # Extract inner response from path-return structure
                     path_len_byte = raw_decrypted[0]
-                    inner_offset = 1 + path_len_byte + 1
-                    if path_len_byte <= MAX_PATH_SIZE and len(raw_decrypted) >= inner_offset + 4:
-                        out_path = bytes(raw_decrypted[1 : 1 + path_len_byte])
-                        extra_type = raw_decrypted[1 + path_len_byte] & 0x0F
+                    path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+                    inner_offset = 1 + path_byte_len + 1
+                    if (
+                        PathUtils.is_valid_path_len(path_len_byte)
+                        and len(raw_decrypted) >= inner_offset + 4
+                    ):
+                        out_path = bytes(raw_decrypted[1 : 1 + path_byte_len])
+                        extra_type = raw_decrypted[1 + path_byte_len] & 0x0F
                         extra = raw_decrypted[inner_offset:]
                         if extra_type == PAYLOAD_TYPE_RESPONSE and len(extra) >= 4:
                             tag_bytes = extra[:4]
@@ -359,9 +359,10 @@ class ProtocolResponseHandler:
         Returns True if the contact was found and updated, False otherwise.
         """
         try:
-            if path_len_byte > MAX_PATH_SIZE:
+            if not PathUtils.is_valid_path_len(path_len_byte):
                 return False
-            out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+            path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+            out_path_bytes = bytes(decrypted[1 : 1 + path_byte_len])
             contact_obj = self._contact_book.get_by_key(contact_pubkey)
             if contact_obj is not None:
                 contact_obj.out_path_len = path_len_byte
@@ -427,10 +428,10 @@ class ProtocolResponseHandler:
 
             # Convert to DIRECT routing using the inner out_path (the route
             # from us to the remote repeater).
-            out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+            path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+            out_path_bytes = bytes(decrypted[1 : 1 + path_byte_len])
             reciprocal.header = (reciprocal.header & ~0x03) | ROUTE_TYPE_DIRECT
-            reciprocal.path = bytearray(out_path_bytes)
-            reciprocal.path_len = len(out_path_bytes)
+            reciprocal.set_path(out_path_bytes, path_len_byte)
 
             # Await injection so the reciprocal PATH is serialized through the
             # radio TX pipeline before this method returns.  This ensures the
@@ -496,9 +497,13 @@ class ProtocolResponseHandler:
             if pkt_type == PAYLOAD_TYPE_PATH:
                 if len(decrypted) >= 2:
                     path_len_byte = decrypted[0]
-                    inner_offset = 1 + path_len_byte + 1
-                    if path_len_byte <= MAX_PATH_SIZE and len(decrypted) >= inner_offset:
-                        extra_type = decrypted[1 + path_len_byte] & 0x0F
+                    path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+                    inner_offset = 1 + path_byte_len + 1
+                    if (
+                        PathUtils.is_valid_path_len(path_len_byte)
+                        and len(decrypted) >= inner_offset
+                    ):
+                        extra_type = decrypted[1 + path_byte_len] & 0x0F
                         if extra_type == PAYLOAD_TYPE_RESPONSE and len(decrypted) > inner_offset:
                             response_data = decrypted[inner_offset:]
                         elif extra_type != PAYLOAD_TYPE_RESPONSE:
@@ -509,7 +514,7 @@ class ProtocolResponseHandler:
 
                     # Firmware pattern (onContactPathRecv): update contact out_path
                     # so subsequent requests use sendDirect() instead of sendFlood().
-                    out_path_bytes = bytes(decrypted[1 : 1 + path_len_byte])
+                    out_path_bytes = bytes(decrypted[1 : 1 + path_byte_len])
                     if self._update_contact_path(
                         contact_pubkey, src_hash, path_len_byte, decrypted
                     ):

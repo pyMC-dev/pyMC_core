@@ -8,8 +8,9 @@ import struct
 from typing import Callable, Optional
 
 from pymc_core.protocol import PacketBuilder
-from pymc_core.protocol.constants import PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE
+from pymc_core.protocol.constants import MAX_PATH_SIZE, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE
 from pymc_core.protocol.crypto import CryptoUtils
+from pymc_core.protocol.packet_utils import PathUtils
 
 # Request type codes (matching C++ implementation)
 REQ_TYPE_GET_STATUS = 0x01
@@ -245,8 +246,12 @@ class ProtocolRequestHandler:
             # Add path for direct routing if available
             if hasattr(client, "out_path_len") and hasattr(client, "out_path"):
                 if client.out_path_len >= 0 and len(client.out_path) > 0:
-                    reply_packet.path = bytearray(client.out_path[: client.out_path_len])
-                    reply_packet.path_len = client.out_path_len
+                    reply_packet.set_path(
+                        client.out_path[:MAX_PATH_SIZE],
+                        client.out_path_len
+                        if PathUtils.is_valid_path_len(client.out_path_len)
+                        else None,
+                    )
 
             self.log(
                 f"RESPONSE built for 0x{client_identity.get_public_key()[0]:02X} "

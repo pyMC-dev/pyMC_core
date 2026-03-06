@@ -89,7 +89,7 @@ class LoginServerHandler(BaseHandler):
         """Handle ANON_REQ login packet from client."""
         try:
             # Debug: Log packet routing info
-            path_data = list(packet.path[: packet.path_len]) if packet.path_len > 0 else []
+            path_data = packet.get_path_hashes_hex() if packet.path_len > 0 else []
             self.log(
                 f"[LoginServer] Packet route flood: {packet.is_route_flood()}, "
                 f"path_len: {packet.path_len}, path: {path_data}"
@@ -253,7 +253,7 @@ class LoginServerHandler(BaseHandler):
             client_hash = client_identity.get_public_key()[0]
             server_hash = self.local_identity.get_public_key()[0]
             path_list = (
-                list(original_packet.path[: original_packet.path_len])
+                list(original_packet.path[: original_packet.get_path_byte_len()])
                 if original_packet and original_packet.path_len > 0
                 else []
             )

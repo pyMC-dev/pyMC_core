@@ -11,6 +11,8 @@ from .constants import (
     MAX_HASH_SIZE,
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
+    PATH_HASH_COUNT_MASK,
+    PATH_HASH_SIZE_SHIFT,
     PAYLOAD_TYPE_TRACE,
     PAYLOAD_VER_1,
     PH_ROUTE_MASK,
@@ -99,6 +101,77 @@ class PacketValidationUtils:
         """Validate payload doesn't exceed maximum size."""
         if payload_len > MAX_PACKET_PAYLOAD:
             raise ValueError(f"payload too large: {payload_len} > {MAX_PACKET_PAYLOAD}")
+
+
+class PathUtils:
+    """Multi-byte path encoding/decoding matching firmware Packet.h.
+
+    The encoded path_len byte packs both hash size and hop count:
+      - Bits 0-5: hash_count (number of hops, 0-63)
+      - Bits 6-7: (hash_size - 1), where hash_size is 1, 2, or 3 bytes
+
+    Total path bytes on the wire = hash_count * hash_size.
+    For 1-byte hashes the encoded byte equals the raw hop count,
+    preserving backward compatibility with legacy packets.
+    """
+
+    @staticmethod
+    def get_path_hash_size(path_len_byte: int) -> int:
+        """Extract per-hop hash size (1, 2, or 3) from the encoded path_len byte."""
+        return (path_len_byte >> PATH_HASH_SIZE_SHIFT) + 1
+
+    @staticmethod
+    def get_path_hash_count(path_len_byte: int) -> int:
+        """Extract hop count (0-63) from the encoded path_len byte."""
+        return path_len_byte & PATH_HASH_COUNT_MASK
+
+    @staticmethod
+    def get_path_byte_len(path_len_byte: int) -> int:
+        """Calculate actual path byte length from the encoded path_len byte."""
+        return (path_len_byte & PATH_HASH_COUNT_MASK) * (
+            (path_len_byte >> PATH_HASH_SIZE_SHIFT) + 1
+        )
+
+    @staticmethod
+    def encode_path_len(hash_size: int, hash_count: int) -> int:
+        """Encode hash size and hop count into a single path_len byte.
+
+        Hop count is stored in 6 bits (0-63). Values above 63 are invalid and raise.
+        """
+        if not 0 <= hash_count <= 63:
+            raise ValueError(f"hop count must be 0-63 for path_len encoding, got {hash_count}")
+        return ((hash_size - 1) << PATH_HASH_SIZE_SHIFT) | (hash_count & PATH_HASH_COUNT_MASK)
+
+    @staticmethod
+    def is_valid_path_len(path_len_byte: int) -> bool:
+        """Validate an encoded path_len byte.
+
+        Returns False for hash_size == 4 (reserved) or if the total
+        path bytes would exceed MAX_PATH_SIZE.
+        """
+        hash_size = (path_len_byte >> PATH_HASH_SIZE_SHIFT) + 1
+        if hash_size > 3:
+            return False
+        hash_count = path_len_byte & PATH_HASH_COUNT_MASK
+        return hash_count * hash_size <= MAX_PATH_SIZE
+
+    @staticmethod
+    def is_path_at_max_hops(path_len_byte: int) -> bool:
+        """True if path has reached maximum hops for its hash size (do not retransmit).
+
+        Measures hops, not raw bytes. Max hops depend on hash size and MAX_PATH_SIZE:
+        - 1-byte hashes: 63 hops (63 bytes)
+        - 2-byte hashes: 32 hops (64 bytes)
+        - 3-byte hashes: 21 hops (63 bytes)
+        """
+        if path_len_byte == 0:
+            return False
+        hash_size = PathUtils.get_path_hash_size(path_len_byte)
+        if hash_size > 3:
+            return False
+        hash_count = path_len_byte & PATH_HASH_COUNT_MASK
+        max_hops = min(PATH_HASH_COUNT_MASK, MAX_PATH_SIZE // hash_size)
+        return hash_count >= max_hops
 
 
 class PacketDataUtils:
@@ -339,15 +412,17 @@ class PacketTimingUtils:
         return SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * packet_airtime_ms)
 
     @staticmethod
-    def calc_direct_timeout_ms(packet_airtime_ms: float, path_len: int) -> float:
+    def calc_direct_timeout_ms(packet_airtime_ms: float, path_hash_count: int) -> float:
         """
         Calculate timeout for direct packets.
 
-        Formula: 500ms + ((airtime × 6 + 250ms) × (path_len + 1))
+        Formula: 500ms + ((airtime × 6 + 250ms) × (path_hash_count + 1))
 
         Args:
             packet_airtime_ms: Estimated packet airtime in milliseconds
-            path_len: Number of hops in the path (0 for direct)
+            path_hash_count: Number of hops in the path (0 for direct).
+                Use ``PathUtils.get_path_hash_count(path_len)`` to extract
+                from an encoded path_len byte.
 
         Returns:
             Timeout in milliseconds
@@ -357,5 +432,5 @@ class PacketTimingUtils:
         DIRECT_SEND_PERHOP_EXTRA_MILLIS = 250
         return SEND_TIMEOUT_BASE_MILLIS + (
             (packet_airtime_ms * DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS)
-            * (path_len + 1)
+            * (path_hash_count + 1)
         )

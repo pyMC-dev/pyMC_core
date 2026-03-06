@@ -112,8 +112,10 @@ class _MockBridgeSendRawDirect:
         self.calls = []
         self._success = success
 
-    async def send_raw_data_direct(self, path: bytes, payload: bytes):
-        self.calls.append((path, payload))
+    async def send_raw_data_direct(
+        self, path: bytes, payload: bytes, *, path_len_encoded: int = None
+    ):
+        self.calls.append((path, payload, path_len_encoded))
         return SentResult(success=self._success)
 
 
@@ -126,7 +128,11 @@ async def test_cmd_send_raw_data_valid_writes_ok():
     server._write_err = Mock()
     data = bytes([1, 0x42]) + b"\x01\x02\x03\x04"
     await server._cmd_send_raw_data(data)
-    assert bridge.calls == [(b"\x42", b"\x01\x02\x03\x04")]
+    assert len(bridge.calls) == 1
+    path, payload, path_len_enc = bridge.calls[0]
+    assert path == b"\x42"
+    assert payload == b"\x01\x02\x03\x04"
+    assert path_len_enc == 1  # 1-byte hash, 1 hop
     server._write_ok.assert_called_once()
     server._write_err.assert_not_called()
 
@@ -156,6 +162,61 @@ async def test_cmd_send_raw_data_send_failure_writes_table_full():
     assert len(bridge.calls) == 1
     server._write_err.assert_called_once_with(ERR_CODE_TABLE_FULL)
     server._write_ok.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_2byte_hashes():
+    """CMD_SEND_RAW_DATA with 2-byte hash path encoding."""
+    from pymc_core.protocol.packet_utils import PathUtils
+
+    bridge = _MockBridgeSendRawDirect(success=True)
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    # path_len_encoded=0x42 → 2-byte hashes, 2 hops → 4 bytes of path
+    path_len_byte = PathUtils.encode_path_len(2, 2)  # 0x42
+    path_data = b"\x01\x02\x03\x04"
+    payload_data = b"\xAA\xBB\xCC\xDD"
+    data = bytes([path_len_byte]) + path_data + payload_data
+    await server._cmd_send_raw_data(data)
+    assert len(bridge.calls) == 1
+    path, payload, path_len_enc = bridge.calls[0]
+    assert path == path_data
+    assert payload == payload_data
+    assert path_len_enc == path_len_byte
+    server._write_ok.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_invalid_path_encoding():
+    """CMD_SEND_RAW_DATA with reserved hash_size=4 encoding → error."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    # 0xC1 = hash_size 4 (reserved), should fail validation
+    data = bytes([0xC1]) + b"\x00" * 10
+    await server._cmd_send_raw_data(data)
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_UNSUPPORTED_CMD)
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_raw_data_truncated_multibyte_path():
+    """CMD_SEND_RAW_DATA with not enough path bytes for 2-byte encoding → error."""
+    from pymc_core.protocol.packet_utils import PathUtils
+
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    # 0x43 = 2-byte hashes, 3 hops → needs 6 path bytes + 4 payload = 11 total
+    # But only provide 8 bytes after path_len (not enough)
+    path_len_byte = PathUtils.encode_path_len(2, 3)  # 0x43
+    data = bytes([path_len_byte]) + b"\x00" * 8  # only 8 bytes, need 6+4=10
+    await server._cmd_send_raw_data(data)
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_UNSUPPORTED_CMD)
 
 
 @pytest.mark.asyncio
@@ -247,3 +308,101 @@ async def test_writer_loop_writes_and_drains():
 
     writer.write.assert_called_once()
     writer.drain.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# CMD_SET_PATH_HASH_MODE tests
+# ---------------------------------------------------------------------------
+
+
+class _MockBridgePathHashMode:
+    """Minimal bridge for CMD_SET_PATH_HASH_MODE tests."""
+
+    def __init__(self):
+        self.calls = []
+
+    def set_path_hash_mode(self, mode: int) -> None:
+        self.calls.append(mode)
+
+
+@pytest.mark.asyncio
+async def test_cmd_set_path_hash_mode_valid():
+    """Valid CMD_SET_PATH_HASH_MODE for each mode (0, 1, 2) → _write_ok."""
+    for mode in (0, 1, 2):
+        bridge = _MockBridgePathHashMode()
+        server = CompanionFrameServer(bridge, "hash", port=0)
+        server._write_ok = Mock()
+        server._write_err = Mock()
+        await server._cmd_set_path_hash_mode(bytes([0, mode]))
+        assert bridge.calls == [mode]
+        server._write_ok.assert_called_once()
+        server._write_err.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_set_path_hash_mode_invalid_mode():
+    """CMD_SET_PATH_HASH_MODE with mode >= 3 → ERR_CODE_ILLEGAL_ARG."""
+    from pymc_core.companion.constants import ERR_CODE_ILLEGAL_ARG
+
+    bridge = _MockBridgePathHashMode()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    await server._cmd_set_path_hash_mode(bytes([0, 3]))
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_ILLEGAL_ARG)
+
+
+@pytest.mark.asyncio
+async def test_cmd_set_path_hash_mode_wrong_subtype():
+    """CMD_SET_PATH_HASH_MODE with subtype != 0 → ERR_CODE_ILLEGAL_ARG."""
+    from pymc_core.companion.constants import ERR_CODE_ILLEGAL_ARG
+
+    bridge = _MockBridgePathHashMode()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    await server._cmd_set_path_hash_mode(bytes([1, 0]))
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_ILLEGAL_ARG)
+
+
+@pytest.mark.asyncio
+async def test_cmd_set_path_hash_mode_too_short():
+    """CMD_SET_PATH_HASH_MODE with only 1 byte → ERR_CODE_ILLEGAL_ARG."""
+    from pymc_core.companion.constants import ERR_CODE_ILLEGAL_ARG
+
+    bridge = _MockBridgePathHashMode()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_ok = Mock()
+    server._write_err = Mock()
+    await server._cmd_set_path_hash_mode(bytes([0]))
+    assert len(bridge.calls) == 0
+    server._write_err.assert_called_once_with(ERR_CODE_ILLEGAL_ARG)
+
+
+@pytest.mark.asyncio
+async def test_device_info_includes_path_hash_mode():
+    """RESP_CODE_DEVICE_INFO frame includes path_hash_mode at byte [81]."""
+    from pymc_core.companion.constants import RESP_CODE_DEVICE_INFO
+    from pymc_core.companion.models import NodePrefs
+
+    prefs = NodePrefs()
+    prefs.path_hash_mode = 2  # 3-byte hashes
+
+    bridge = Mock()
+    bridge.get_self_info = Mock(return_value=prefs)
+    bridge.contacts = Mock(max_contacts=100)
+    bridge.channels = Mock(max_channels=8)
+
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    frames = []
+    server._write_frame = lambda f: frames.append(f)
+
+    await server._cmd_device_query(bytes([10]))  # app_ver = 10
+
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame[0] == RESP_CODE_DEVICE_INFO
+    assert len(frame) == 82  # 81 bytes (old) + 1 byte path_hash_mode
+    assert frame[81] == 2  # path_hash_mode at last byte

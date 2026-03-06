@@ -127,6 +127,7 @@ class NodePrefs:
     airtime_factor: float = 0.0
     # Reported in CMD_DEVICE_QUERY device info frame (byte 80).
     client_repeat: int = 0
+    path_hash_mode: int = 0  # 0=1-byte, 1=2-byte, 2=3-byte hashes
 
 
 @dataclass

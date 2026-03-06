@@ -1,7 +1,6 @@
 from typing import ByteString, Optional
 
 from .constants import (
-    MAX_PATH_SIZE,
     MAX_SUPPORTED_PAYLOAD_VERSION,
     PH_ROUTE_MASK,
     PH_TYPE_MASK,
@@ -16,7 +15,7 @@ from .constants import (
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
 )
-from .packet_utils import PacketDataUtils, PacketHashingUtils, PacketValidationUtils
+from .packet_utils import PacketDataUtils, PacketHashingUtils, PacketValidationUtils, PathUtils
 
 """
 ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -30,9 +29,10 @@ from .packet_utils import PacketDataUtils, PacketHashingUtils, PacketValidationU
 ║ Transport Codes    ║ Two 16-bit codes (4 bytes total). Only present for   ║
 ║ (0 or 4 bytes)     ║ TRANSPORT_FLOOD and TRANSPORT_DIRECT route types.    ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
-║ Path Length (1 B)  ║ Number of path hops (0–15).                          ║
+║ Path Length (1 B)  ║ Encoded: bits 0-5 = hash count (hops), bits 6-7 =    ║
+║                    ║ (hash_size - 1). Actual bytes = count × hash_size.   ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
-║ Path (N bytes)     ║ List of node hashes (1 byte each), length = path_len ║
+║ Path (N bytes)     ║ Node hashes (1-3 bytes each), N = count × hash_size  ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
 ║ Payload (N bytes)  ║ Actual encrypted or plain payload. Max: 254 bytes    ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
@@ -71,8 +71,8 @@ class Packet:
     Attributes:
         header (int): Single byte header containing packet type and flags.
         transport_codes (list): Two 16-bit transport codes for TRANSPORT route types.
-        path_len (int): Length of the path component in bytes.
-        path (bytearray): Variable-length path data for routing.
+        path_len (int): Encoded path length byte (bits 0-5 = hash count, bits 6-7 = hash size - 1).
+        path (bytearray): Variable-length path data for routing (hash_count × hash_size bytes).
         payload (bytearray): Variable-length payload data.
         payload_len (int): Actual length of payload data.
         _rssi (int): Raw RSSI signal strength value from firmware.
@@ -82,8 +82,7 @@ class Packet:
         ```python
         packet = Packet()
         packet.header = 0x01  # Flood routing
-        packet.path = b"node1->node2"
-        packet.path_len = len(packet.path)
+        packet.set_path(b"\\xAA\\xBB\\xCC")  # 3 hops, 1-byte hashes
         packet.payload = b"Hello World"
         packet.payload_len = len(packet.payload)
         data = packet.write_to()
@@ -207,6 +206,73 @@ class Packet:
         route_type = self.get_route_type()
         return route_type == ROUTE_TYPE_TRANSPORT_DIRECT or route_type == ROUTE_TYPE_DIRECT
 
+    def get_path_hash_size(self) -> int:
+        """Extract per-hop hash size (1, 2, or 3) from the encoded path_len byte."""
+        return PathUtils.get_path_hash_size(self.path_len)
+
+    def get_path_hash_count(self) -> int:
+        """Extract hop count (0-63) from the encoded path_len byte."""
+        return PathUtils.get_path_hash_count(self.path_len)
+
+    def get_path_byte_len(self) -> int:
+        """Calculate actual path byte length from the encoded path_len byte."""
+        return PathUtils.get_path_byte_len(self.path_len)
+
+    def get_path_hashes(self) -> list:
+        """Return path as a list of per-hop hash entries (1, 2, or 3 bytes each).
+
+        Groups the raw ``self.path`` bytearray using the hash size encoded in
+        ``self.path_len``.  Each entry in the returned list is a ``bytes``
+        object whose length equals ``get_path_hash_size()``.
+
+        Returns:
+            list[bytes]: One entry per hop.  Empty list when hop count is 0.
+        """
+        hash_size = self.get_path_hash_size()
+        count = self.get_path_hash_count()
+        result = []
+        for i in range(count):
+            start = i * hash_size
+            end = start + hash_size
+            if end <= len(self.path):
+                result.append(bytes(self.path[start:end]))
+        return result
+
+    def get_path_hashes_hex(self) -> list:
+        """Return path as a list of uppercase hex strings, one per hop.
+
+        Examples::
+
+            1-byte hashes: ["B5", "A3", "F2"]
+            2-byte hashes: ["B5A3", "F2C1"]
+            3-byte hashes: ["B5A3F2", "C1D4E7"]
+        """
+        return [entry.hex().upper() for entry in self.get_path_hashes()]
+
+    def set_path(
+        self,
+        path_bytes: bytes,
+        path_len_encoded: int = None,
+    ) -> None:
+        """Set the routing path with optional encoded path_len.
+
+        Args:
+            path_bytes: Raw path bytes to set.
+            path_len_encoded: Pre-encoded path_len byte. If None, assumes
+                1-byte hashes and encodes len(path_bytes) as the hop count.
+        """
+        self.path = bytearray(path_bytes)
+        if path_len_encoded is not None:
+            self.path_len = path_len_encoded
+        else:
+            hop_count = len(path_bytes)
+            if hop_count > 63:
+                raise ValueError(
+                    f"path length {hop_count} exceeds maximum encodable hop count 63 "
+                    "for 1-byte hashes; pass path_len_encoded explicitly or use a shorter path"
+                )
+            self.path_len = PathUtils.encode_path_len(1, hop_count)
+
     def get_payload(self) -> bytes:
         """
         Get the packet payload as immutable bytes, truncated to declared length.
@@ -250,7 +316,7 @@ class Packet:
             ValueError: If any declared length doesn't match the actual buffer length.
         """
         PacketValidationUtils.validate_buffer_lengths(
-            self.path_len, len(self.path), self.payload_len, len(self.payload)
+            self.get_path_byte_len(), len(self.path), self.payload_len, len(self.payload)
         )
 
     def _check_bounds(self, idx: int, required: int, data_len: int, error_msg: str) -> None:
@@ -295,7 +361,7 @@ class Packet:
             out.extend(self.transport_codes[1].to_bytes(2, "little"))
 
         out.append(self.path_len)
-        out += self.path
+        out += self.path[: self.get_path_byte_len()]
         out += self.payload[: self.payload_len]
         return bytes(out)
 
@@ -338,12 +404,13 @@ class Packet:
         self._check_bounds(idx, 1, data_len, "missing path_len")
         self.path_len = data[idx]
         idx += 1
-        if self.path_len > MAX_PATH_SIZE:
-            raise ValueError("path_len too large")
+        if not PathUtils.is_valid_path_len(self.path_len):
+            raise ValueError(f"invalid path_len encoding: 0x{self.path_len:02X}")
 
-        self._check_bounds(idx, self.path_len, data_len, "truncated path")
-        self.path = bytearray(data[idx : idx + self.path_len])
-        idx += self.path_len
+        path_byte_len = self.get_path_byte_len()
+        self._check_bounds(idx, path_byte_len, data_len, "truncated path")
+        self.path = bytearray(data[idx : idx + path_byte_len])
+        idx += path_byte_len
 
         self.payload = bytearray(data[idx:])
         self.payload_len = len(self.payload)
@@ -425,7 +492,9 @@ class Packet:
         Note:
             This matches the wire format used by write_to() and expected by read_from().
         """
-        base_length = 2 + self.path_len + self.payload_len  # header + path_len + path + payload
+        base_length = (
+            2 + self.get_path_byte_len() + self.payload_len
+        )  # header + path_len_byte + path + payload
         return base_length + (4 if self.has_transport_codes() else 0)
 
     def get_snr(self) -> float:

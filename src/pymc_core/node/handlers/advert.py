@@ -10,6 +10,7 @@ from ...protocol.constants import (
     SIGNATURE_SIZE,
     describe_advert_flags,
 )
+from ...protocol.packet_utils import PathUtils
 from ...protocol.utils import determine_contact_type_from_flags, get_contact_type_name
 from ..events import MeshEvents
 from .base import BaseHandler
@@ -139,8 +140,8 @@ class AdvertHandler(BaseHandler):
                 try:
                     path_len = getattr(packet, "path_len", 0) or 0
                     path = getattr(packet, "path", bytearray()) or bytearray()
-                    effective_len = path_len if path_len > 0 else len(path)
-                    inbound_path = bytes(path[:effective_len]) if effective_len > 0 else b""
+                    path_byte_len = PathUtils.get_path_byte_len(path_len)
+                    inbound_path = bytes(path[:path_byte_len]) if path_byte_len > 0 else b""
                     event_data = {
                         "public_key": pubkey_hex,
                         "name": name,
@@ -152,6 +153,7 @@ class AdvertHandler(BaseHandler):
                         "snr": advert_data["snr"],
                         "rssi": advert_data["rssi"],
                         "inbound_path": inbound_path,
+                        "path_len_encoded": path_len,
                     }
                     self.event_service.publish_sync(MeshEvents.NODE_DISCOVERED, event_data)
                 except Exception as e:

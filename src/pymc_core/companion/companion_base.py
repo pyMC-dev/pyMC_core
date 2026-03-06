@@ -29,12 +29,14 @@ from ..protocol.constants import (
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
     PAYLOAD_TYPE_CONTROL,
+    PAYLOAD_TYPE_TRACE,
     REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
     TELEM_PERM_BASE,
 )
+from ..protocol.packet_utils import PathUtils
 from ..protocol.transport_keys import calc_transport_code, get_auto_key_for
 from .channel_store import ChannelStore
 from .constants import (
@@ -425,6 +427,11 @@ class CompanionBase(ABC):
         self.prefs.multi_acks = multi_acks
         self._save_prefs()
 
+    def set_path_hash_mode(self, mode: int) -> None:
+        """Set path hash encoding mode (0=1-byte, 1=2-byte, 2=3-byte hashes)."""
+        self.prefs.path_hash_mode = mode
+        self._save_prefs()
+
     def get_self_info(self) -> NodePrefs:
         """Return a copy of the current node preferences."""
         return copy.copy(self.prefs)
@@ -564,6 +571,24 @@ class CompanionBase(ABC):
         # Switch route type from FLOOD -> TRANSPORT_FLOOD
         pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_TRANSPORT_FLOOD
 
+    def _apply_path_hash_mode(self, pkt: Packet) -> None:
+        """Encode the device's path_hash_mode in originated packets.
+
+        When a packet has 0 hops (freshly originated), sets bits 6-7 of
+        ``path_len`` to encode the hash size from ``prefs.path_hash_mode``.
+        Packets with existing hops (stored contact paths) are untouched.
+        Trace packets are excluded because the repeater's trace handler uses
+        ``path``/``path_len`` to store SNR values, not routing hashes.
+
+        Mirrors firmware ``sendFlood(pkt, delay, _prefs.path_hash_mode + 1)``
+        which calls ``pkt->setPathHashSizeAndCount(hash_size, 0)``.
+        """
+        if pkt.get_payload_type() == PAYLOAD_TYPE_TRACE:
+            return
+        if pkt.get_path_hash_count() == 0:
+            hash_size = self.prefs.path_hash_mode + 1
+            pkt.path_len = PathUtils.encode_path_len(hash_size, 0)
+
     # -------------------------------------------------------------------------
     # Statistics (subclasses may override _get_radio_stats for STATS_TYPE_RADIO)
     # -------------------------------------------------------------------------
@@ -642,23 +667,34 @@ class CompanionBase(ABC):
         return bool(self.prefs.autoadd_config & AUTOADD_OVERWRITE_OLDEST)
 
     async def _apply_advert_to_stores(
-        self, contact: Contact, inbound_path: Optional[bytes] = None
+        self,
+        contact: Contact,
+        inbound_path: Optional[bytes] = None,
+        *,
+        path_len_encoded: Optional[int] = None,
     ) -> Optional[Contact]:
         """Apply advert to ContactStore and PathCache. Shared by Bridge and NODE_DISCOVERED.
 
         Mirrors C++ BaseChatMesh::onAdvertRecv (existing update, auto-add filter,
         overwrite when full). Returns the Contact if added or updated, None otherwise.
         Path cache is updated for all valid contacts (pub_key >= 7, name non-empty).
+
+        Args:
+            path_len_encoded: Encoded path_len byte from the packet. If None,
+                falls back to len(inbound_path) (assumes 1-byte hashes).
         """
         try:
             if len(contact.public_key) < 7 or not contact.name:
                 return None
             inbound_path = inbound_path or b""
+            advert_path_len = (
+                path_len_encoded if path_len_encoded is not None else len(inbound_path)
+            )
             self.path_cache.update(
                 AdvertPath(
                     public_key_prefix=contact.public_key[:7],
                     name=contact.name,
-                    path_len=len(inbound_path),
+                    path_len=advert_path_len,
                     path=inbound_path,
                     recv_timestamp=int(time.time()),
                 )
@@ -919,6 +955,7 @@ class CompanionBase(ABC):
             route_type=route,
         )
         self._apply_flood_scope(pkt)
+        self._apply_path_hash_mode(pkt)
         success = await self._send_packet(pkt, wait_for_ack=False)
         if success:
             self.stats.record_tx(is_flood=flood)
@@ -939,6 +976,7 @@ class CompanionBase(ABC):
                 route_type="direct",
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sharing contact: {e}")
@@ -956,6 +994,7 @@ class CompanionBase(ABC):
             path_list = list(path_bytes)
             pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path_list)
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sending trace (raw path): {e}")
@@ -1003,6 +1042,7 @@ class CompanionBase(ABC):
                 pubkey_prefix=pub_key[:6].hex(),
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Binary request send error: {e}")
@@ -1054,6 +1094,7 @@ class CompanionBase(ABC):
                 pubkey_prefix=pub_key[:6].hex(),
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Anon request send error: {e}")
@@ -1104,6 +1145,7 @@ class CompanionBase(ABC):
                 data=req_payload,
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self._pending_discovery_tags.add(tag_int)
@@ -1155,6 +1197,7 @@ class CompanionBase(ABC):
                 message_type=msg_type,
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             self._track_pending_ack(ack_crc)
             if wait_for_ack:
                 success = await self._send_packet(pkt, wait_for_ack=True)
@@ -1199,6 +1242,7 @@ class CompanionBase(ABC):
                 channels_config=self.channels.get_channels(),
             )
             self._apply_flood_scope(pkt)
+            self._apply_path_hash_mode(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self.stats.record_tx(is_flood=True)
@@ -1230,17 +1274,23 @@ class CompanionBase(ABC):
                 protocol_code=PROTOCOL_CODE_RAW_DATA,
                 data=data,
             )
+            self._apply_path_hash_mode(pkt)
             success = await self._send_packet(pkt, wait_for_ack=False)
             return SentResult(success=success)
         except Exception as e:
             logger.error(f"Error sending raw data: {e}")
             return SentResult(success=False)
 
-    async def send_raw_data_direct(self, path: bytes, payload: bytes) -> SentResult:
+    async def send_raw_data_direct(
+        self, path: bytes, payload: bytes, *, path_len_encoded: int = None
+    ) -> SentResult:
         """Send a raw custom packet (PAYLOAD_TYPE_RAW_CUSTOM) on the given direct path.
 
         No encryption or contact lookup; path and payload are supplied by the caller.
         Matches firmware CMD_SEND_RAW_DATA behaviour.
+
+        Args:
+            path_len_encoded: Encoded path_len byte. If None, assumes 1-byte hashes.
         """
         if len(payload) < 4:
             return SentResult(success=False)
@@ -1250,8 +1300,7 @@ class CompanionBase(ABC):
             return SentResult(success=False)
         try:
             pkt = PacketBuilder.create_raw_data(payload)
-            pkt.path = bytearray(path)
-            pkt.path_len = len(path)
+            pkt.set_path(path, path_len_encoded)
             success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self.stats.record_tx(is_flood=False)
@@ -1278,6 +1327,7 @@ class CompanionBase(ABC):
             path = [contact.public_key[0]]
         try:
             pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=path)
+            self._apply_path_hash_mode(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sending trace: {e}")
@@ -1301,6 +1351,7 @@ class CompanionBase(ABC):
                 pkt.path = bytearray()
                 pkt.payload = bytearray(data)
                 pkt.payload_len = len(data)
+                self._apply_path_hash_mode(pkt)
                 return await self._send_packet(pkt, wait_for_ack=False)
             elif data is not None:
                 # data was provided but invalid
@@ -1308,6 +1359,7 @@ class CompanionBase(ABC):
             # No data: send default discovery request
             tag = random.randint(0, 0xFFFFFFFF)
             pkt = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
+            self._apply_path_hash_mode(pkt)
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sending control data: {e}")
@@ -1339,6 +1391,7 @@ class CompanionBase(ABC):
             pkt = PacketBuilder.create_login_packet(
                 contact=proxy, local_identity=self._identity, password=password
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             try:
                 await asyncio.wait_for(login_event.wait(), timeout=10.0)
@@ -1371,6 +1424,7 @@ class CompanionBase(ABC):
             pkt, _ = PacketBuilder.create_logout_packet(
                 contact=contact, local_identity=self._identity
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             return True
         except Exception as e:
@@ -1388,10 +1442,11 @@ class CompanionBase(ABC):
         """
         out_path_len = getattr(proxy, "out_path_len", -1)
         if out_path_len > 0:
-            propagation_delay = out_path_len * 0.5  # e.g. 3 hops → 1.5s
+            hop_count = PathUtils.get_path_hash_count(out_path_len)
+            propagation_delay = hop_count * 0.5  # e.g. 3 hops → 1.5s
             logger.debug(
                 f"Multi-hop {request_type}: waiting {propagation_delay:.1f}s for "
-                f"reciprocal PATH propagation ({out_path_len} hops)"
+                f"reciprocal PATH propagation ({hop_count} hops)"
             )
             await asyncio.sleep(propagation_delay)
 
@@ -1417,6 +1472,7 @@ class CompanionBase(ABC):
                 protocol_code=REQ_TYPE_GET_STATUS,
                 data=b"",
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             result = await waiter.wait(timeout)
             return {
@@ -1464,6 +1520,7 @@ class CompanionBase(ABC):
                 protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
                 data=bytes([inv]),
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             result = await waiter.wait(timeout)
             telemetry_data = dict(result.get("parsed", {}))
@@ -1518,6 +1575,7 @@ class CompanionBase(ABC):
                 protocol_code=protocol_code,
                 data=data,
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             result = await waiter.wait(10.0)
             return {
@@ -1566,6 +1624,7 @@ class CompanionBase(ABC):
                 attempt=1,
                 message_type=msg_type,
             )
+            self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=True)
             try:
                 await asyncio.wait_for(response_event.wait(), timeout=15.0)
@@ -1639,7 +1698,10 @@ class CompanionBase(ABC):
                 contact = Contact.from_dict(data, now=now)
                 if len(contact.public_key) >= 7 and contact.name:
                     inbound_path = data.get("inbound_path")
-                    applied = await self._apply_advert_to_stores(contact, inbound_path)
+                    path_len_encoded = data.get("path_len_encoded")
+                    applied = await self._apply_advert_to_stores(
+                        contact, inbound_path, path_len_encoded=path_len_encoded
+                    )
                     if applied is not None:
                         await self._fire_callbacks("advert_received", applied)
                 await self._fire_callbacks("node_discovered", data)

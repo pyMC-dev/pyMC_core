@@ -72,6 +72,7 @@ from .packet_utils import (
     PacketHeaderUtils,
     PacketTimingUtils,
     PacketValidationUtils,
+    PathUtils,
     RouteTypeUtils,
 )
 from .transport_keys import calc_transport_code, get_auto_key_for
@@ -98,6 +99,7 @@ __all__ = [
     "PacketHeaderUtils",
     "PacketHashingUtils",
     "RouteTypeUtils",
+    "PathUtils",
     "PacketTimingUtils",
     # Header constants
     "PH_ROUTE_MASK",
