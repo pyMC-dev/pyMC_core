@@ -4,12 +4,35 @@ USB-based SPI transport using CH341 USB-to-SPI adapter
 """
 
 import logging
+import os
 from typing import List, Optional
 
 from ..ch341.ch341_async import CH341Async, CH341Error
 from .spi_transport import SPITransport, SPITransportError
 
 logger = logging.getLogger(__name__)
+
+
+def _is_container() -> bool:
+    """Detect if running inside an LXC/Docker/systemd-nspawn container."""
+    # Check for /.dockerenv
+    if os.path.exists("/.dockerenv"):
+        return True
+    # Check /run/host/container-manager (systemd-based)
+    if os.path.exists("/run/host/container-manager"):
+        return True
+    # Check for container= environment variable (set by LXC/systemd-nspawn)
+    if os.environ.get("container"):
+        return True
+    # Check /proc/1/environ for container= (LXC sets this on PID 1)
+    try:
+        with open("/proc/1/environ", "rb") as f:
+            env = f.read()
+            if b"container=" in env:
+                return True
+    except (OSError, PermissionError):
+        pass
+    return False
 
 
 class CH341SPITransport(SPITransport):
@@ -48,7 +71,34 @@ class CH341SPITransport(SPITransport):
             set_gpio_manager(self._gpio_manager)
             logger.info("CH341 GPIO manager automatically initialized")
         except Exception as e:
-            logger.warning(f"Failed to setup CH341 GPIO manager: {e}")
+            logger.error(f"Failed to setup CH341 GPIO manager: {e}")
+            # Detect specific error types for better guidance
+            err_str = str(e)
+            if "No backend available" in err_str:
+                hint = (
+                    f"CH341 GPIO manager initialization failed: {e}. "
+                    f"The libusb library is not installed. "
+                    f"Install it with: sudo apt-get install libusb-1.0-0"
+                )
+            else:
+                hint = (
+                    f"CH341 GPIO manager initialization failed: {e}. "
+                    f"Check USB connection, permissions (udev rules), and that the "
+                    f"CH341 device is accessible."
+                )
+            if _is_container():
+                hint += (
+                    "\n\n*** CONTAINER DETECTED ***\n"
+                    "Udev rules inside a container have NO effect.\n"
+                    "You must install the udev rule on the HOST machine:\n"
+                    "  echo 'SUBSYSTEM==\"usb\", ATTR{idVendor}==\"1a86\", "
+                    'ATTR{idProduct}=="5512", MODE="0666"\' '
+                    "| sudo tee /etc/udev/rules.d/99-ch341.rules\n"
+                    "  sudo udevadm control --reload-rules\n"
+                    "  sudo udevadm trigger --subsystem-match=usb --action=change\n"
+                    "Then unplug/replug the CH341 adapter."
+                )
+            raise RuntimeError(hint) from e
 
     def open(self, bus: int, cs: int, speed: int = 2000000) -> bool:
         """

@@ -40,6 +40,7 @@ class SX1262Radio(LoRaRadio):
         rxen_pin: int = -1,
         txled_pin: int = -1,
         rxled_pin: int = -1,
+        en_pin: int = -1,
         frequency: int = 868000000,
         tx_power: int = 22,
         spreading_factor: int = 7,
@@ -68,6 +69,7 @@ class SX1262Radio(LoRaRadio):
             rxen_pin: GPIO pin for RX enable (default: -1 if not used)
             txled_pin: GPIO pin for TX LED (default: -1 if not used)
             rxled_pin: GPIO pin for RX LED (default: -1 if not used)
+            en_pin: GPIO pin for powering up the radio goes high on init
             frequency: Operating frequency in Hz (default: 868MHz)
             tx_power: TX power in dBm (default: 22)
             spreading_factor: LoRa spreading factor (default: 7)
@@ -78,7 +80,7 @@ class SX1262Radio(LoRaRadio):
             is_waveshare: Use alternate initialization needed for Waveshare HAT
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
-            use_dio2_rf: Enable DIO2 as RF switch control (default: False)    
+            use_dio2_rf: Enable DIO2 as RF switch control (default: False)
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -101,6 +103,7 @@ class SX1262Radio(LoRaRadio):
         self.rxen_pin = rxen_pin
         self.txled_pin = txled_pin
         self.rxled_pin = rxled_pin
+        self.en_pin = en_pin
 
         # Radio configuration
         self.frequency = frequency
@@ -142,6 +145,7 @@ class SX1262Radio(LoRaRadio):
         self._txen_pin_setup = False
         self._txled_pin_setup = False
         self._rxled_pin_setup = False
+        self._en_pin_setup = False
 
         self._tx_done_event = asyncio.Event()
         self._rx_done_event = asyncio.Event()
@@ -169,6 +173,9 @@ class SX1262Radio(LoRaRadio):
         self._is_receiving_packet = False
         self.NUM_NOISE_FLOOR_SAMPLES = 20
         self.SAMPLING_THRESHOLD = 10  # Only sample if RSSI < noise_floor + threshold
+
+        # Radio metrics
+        self.crc_error_count = 0
 
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
@@ -383,9 +390,38 @@ class SX1262Radio(LoRaRadio):
                             # Use the IRQ status stored by the interrupt handler
                             irqStat = self._last_irq_status
 
-                            # Check CRC error FIRST - if CRC failed, don't read FIFO
                             if irqStat & self.lora.IRQ_CRC_ERR:
-                                logger.warning("[RX] CRC error detected - discarding packet")
+                                self.crc_error_count += 1
+                                
+                                try:
+
+                                    packet_rssi_dbm, snr_db, signal_rssi_dbm = self.lora.getSignalMetrics()
+                                    payloadLengthRx, rxStartBufferPointer = self.lora.getRxBufferStatus()
+                                    device_errors = self.lora.getDeviceErrors()
+                                    noise_floor = self.get_noise_floor()
+                                    raw_packet_hex = ""
+                                    if payloadLengthRx > 0 and payloadLengthRx < 256:
+                                        try:
+                                            buffer = self.lora.readBuffer(rxStartBufferPointer, payloadLengthRx)
+                                            raw_packet_hex = bytes(buffer).hex()
+                                        except Exception:
+                                            raw_packet_hex = "(read failed)"
+                                    
+                                    logger.warning(
+                                        "[RX] CRC error #%d - RSSI=%ddBm, SNR=%.1fdB, SignalRSSI=%ddBm, "
+                                        "Length=%d, NoiseFloor=%.1fdBm, DeviceErrors=0x%04X, IRQ=0x%04X, "
+                                        "RawData=%s",
+                                        self.crc_error_count,
+                                        int(packet_rssi_dbm), snr_db, int(signal_rssi_dbm),
+                                        payloadLengthRx, noise_floor, device_errors, irqStat,
+                                        raw_packet_hex
+                                    )
+                                except Exception as diag_err:
+                                    # Fallback if diagnostic collection fails
+                                    logger.warning(
+                                        "[RX] CRC error #%d - Unable to collect diagnostics: %s", 
+                                        self.crc_error_count, diag_err
+                                    )
                             elif irqStat & self.lora.IRQ_RX_DONE:
                                 (
                                     payloadLengthRx,
@@ -577,6 +613,14 @@ class SX1262Radio(LoRaRadio):
                     logger.debug(f"RX LED pin {self.rxled_pin} configured")
                 else:
                     logger.warning(f"Could not setup RX LED pin {self.rxled_pin}")
+
+            # Setup EN pin if specified (powers up the radio when goes HIGH)
+            if self.en_pin != -1 and not self._en_pin_setup:
+                if self._gpio_manager.setup_output_pin(self.en_pin, initial_value=True):
+                    self._en_pin_setup = True
+                    logger.debug(f"EN pin {self.en_pin} configured and set HIGH")
+                else:
+                    logger.warning(f"Could not setup EN pin {self.en_pin}")
 
             # Basic radio setup
             if not self._basic_radio_setup(use_busy_check=True):
@@ -1336,6 +1380,7 @@ class SX1262Radio(LoRaRadio):
             "last_rssi": self.last_rssi,
             "last_snr": self.last_snr,
             "last_signal_rssi": self.last_signal_rssi,
+            "crc_error_count": self.crc_error_count,
         }
 
         if self._initialized and self.lora:
@@ -1553,7 +1598,6 @@ class SX1262Radio(LoRaRadio):
                 return False
         finally:
             try:
-
                 self.lora.clearIrqStatus(0xFFFF)
 
                 self.lora.setStandby(self.lora.STANDBY_RC)
@@ -1567,7 +1611,7 @@ class SX1262Radio(LoRaRadio):
                 self.lora.clearIrqStatus(0xFFFF)
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-                await asyncio.sleep(0.001)  
+                await asyncio.sleep(0.001)
                 self.lora.request(self.lora.RX_CONTINUOUS)
                 await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter RX mode
 

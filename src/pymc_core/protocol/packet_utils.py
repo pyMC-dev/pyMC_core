@@ -287,7 +287,9 @@ class PacketHashingUtils:
         sha = hashlib.sha256()
         sha.update(bytes([payload_type]))
         if payload_type == PAYLOAD_TYPE_TRACE:
-            sha.update(bytes([path_len]))
+            # C++ uses: sha.update(&path_len, sizeof(path_len))  where path_len is uint16_t
+            # Must pack as 2-byte little-endian to match C++ on ARM/x86
+            sha.update(struct.pack("<H", path_len))
         sha.update(payload)
         return sha.digest()[:MAX_HASH_SIZE]
 
