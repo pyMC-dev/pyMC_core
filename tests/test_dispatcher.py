@@ -7,6 +7,7 @@ from pymc_core.node.dispatcher import Dispatcher, DispatcherState
 from pymc_core.protocol import Packet
 from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG
 from pymc_core.protocol.packet_filter import PacketFilter
+from pymc_core.protocol.packet_utils import PathUtils
 
 
 def create_test_packet(payload_type: int, payload: bytes) -> bytes:
@@ -243,7 +244,7 @@ class TestDispatcherACKSystem:
         dispatcher._waiting_acks[crc] = ack_event
 
         # Simulate receiving ACK
-        dispatcher._register_ack_received(crc)
+        await dispatcher._register_ack_received(crc)
 
         # Event should be set
         assert ack_event.is_set()
@@ -446,6 +447,58 @@ class TestDispatcherCallbacks:
         assert callback_called
         assert received_packet is not None
         assert received_data == packet_data
+
+    @pytest.mark.asyncio
+    async def test_full_hop_count_packet_marked_do_not_retransmit(self, dispatcher):
+        """Packet with path at max hops for its encoding is marked do not retransmit."""
+        received_packet = None
+
+        def capture(packet, data, analysis):
+            nonlocal received_packet
+            received_packet = packet
+
+        dispatcher.set_raw_packet_callback(capture)
+
+        # 1-byte hashes: max 63 hops
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        pkt.path_len = PathUtils.encode_path_len(1, 63)
+        pkt.path = bytearray(bytes(63))
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        packet_data = pkt.write_to()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert received_packet is not None
+        assert received_packet.is_marked_do_not_retransmit() is True
+        assert received_packet.get_path_hash_count() == 63
+
+    @pytest.mark.asyncio
+    async def test_2byte_path_at_max_hops_marked_do_not_retransmit(self, dispatcher):
+        """Packet with 2-byte path at 32 hops (64 bytes) is marked do not retransmit."""
+        received_packet = None
+
+        def capture(packet, data, analysis):
+            nonlocal received_packet
+            received_packet = packet
+
+        dispatcher.set_raw_packet_callback(capture)
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        pkt.path_len = PathUtils.encode_path_len(2, 32)
+        pkt.path = bytearray(64)  # 32 * 2
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        packet_data = pkt.write_to()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert received_packet is not None
+        assert received_packet.is_marked_do_not_retransmit() is True
+        assert received_packet.get_path_hash_count() == 32
+        assert received_packet.get_path_byte_len() == 64
 
     @pytest.mark.asyncio
     async def test_async_callback(self, dispatcher):

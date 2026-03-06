@@ -13,23 +13,14 @@ import pytest
 
 from pymc_core.hardware.kiss_modem_wrapper import (
     CMD_DATA,
-    CMD_ENCRYPT_DATA,
-    CMD_GET_AIRTIME,
     CMD_GET_BATTERY,
-    CMD_GET_IDENTITY,
-    CMD_GET_NOISE_FLOOR,
     CMD_GET_RADIO,
-    CMD_GET_RANDOM,
     CMD_GET_STATS,
-    CMD_GET_TX_POWER,
     CMD_GET_VERSION,
-    CMD_HASH,
-    CMD_KEY_EXCHANGE,
     CMD_PING,
     CMD_SET_RADIO,
     CMD_SET_TX_POWER,
     CMD_SIGN_DATA,
-    CMD_VERIFY_SIGNATURE,
     HW_CMD_GET_DEVICE_NAME,
     HW_CMD_GET_MCU_TEMP,
     HW_CMD_GET_SIGNAL_REPORT,
@@ -39,6 +30,7 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     HW_RESP_DEVICE_NAME,
     HW_RESP_MCU_TEMP,
     HW_RESP_OK,
+    HW_RESP_RX_META,
     HW_RESP_SIGNAL_REPORT,
     KISS_CMD_FULLDUPLEX,
     KISS_CMD_PERSISTENCE,
@@ -49,25 +41,15 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     KISS_FESC,
     KISS_TFEND,
     KISS_TFESC,
-    RESP_AIRTIME,
     RESP_BATTERY,
-    RESP_ENCRYPTED,
     RESP_ERROR,
-    RESP_HASH,
     RESP_IDENTITY,
-    RESP_NOISE_FLOOR,
     RESP_OK,
     RESP_PONG,
     RESP_RADIO,
-    RESP_RANDOM,
-    RESP_SHARED_SECRET,
     RESP_SIGNATURE,
     RESP_STATS,
     RESP_TX_DONE,
-    RESP_TX_POWER,
-    RESP_VERIFY,
-    RESP_VERSION,
-    HW_RESP_RX_META,
     KissModemWrapper,
 )
 
@@ -141,7 +123,9 @@ class TestKissFrameEncoding:
         # Data frame: FEND + 0x00 + raw_packet + FEND (no in-frame metadata)
         data_frame = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, 0x03, KISS_FEND])
         # RxMeta: FEND + 0x06 + 0xF9 + SNR + RSSI + FEND (sent immediately after Data)
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
+        rx_meta_frame = bytes(
+            [KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND]
+        )
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -160,10 +144,10 @@ class TestKissFrameEncoding:
         modem.on_frame_received = lambda data: received_frames.append(data)
 
         # Data frame: payload is escaped 0xC0 (FESC + TFEND)
-        data_frame = bytes(
-            [KISS_FEND, CMD_DATA, KISS_FESC, KISS_TFEND, KISS_FEND]
+        data_frame = bytes([KISS_FEND, CMD_DATA, KISS_FESC, KISS_TFEND, KISS_FEND])
+        rx_meta_frame = bytes(
+            [KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND]
         )
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -180,7 +164,9 @@ class TestKissFrameEncoding:
 
         data_frame = bytes([KISS_FEND, CMD_DATA, 0xAA, 0xBB, KISS_FEND])
         # RxMeta: SNR=0x10 (4.0 dB), RSSI=0xB0 (-80)
-        rx_meta_frame = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND])
+        rx_meta_frame = bytes(
+            [KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND]
+        )
 
         for byte in data_frame:
             modem._decode_kiss_byte(byte)
@@ -196,6 +182,7 @@ class TestKissFrameEncoding:
         modem.is_connected = True
 
         received = []
+
         def capture(data, rssi, snr):
             received.append((data, rssi, snr))
 
@@ -274,7 +261,7 @@ class TestCommandResponses:
 
         assert written_frame[0] == KISS_FEND
         assert written_frame[1] == KISS_CMD_SETHARDWARE  # type SetHardware
-        assert written_frame[2] == HW_CMD_GET_VERSION     # sub_cmd GetVersion
+        assert written_frame[2] == HW_CMD_GET_VERSION  # sub_cmd GetVersion
         assert written_frame[-1] == KISS_FEND
 
     def test_response_parsing_identity(self):
@@ -334,7 +321,7 @@ class TestRadioConfiguration:
 
     def test_radio_config_struct_format(self):
         """Test that radio config is packed correctly"""
-        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        KissModemWrapper(port="/dev/null", auto_configure=False)
 
         freq_hz = 869618000
         bw_hz = 62500
@@ -1007,7 +994,8 @@ class TestContextManager:
         with patch.object(KissModemWrapper, "connect", return_value=True) as mock_connect:
             with patch.object(KissModemWrapper, "disconnect") as mock_disconnect:
                 with KissModemWrapper(port="/dev/null", auto_configure=False) as modem:
-                    pass
+                    pass  # keep reference so __del__ doesn't run before assert
 
                 mock_connect.assert_called_once()
                 mock_disconnect.assert_called_once()
+                _ = modem  # hold ref so __del__ runs after assert, not before

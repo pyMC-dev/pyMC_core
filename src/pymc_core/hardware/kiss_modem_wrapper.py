@@ -18,6 +18,11 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional, Union
 
+import serial
+
+from ..protocol.packet_utils import PacketTimingUtils
+from .base import LoRaRadio
+
 # RX callback: (data) for backward compat, or (data, rssi, snr) for per-packet metrics
 RxCallback = Union[
     Callable[[bytes], None],
@@ -42,9 +47,6 @@ def _invoke_rx_callback(
     else:
         callback(data)
 
-import serial
-
-from .base import LoRaRadio
 
 # KISS Protocol Constants (shared with standard KISS)
 KISS_FEND = 0xC0  # Frame End
@@ -260,6 +262,15 @@ class KissModemWrapper(LoRaRadio):
 
         self.radio_config = radio_config or {}
         self.is_configured = False
+
+        # Radio configuration — instance attributes matching SX1262Wrapper
+        # convention.  Seeded from the config dict; updated by configure_radio().
+        self.frequency = self.radio_config.get("frequency", int(869.618 * 1000000))
+        self.tx_power = self.radio_config.get("power", self.radio_config.get("tx_power", 22))
+        self.spreading_factor = self.radio_config.get("spreading_factor", 8)
+        self.bandwidth = self.radio_config.get("bandwidth", int(62500))
+        self.coding_rate = self.radio_config.get("coding_rate", 8)
+        self.preamble_length = self.radio_config.get("preamble_length", 17)
 
         self.serial_conn: Optional[serial.Serial] = None
         self.is_connected = False
@@ -572,9 +583,18 @@ class KissModemWrapper(LoRaRadio):
         except Exception as e:
             logger.warning(f"Failed to query modem info: {e}")
 
-    def configure_radio(self) -> bool:
-        """
-        Configure radio parameters
+    def configure_radio(
+        self,
+        frequency: Optional[int] = None,
+        bandwidth: Optional[int] = None,
+        spreading_factor: Optional[int] = None,
+        coding_rate: Optional[int] = None,
+    ) -> bool:
+        """Configure radio parameters.
+
+        When called with keyword arguments (e.g. from CompanionRadio), those
+        values take precedence.  When called with no arguments the values are
+        read from ``self.radio_config`` (populated from config.yaml at init).
 
         Returns:
             True if configuration successful, False otherwise
@@ -584,12 +604,23 @@ class KissModemWrapper(LoRaRadio):
             return False
 
         try:
-            # Extract configuration parameters with defaults
-            # Support both "power" and "tx_power" for compatibility with different config styles
-            frequency_hz = self.radio_config.get("frequency", int(869.618 * 1000000))
-            bandwidth_hz = self.radio_config.get("bandwidth", int(62500))
-            sf = self.radio_config.get("spreading_factor", 8)
-            cr = self.radio_config.get("coding_rate", 8)
+            # Explicit kwargs take precedence, then radio_config dict, then defaults
+            frequency_hz = (
+                frequency
+                if frequency is not None
+                else self.radio_config.get("frequency", int(869.618 * 1000000))
+            )
+            bandwidth_hz = (
+                bandwidth
+                if bandwidth is not None
+                else self.radio_config.get("bandwidth", int(62500))
+            )
+            sf = (
+                spreading_factor
+                if spreading_factor is not None
+                else self.radio_config.get("spreading_factor", 8)
+            )
+            cr = coding_rate if coding_rate is not None else self.radio_config.get("coding_rate", 8)
             power = self.radio_config.get("power", self.radio_config.get("tx_power", 22))
 
             # Set radio parameters (frequency, bandwidth, SF, CR)
@@ -607,6 +638,13 @@ class KissModemWrapper(LoRaRadio):
                 return False
 
             # Note: Sync word is configured at firmware build time, not at runtime
+
+            # Sync instance attributes to match what was applied to hardware
+            self.frequency = frequency_hz
+            self.bandwidth = bandwidth_hz
+            self.spreading_factor = sf
+            self.coding_rate = cr
+            self.tx_power = power
 
             self.is_configured = True
             logger.info(
@@ -701,9 +739,7 @@ class KissModemWrapper(LoRaRadio):
             self._pending_response = None
 
         # SetHardware frame: type 0x06, payload = sub_cmd (1 byte) + data
-        kiss_frame = self._encode_kiss_frame(
-            KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data
-        )
+        kiss_frame = self._encode_kiss_frame(KISS_CMD_SETHARDWARE, bytes([sub_cmd]) + data)
 
         if not self._write_frame(kiss_frame):
             logger.warning("SetHardware frame write failed")
@@ -735,6 +771,27 @@ class KissModemWrapper(LoRaRadio):
             }
         return None
 
+    def set_tx_power(self, power: int) -> bool:
+        """Set TX power in dBm.
+
+        Sends the command to the modem and updates the instance attribute
+        on success, matching the SX1262Wrapper interface.
+        """
+        if not self.is_connected:
+            logger.error("Cannot set TX power: not connected")
+            return False
+        try:
+            resp = self._send_command(CMD_SET_TX_POWER, bytes([power]))
+            if not resp or resp[0] == RESP_ERROR:
+                logger.error("Failed to set TX power")
+                return False
+            self.tx_power = power
+            logger.info(f"TX power set to {power} dBm")
+            return True
+        except Exception as e:
+            logger.error(f"Error setting TX power: {e}")
+            return False
+
     def get_tx_power(self) -> Optional[int]:
         """Get current TX power in dBm"""
         resp = self._send_command(CMD_GET_TX_POWER)
@@ -760,17 +817,21 @@ class KissModemWrapper(LoRaRadio):
             return resp[1][0] == 0x01
         return False
 
-    def get_airtime(self, packet_length: int) -> Optional[int]:
+    def get_airtime(self, packet_length: int, timeout: Optional[float] = None) -> Optional[int]:
         """
-        Get estimated airtime for a packet
+        Get estimated airtime for a packet from the modem.
 
         Args:
             packet_length: Length of packet in bytes
+            timeout: Response timeout in seconds (default: RESPONSE_TIMEOUT).
+                     Use a shorter value (e.g. 1.0) in the TX path to avoid
+                     blocking when the modem is busy or unresponsive.
 
         Returns:
-            Airtime in milliseconds or None on error
+            Airtime in milliseconds or None on error/timeout
         """
-        resp = self._send_command(CMD_GET_AIRTIME, bytes([packet_length]))
+        t = timeout if timeout is not None else RESPONSE_TIMEOUT
+        resp = self._send_command(CMD_GET_AIRTIME, bytes([packet_length]), timeout=t)
         if resp and resp[0] == RESP_AIRTIME and len(resp[1]) >= 4:
             return struct.unpack("<I", resp[1][:4])[0]
         return None
@@ -1106,9 +1167,13 @@ class KissModemWrapper(LoRaRadio):
         if not success:
             raise Exception("Failed to send frame via KISS modem")
 
-        airtime = self.get_airtime(len(data))
+        # Use short timeout for GET_AIRTIME so TX path is not blocked if modem
+        # is busy or unresponsive (avoids 5s stall and subsequent bad state).
+        airtime = self.get_airtime(len(data), timeout=1.0)
+        if airtime is None:
+            airtime = int(PacketTimingUtils.estimate_airtime_ms(len(data), self.radio_config))
         return {
-            "airtime_ms": airtime if airtime is not None else 0,
+            "airtime_ms": airtime,
             "lbt_attempts": len(lbt_backoff_delays),
             "lbt_backoff_delays_ms": lbt_backoff_delays,
             "lbt_channel_busy": len(lbt_backoff_delays) > 0,
@@ -1168,8 +1233,12 @@ class KissModemWrapper(LoRaRadio):
         status: Dict[str, Any] = {
             "initialized": self.is_connected,
             "frequency": cfg["frequency"] if cfg else self.radio_config.get("frequency", 0),
-            "tx_power": tx_power if tx_power is not None else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
-            "spreading_factor": cfg["spreading_factor"] if cfg else self.radio_config.get("spreading_factor", 0),
+            "tx_power": tx_power
+            if tx_power is not None
+            else self.radio_config.get("tx_power", self.radio_config.get("power", 0)),
+            "spreading_factor": cfg["spreading_factor"]
+            if cfg
+            else self.radio_config.get("spreading_factor", 0),
             "bandwidth": cfg["bandwidth"] if cfg else self.radio_config.get("bandwidth", 0),
             "coding_rate": cfg["coding_rate"] if cfg else self.radio_config.get("coding_rate", 0),
             "last_rssi": self.stats.get("last_rssi", -999),
@@ -1247,9 +1316,7 @@ class KissModemWrapper(LoRaRadio):
                 if len(self.rx_frame_buffer) >= MAX_FRAME_SIZE:
                     # Frame too long (e.g. lost FEND); reset and resync at next FEND
                     self.stats["frame_errors"] += 1
-                    logger.warning(
-                        "KISS frame exceeded max size (%d), resyncing", MAX_FRAME_SIZE
-                    )
+                    logger.warning("KISS frame exceeded max size (%d), resyncing", MAX_FRAME_SIZE)
                     self.rx_frame_buffer.clear()
                     self.in_frame = False
                 else:

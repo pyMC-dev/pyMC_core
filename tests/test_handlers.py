@@ -14,7 +14,7 @@ from pymc_core.node.handlers import (
     TextMessageHandler,
     TraceHandler,
 )
-from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
+from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -259,9 +259,50 @@ class TestGroupTextHandler:
         self.send_packet_fn = AsyncMock()
         self.event_service = MockEventService()
         self.handler = GroupTextHandler(
-            self.local_identity, self.contacts, self.log_fn, self.send_packet_fn
+            self.local_identity,
+            self.contacts,
+            self.log_fn,
+            self.send_packet_fn,
+            channel_db=None,
+            event_service=self.event_service,
+            our_node_name="InitialName",
         )
-        # GroupTextHandler doesn't take event_service in constructor
+
+    def test_set_our_node_name_updates_stored_name(self):
+        """set_our_node_name updates the name used for echo detection."""
+        assert self.handler.our_node_name == "InitialName"
+        self.handler.set_our_node_name("NewName")
+        assert self.handler.our_node_name == "NewName"
+        self.handler.set_our_node_name(None)
+        assert self.handler.our_node_name is None
+
+    def test_is_own_message_uses_current_name_after_set_our_node_name(self):
+        """_is_own_message uses the current our_node_name after it is updated."""
+        self.handler.set_our_node_name("Howl 🏝️")
+        packet = Packet()
+        packet.decrypted = {"group_text_data": {"sender_name": "Howl 🏝️"}}
+        assert self.handler._is_own_message(packet) is True
+        packet.decrypted = {"group_text_data": {"sender_name": "Howl 🧱"}}
+        assert self.handler._is_own_message(packet) is False
+        # After updating name, old name no longer matches
+        self.handler.set_our_node_name("Howl 🧱")
+        assert self.handler._is_own_message(packet) is True
+
+    def test_is_own_message_false_when_sender_name_missing(self):
+        """_is_own_message returns False when packet has no sender_name in group_text_data."""
+        self.handler.set_our_node_name("Me")
+        packet = Packet()
+        packet.decrypted = {}
+        assert self.handler._is_own_message(packet) is False
+        packet.decrypted = {"group_text_data": {}}
+        assert self.handler._is_own_message(packet) is False
+
+    def test_is_own_message_false_when_no_match(self):
+        """_is_own_message returns False when sender name differs from our_node_name."""
+        self.handler.set_our_node_name("Me")
+        packet = Packet()
+        packet.decrypted = {"group_text_data": {"sender_name": "Other"}}
+        assert self.handler._is_own_message(packet) is False
 
     def test_payload_type(self):
         """Test group text handler payload type."""
@@ -273,7 +314,7 @@ class TestGroupTextHandler:
         assert self.handler.contacts == self.contacts
         assert self.handler.log == self.log_fn
         assert self.handler.send_packet == self.send_packet_fn
-        # GroupTextHandler doesn't store event_service
+        assert self.handler.our_node_name == "InitialName"
 
 
 # Login Response Handler Tests
@@ -316,8 +357,147 @@ class TestProtocolResponseHandler:
         assert self.handler._log == self.log_fn
         assert self.handler._local_identity == self.local_identity
 
+    def test_parse_telemetry_response_tag_plus_lpp(self):
+        """Parse tag(4) + CayenneLPP matches repeater firmware format; raw_bytes is LPP only."""
+        # Repeater sends: tag(4) + LPP. Tag is 4-byte reflected_timestamp (little-endian).
+        # MeshCore first record: addVoltage(TELEM_CHANNEL_SELF=1, v)
+        # → channel=1, type=0x74 (LPP_VOLTAGE), 2 bytes 0.01V big-endian. 3.7V → 370 → 0x01 0x72
+        tag = b"\x01\x00\x00\x00"  # LE 1
+        lpp = bytes([0x01, 0x74, 0x01, 0x72])  # ch 1, Voltage, 370 (3.70 V)
+        data = tag + lpp
+        result = self.handler._parse_telemetry_response(data)
+        assert result is not None
+        assert result["type"] == "telemetry"
+        assert result["reflected_timestamp"] == 1
+        assert result["raw_bytes"] == lpp
+        assert result["sensor_count"] == 1
+        sensor = result["sensors"][0]
+        assert sensor["channel"] == 1
+        assert sensor["type"] == "Voltage"
+        assert sensor["type_id"] == 0x74
+        assert abs(sensor["value"] - 3.7) < 0.001
 
-# Trace Handler Tests
+    def test_parse_telemetry_response_rejects_non_telemetry(self):
+        """Payload without channel=1, type=0x74 signature is not classified as telemetry."""
+        tag = b"\x00\x00\x00\x00"  # LE 0
+        # Not starting with 0x01 0x74
+        data = tag + bytes([0x01, 0x67, 0x00, 0x00])  # ch 1, Temperature, 0°C
+        result = self.handler._parse_telemetry_response(data)
+        assert result is None
+
+    def test_set_contact_path_updated_callback(self):
+        """set_contact_path_updated_callback stores the callback."""
+        cb = MagicMock()
+        self.handler.set_contact_path_updated_callback(cb)
+        assert self.handler._contact_path_updated_callback is cb
+        self.handler.set_contact_path_updated_callback(None)
+        assert self.handler._contact_path_updated_callback is None
+
+    @pytest.mark.asyncio
+    async def test_contact_path_updated_callback_invoked_on_path_update(self):
+        """PATH decrypts and updates contact path; contact_path_updated callback is invoked."""
+        from pymc_core.companion.contact_store import ContactStore
+        from pymc_core.companion.models import Contact
+
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        contacts = ContactStore(5)
+        contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+        handler.set_binary_response_callback(lambda *a, **k: None)
+
+        path_len_byte = 2
+        path_bytes = bytes([0x01, 0x02])
+        extra_type = PAYLOAD_TYPE_RESPONSE
+        extra = bytes([0, 0, 0, 0, 0x00])  # tag(4) + 1 byte (not login response)
+        plaintext = bytes([path_len_byte]) + path_bytes + bytes([extra_type]) + extra
+
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+        payload = bytes([our_hash, src_hash]) + encrypted
+
+        pkt = Packet()
+        pkt.header = (0 << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        callback_calls = []
+
+        async def on_path_updated(pub: bytes, path_len: int, path_bytes_arg: bytes) -> None:
+            callback_calls.append((pub, path_len, path_bytes_arg))
+
+        handler.set_contact_path_updated_callback(on_path_updated)
+
+        await handler(pkt)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0][0] == peer_pubkey
+        assert callback_calls[0][1] == path_len_byte
+        assert callback_calls[0][2] == path_bytes
+
+    @pytest.mark.asyncio
+    async def test_contact_path_updated_with_2byte_hashes(self):
+        """PATH with 2-byte hashes decrypts and updates contact path correctly."""
+        from pymc_core.companion.contact_store import ContactStore
+        from pymc_core.companion.models import Contact
+        from pymc_core.protocol.packet_utils import PathUtils
+
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        contacts = ContactStore(5)
+        contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+        handler.set_binary_response_callback(lambda *a, **k: None)
+
+        # 2 hops × 2-byte hashes = 4 bytes of path data
+        path_len_byte = PathUtils.encode_path_len(2, 2)  # 0x42
+        path_bytes = bytes([0x01, 0x02, 0x03, 0x04])
+        extra_type = PAYLOAD_TYPE_RESPONSE
+        extra = bytes([0, 0, 0, 0, 0x00])
+        plaintext = bytes([path_len_byte]) + path_bytes + bytes([extra_type]) + extra
+
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+        payload = bytes([our_hash, src_hash]) + encrypted
+
+        pkt = Packet()
+        pkt.header = (0 << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        callback_calls = []
+
+        async def on_path_updated(pub: bytes, path_len: int, path_bytes_arg: bytes) -> None:
+            callback_calls.append((pub, path_len, path_bytes_arg))
+
+        handler.set_contact_path_updated_callback(on_path_updated)
+
+        await handler(pkt)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0][0] == peer_pubkey
+        assert callback_calls[0][1] == path_len_byte  # encoded byte, not raw count
+        assert callback_calls[0][2] == path_bytes  # all 4 bytes of path data
+
+
 class TestTraceHandler:
     def setup_method(self):
         self.log_fn = MagicMock()

@@ -23,6 +23,7 @@ from .constants import (
     PAYLOAD_TYPE_GRP_DATA,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RAW_CUSTOM,
     PAYLOAD_TYPE_REQ,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
@@ -34,7 +35,13 @@ from .constants import (
     TELEM_PERM_LOCATION,
 )
 from .identity import Identity, LocalIdentity
-from .packet_utils import PacketDataUtils, PacketHeaderUtils, PacketValidationUtils, RouteTypeUtils
+from .packet_utils import (
+    PacketDataUtils,
+    PacketHeaderUtils,
+    PacketValidationUtils,
+    PathUtils,
+    RouteTypeUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,9 +476,25 @@ class PacketBuilder:
         contact_identity = Identity(contact_pubkey)
         shared_secret = contact_identity.calc_shared_secret(local_identity.get_private_key())
 
-        return PacketBuilder.create_anon_req(
-            contact_identity, local_identity, shared_secret, plaintext, "direct"
+        out_path_len = getattr(contact, "out_path_len", -1)
+        if out_path_len < 0:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        pkt = PacketBuilder.create_anon_req(
+            contact_identity, local_identity, shared_secret, plaintext, route_type
         )
+
+        if route_type == "direct" and out_path_len > 0:
+            out_path = getattr(contact, "out_path", b"")
+            if out_path:
+                pkt.set_path(
+                    out_path[:MAX_PATH_SIZE],
+                    out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
+                )
+
+        return pkt
 
     @staticmethod
     def create_group_datagram(
@@ -523,9 +546,19 @@ class PacketBuilder:
         secret_bytes = (
             bytes.fromhex(channel["secret"])
             if isinstance(channel["secret"], str)
-            else channel["secret"].encode("utf-8")
+            else (
+                channel["secret"]
+                if isinstance(channel["secret"], bytes)
+                else channel["secret"].encode("utf-8")
+            )
         )
-        channel_hash = hashlib.sha256(secret_bytes).digest()[0]
+        # Same channel hash as GroupTextHandler (hash first 16 when key has second 16 zero)
+        hash_input = (
+            secret_bytes[:16]
+            if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16
+            else (secret_bytes[:32] if len(secret_bytes) > 32 else secret_bytes)
+        )
+        channel_hash = hashlib.sha256(hash_input).digest()[0]
         secret_bytes = (secret_bytes + b"\x00" * 32)[:32]
 
         timestamp, flags = PacketBuilder._get_timestamp(), 0x00
@@ -617,6 +650,21 @@ class PacketBuilder:
         pkt.payload = bytearray(payload)
         pkt.payload_len = len(payload)
         return pkt
+
+    @staticmethod
+    def create_raw_data(data: bytes) -> Packet:
+        """
+        Create a raw custom packet (PAYLOAD_TYPE_RAW_CUSTOM) with no encryption.
+
+        Route type is always DIRECT (consistent with firmware CMD_SEND_RAW_DATA).
+        Caller must set pkt.path and pkt.path_len for direct routing.
+        """
+        if len(data) > MAX_PACKET_PAYLOAD:
+            raise ValueError(
+                f"Raw data length {len(data)} exceeds MAX_PACKET_PAYLOAD ({MAX_PACKET_PAYLOAD})"
+            )
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_RAW_CUSTOM, route_type="direct")
+        return PacketBuilder._create_packet(header, data)
 
     @staticmethod
     def create_path_return(
@@ -732,8 +780,23 @@ class PacketBuilder:
                     f"Path length {len(routing_path)} exceeds maximum {MAX_PATH_SIZE}, truncating"
                 )
                 routing_path = routing_path[:MAX_PATH_SIZE]
-            pkt.path = bytearray(routing_path)
-            pkt.path_len = len(pkt.path)
+            # Preserve encoded path_len from contact when using its stored path
+            contact_path_len = getattr(contact, "out_path_len", -1) if contact else -1
+            if (
+                out_path is None
+                and contact_path_len >= 0
+                and PathUtils.is_valid_path_len(contact_path_len)
+            ):
+                pkt.set_path(bytearray(routing_path), contact_path_len)
+            else:
+                # path_len encodes hop count in 6 bits (0-63); 64 would encode as 0
+                if len(routing_path) == 64:
+                    logger.warning(
+                        "Path length 64 exceeds encodable hop count 63 (1-byte hashes), "
+                        "truncating to 63 bytes"
+                    )
+                    routing_path = routing_path[:63]
+                pkt.set_path(bytearray(routing_path))
         else:
             pkt.path_len, pkt.path = 0, bytearray()
 
@@ -801,8 +864,22 @@ class PacketBuilder:
             contact, local_identity, plaintext
         )
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ)
+        out_path_len = getattr(contact, "out_path_len", -1)
+        out_path = getattr(contact, "out_path", b"") or b""
+        if out_path_len <= 0 or not out_path:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ, route_type)
         packet = PacketBuilder._create_packet(header, payload)
+
+        if route_type == "direct" and len(out_path) > 0:
+            packet.set_path(
+                out_path[:MAX_PATH_SIZE],
+                out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
+            )
+
         return packet, timestamp
 
     @staticmethod

@@ -31,34 +31,56 @@ class TextMessageHandler(BaseHandler):
         """Set callback function for command responses."""
         self.command_response_callback = callback
 
+    def _contact_pubkey_bytes(self, contact) -> bytes:
+        """Return contact's public key as 32 bytes (handles hex str or bytes)."""
+        pk = contact.public_key
+        return bytes.fromhex(pk) if isinstance(pk, str) else bytes(pk)
+
     async def __call__(self, packet: Packet) -> None:
         if len(packet.payload) < 4:
             self.log("TXT_MSG payload too short to decrypt")
             return
 
         src_hash = packet.payload[1]
-        matched_contact = None
+        # Collect all contacts whose public key first byte matches src_hash (hash collision
+        # possible)
+        candidates = []
         for contact in self.contacts.contacts:
             try:
-                if bytes.fromhex(contact.public_key)[0] == src_hash:
-                    matched_contact = contact
-                    break
+                pk = self._contact_pubkey_bytes(contact)
+                if len(pk) >= 1 and pk[0] == src_hash:
+                    candidates.append(contact)
             except Exception as err:
                 self.log(f"Error reading contact key: {err}")
 
-        if not matched_contact:
+        if not candidates:
             self.log(f"No contact found for src hash: {src_hash:02X}")
             return
 
-        peer_id = Identity(bytes.fromhex(matched_contact.public_key))
-        shared_secret = peer_id.calc_shared_secret(self.local_identity.get_private_key())
-        aes_key = shared_secret[:16]
         payload = packet.payload[2:]  # Skip dest_hash and src_hash
+        matched_contact = None
+        decrypted = None
+        shared_secret = None
+        for contact in candidates:
+            try:
+                pubkey_bytes = self._contact_pubkey_bytes(contact)
+                if len(pubkey_bytes) != 32:
+                    continue
+                peer_id = Identity(pubkey_bytes)
+                ss = peer_id.calc_shared_secret(self.local_identity.get_private_key())
+                aes_key = ss[:16]
+                decrypted = CryptoUtils.mac_then_decrypt(aes_key, ss, payload)
+                matched_contact = contact
+                shared_secret = ss
+                break
+            except Exception:
+                continue
 
-        try:
-            decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, payload)
-        except Exception as err:
-            self.log(f"Decryption failed: {err}")
+        if matched_contact is None or decrypted is None:
+            self.log(
+                f"Decryption failed: Invalid HMAC for all {len(candidates)} contact(s) "
+                f"with src hash {src_hash:02X}"
+            )
             return
 
         if len(decrypted) < 5:  # timestamp(4) + flags(1) minimum
@@ -72,7 +94,7 @@ class TextMessageHandler(BaseHandler):
         txt_type = (flags >> 2) & 0x3F  # Upper 6 bits are txt_type
         message_body = decrypted[5:]  # Rest is the message content
 
-        pubkey = bytes.fromhex(matched_contact.public_key)
+        pubkey = self._contact_pubkey_bytes(matched_contact)
         timestamp_int = int.from_bytes(timestamp, "little")
 
         # Determine message routing type from packet header
@@ -87,8 +109,8 @@ class TextMessageHandler(BaseHandler):
         # Skip ACK for TXT_TYPE_CLI_DATA (0x01) - CLI commands don't need ACKs
         # Following C++ pattern: only TXT_TYPE_PLAIN (0x00) gets ACKs
         TXT_TYPE_PLAIN = 0x00
-        TXT_TYPE_CLI_DATA = 0x01
-        send_ack = (txt_type == TXT_TYPE_PLAIN)
+        TXT_TYPE_CLI_DATA = 0x01  # noqa: F841
+        send_ack = txt_type == TXT_TYPE_PLAIN
 
         if send_ack:
             # Create appropriate ACK response
@@ -191,6 +213,7 @@ class TextMessageHandler(BaseHandler):
                     "contact_name": matched_contact.name,
                     "contact_pubkey": matched_contact.public_key,
                     "message_text": decoded_msg,
+                    "txt_type": txt_type,
                     "is_outgoing": False,
                     "timestamp": message_timestamp,
                     "delivery_status": "received",
@@ -201,6 +224,7 @@ class TextMessageHandler(BaseHandler):
                     },
                     "sender_name": matched_contact.name,
                     "is_read": False,
+                    "packet_hash": packet.calculate_packet_hash().hex().upper(),
                 }
 
                 # Publish new message event for app to handle database storage

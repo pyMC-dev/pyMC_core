@@ -42,6 +42,8 @@ from .constants import (
     PH_VER_MASK,
     PH_VER_SHIFT,
     PUB_KEY_SIZE,
+    REQ_TYPE_GET_OWNER_INFO,
+    REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_DIRECT,
     ROUTE_TYPE_FLOOD,
@@ -70,6 +72,7 @@ from .packet_utils import (
     PacketHeaderUtils,
     PacketTimingUtils,
     PacketValidationUtils,
+    PathUtils,
     RouteTypeUtils,
 )
 from .transport_keys import calc_transport_code, get_auto_key_for
@@ -96,6 +99,7 @@ __all__ = [
     "PacketHeaderUtils",
     "PacketHashingUtils",
     "RouteTypeUtils",
+    "PathUtils",
     "PacketTimingUtils",
     # Header constants
     "PH_ROUTE_MASK",
@@ -148,8 +152,10 @@ __all__ = [
     "CONTACT_TYPE_REPEATER",
     "CONTACT_TYPE_ROOM_SERVER",
     "CONTACT_TYPE_HYBRID",
-    # Telemetry
+    # Protocol request types
+    "REQ_TYPE_GET_STATUS",
     "REQ_TYPE_GET_TELEMETRY_DATA",
+    "REQ_TYPE_GET_OWNER_INFO",
     "TELEM_PERM_BASE",
     "TELEM_PERM_LOCATION",
     "TELEM_PERM_ENVIRONMENT",

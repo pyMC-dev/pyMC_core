@@ -1,7 +1,7 @@
 from typing import Optional
 
 from ...protocol import Packet
-from ...protocol.constants import PAYLOAD_TYPE_GRP_TXT
+from ...protocol.constants import PAYLOAD_TYPE_GRP_TXT, ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
 from ...protocol.crypto import CryptoUtils
 from .base import BaseHandler
 
@@ -29,53 +29,71 @@ class GroupTextHandler(BaseHandler):
         self.event_service = event_service
         self.our_node_name = our_node_name  # Store our node name for echo detection
 
+    def set_our_node_name(self, name: str | None) -> None:
+        """Update the node name used for echo detection (e.g. after set_advert_name)."""
+        self.our_node_name = name
+
     def _get_channel_by_hash(self, channel_hash: int) -> Optional[dict]:
-        """Find a channel by its hash (first byte of public key) from database."""
+        """Find a channel by its hash (first byte of SHA256) from database.
+
+        Returns the first matching channel.  See also
+        :meth:`_get_channels_by_hash` which returns *all* matches (needed
+        because the hash is only 1 byte and collisions are expected).
+        """
+        matches = self._get_channels_by_hash(channel_hash)
+        return matches[0] if matches else None
+
+    def _get_channels_by_hash(self, channel_hash: int) -> list[dict]:
+        """Return **all** channels whose derived hash matches *channel_hash*.
+
+        The channel hash is only 1 byte, so collisions between channels
+        with different PSKs are expected (~0.4 % per foreign channel).
+        The firmware handles this by trying each match until HMAC validates;
+        we do the same.
+        """
         if not self.channel_db:
             self.log("No channel database available")
-            return None
+            return []
 
         try:
-            # Get all channels from database (live query)
             channels = self.channel_db.get_channels()
+            matches = []
             for channel in channels:
                 if "secret" in channel:
-                    # Use consistent channel hash derivation
                     calculated_hash = self._derive_channel_hash(channel["secret"])
                     if calculated_hash == channel_hash:
-                        return channel
-            return None
+                        matches.append(channel)
+            return matches
         except Exception as e:
             self.log(f"Error querying channel database: {e}")
-            return None
+            return []
 
-    def _derive_channel_hash(self, channel_secret: str) -> int:
-        """Derive a consistent channel hash from the secret."""
-        import hashlib
-
-        # Convert hex secret to bytes, then derive key
+    def _secret_bytes_for_hash(self, channel_secret: str) -> bytes:
+        """Normalize secret to bytes used for channel hash (match MeshCore firmware).
+        Firmware hashes only first 16 bytes when second 16 are zero (128-bit key)."""
         try:
             secret_bytes = bytes.fromhex(channel_secret)
         except ValueError:
-            # If not hex, treat as UTF-8 string
             secret_bytes = channel_secret.encode("utf-8")
+        if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16:
+            return secret_bytes[:16]
+        if len(secret_bytes) > 32:
+            return secret_bytes[:32]
+        return secret_bytes
 
-        # Simple SHA256 derivation (no salt) to match official spec
+    def _derive_channel_hash(self, channel_secret: str) -> int:
+        """Derive channel hash (first byte of SHA256) to match MeshCore firmware."""
+        import hashlib
+
+        secret_bytes = self._secret_bytes_for_hash(channel_secret)
         channel_key = hashlib.sha256(secret_bytes).digest()
-
-        # Return first byte as the channel hash
         return channel_key[0]
 
     def _derive_channel_keys(self, channel_secret: str) -> tuple:
         """Derive all necessary keys from channel secret."""
         import hashlib
 
-        try:
-            secret_bytes = bytes.fromhex(channel_secret)
-        except ValueError:
-            secret_bytes = channel_secret.encode("utf-8")
-
-        # Simple SHA256 derivation to match official spec
+        secret_bytes = self._secret_bytes_for_hash(channel_secret)
         master_key = hashlib.sha256(secret_bytes).digest()
 
         # Split into different keys
@@ -88,7 +106,12 @@ class GroupTextHandler(BaseHandler):
     def _decrypt_channel_message(
         self, channel_secret: str, mac: bytes, ciphertext: bytes
     ) -> Optional[bytes]:
-        """Decrypt a channel message using the channel secret."""
+        """Attempt to decrypt a channel message using *channel_secret*.
+
+        Returns the plaintext on success, or ``None`` if the HMAC does not
+        validate (which is expected during candidate iteration when multiple
+        channels share the same 1-byte hash).
+        """
         try:
             # Convert hex secret to bytes
             try:
@@ -98,22 +121,19 @@ class GroupTextHandler(BaseHandler):
 
             # Ensure we have PUB_KEY_SIZE (32 bytes) for the secret
             if len(secret_bytes) < 32:
-                # Pad with zeros if needed
                 secret_bytes = secret_bytes + b"\x00" * (32 - len(secret_bytes))
             elif len(secret_bytes) > 32:
-                # Truncate if too long
                 secret_bytes = secret_bytes[:32]
 
             expected_mac = CryptoUtils._hmac_sha256(secret_bytes, ciphertext)[:2]
 
             if mac != expected_mac:
-                raise ValueError("Invalid HMAC")
+                return None  # HMAC mismatch — normal during candidate iteration
 
-            plaintext = CryptoUtils._aes_decrypt(secret_bytes[:16], ciphertext)
-            return plaintext
+            return CryptoUtils._aes_decrypt(secret_bytes[:16], ciphertext)
 
         except Exception as e:
-            self.log(f"Channel message decryption failed: {e}")
+            self.log(f"Channel message decryption error: {e}")
             return None
 
     def _parse_plaintext_message(self, plaintext: bytes) -> Optional[dict]:
@@ -124,7 +144,9 @@ class GroupTextHandler(BaseHandler):
         try:
             timestamp = int.from_bytes(plaintext[:4], "little")
             flags = plaintext[4]
-            message_content = plaintext[5:].decode("utf-8", errors="replace")
+            # Decode and strip trailing null (AES decrypt is block-aligned)
+            raw = plaintext[5:].decode("utf-8", errors="replace")
+            message_content = raw.rstrip("\x00")
 
             # Parse message flags according to spec
             message_type = "unknown"
@@ -137,7 +159,8 @@ class GroupTextHandler(BaseHandler):
                 # For signed messages, first two bytes are sender prefix
                 if len(plaintext) >= 7:
                     # sender_prefix = plaintext[5:7]  # Unused for now
-                    message_content = plaintext[7:].decode("utf-8", errors="replace")
+                    raw = plaintext[7:].decode("utf-8", errors="replace")
+                    message_content = raw.rstrip("\x00")
 
             return {
                 "timestamp": timestamp,
@@ -191,20 +214,35 @@ class GroupTextHandler(BaseHandler):
             cipher_mac = payload[1:3]
             ciphertext = payload[3:]
 
-            # Find the channel configuration
-            channel = self._get_channel_by_hash(channel_hash)
-            if not channel:
+            # Find all channels whose 1-byte hash matches (collisions are
+            # expected; the firmware tries up to 4 candidates).
+            candidates = self._get_channels_by_hash(channel_hash)
+            if not candidates:
                 self.log(f"Unknown channel hash: {channel_hash:02X}")
+                return
+
+            # Try each candidate until HMAC validates (matches firmware behaviour).
+            channel = None
+            plaintext = None
+            for candidate in candidates:
+                result = self._decrypt_channel_message(candidate["secret"], cipher_mac, ciphertext)
+                if result is not None:
+                    channel = candidate
+                    plaintext = result
+                    break
+
+            if channel is None or plaintext is None:
+                # No candidate validated — the packet is for a channel we
+                # don't have the key for (hash collision with 1-byte hash).
+                self.log(
+                    f"GRP_TXT hash {channel_hash:02X} matched "
+                    f"{len(candidates)} local channel(s) but HMAC failed "
+                    f"for all — unknown channel"
+                )
                 return
 
             channel_name = channel.get("name", f"Channel-{channel_hash:02X}")
             self.log(f"Received group message for channel: {channel_name}")
-
-            # Decrypt the message
-            plaintext = self._decrypt_channel_message(channel["secret"], cipher_mac, ciphertext)
-            if not plaintext:
-                self.log("Failed to decrypt channel message")
-                return
 
             # Parse the decrypted message
             parsed_message = self._parse_plaintext_message(plaintext)
@@ -231,7 +269,9 @@ class GroupTextHandler(BaseHandler):
             # Check if this message is from ourselves using sender name (echo detection)
             is_own = self._is_own_message(packet)
             if is_own:
-                self.log(f"Own echo detected (will publish for heard-count): {sender_name}: {message_body}")
+                self.log(
+                    f"Own echo detected (skip publish to client): {sender_name}: {message_body}"
+                )
 
             # Log the group message
             self.log(f"<<< Channel [{channel_name}] {sender_name}: {message_body} >>>")
@@ -259,7 +299,12 @@ class GroupTextHandler(BaseHandler):
     ):
         """Save the group message to database and broadcast via WebSocket."""
         try:
-            message_id = packet.get_packet_hash_hex(16)  
+            message_id = packet.get_packet_hash_hex(16)
+
+            # Do not publish NEW_CHANNEL_MESSAGE for our own messages (inject + echoes).
+            # The client already has the sent message; publishing per echo would spam the event.
+            if is_outgoing:
+                return
 
             # Publish channel message event if available
             if self.event_service:
@@ -270,6 +315,12 @@ class GroupTextHandler(BaseHandler):
 
                     # Extract path from packet (list of node hashes)
                     path = list(packet.path) if hasattr(packet, "path") and packet.path else None
+                    # path_len: flood packets use actual path length; direct uses 0xFF
+                    route_type = packet.header & 0x03
+                    if route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+                        path_len = getattr(packet, "path_len", 0) or len(packet.path or [])
+                    else:
+                        path_len = 0xFF
 
                     # Use a custom message type for single channel message addition
                     message_data = {
@@ -281,6 +332,8 @@ class GroupTextHandler(BaseHandler):
                         "timestamp": timestamp,
                         "message_type": "group_text",
                         "flags": 0,
+                        "path_len": path_len,
+                        "packet_hash": packet.calculate_packet_hash().hex().upper(),
                         "full_content": packet.decrypted.get("group_text_data", {}).get(
                             "full_content"
                         ),
@@ -295,8 +348,8 @@ class GroupTextHandler(BaseHandler):
                         },
                     }
 
-                    # Publish channel message event
-                    self.event_service.publish_sync(MeshEvents.NEW_CHANNEL_MESSAGE, message_data)
+                    # Publish channel message event (await so queued and MSG_WAITING sent)
+                    await self.event_service.publish(MeshEvents.NEW_CHANNEL_MESSAGE, message_data)
                     self.log("Published group message event")
                 except Exception as publish_error:
                     self.log(f"Failed to publish group message event: {publish_error}")
