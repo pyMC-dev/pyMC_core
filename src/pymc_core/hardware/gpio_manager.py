@@ -14,6 +14,9 @@ from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO, EdgeEvent
+    # We don't need the realtime event clock for our use case and it breaks support on older kernels, so disable it if present
+    import periphery.gpio_cdev2 as _cdev
+    _cdev.Cdev2GPIO._GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME = 0
     PERIPHERY_AVAILABLE = True
 except ImportError:
     # Mock GPIO classes for testing/non-hardware environments
