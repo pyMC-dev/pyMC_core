@@ -125,6 +125,7 @@ class CompanionRadio(CompanionBase):
             logger.warning("CompanionRadio already running")
             return
         self._running = True
+        self.node.dispatcher.set_default_path_hash_mode(self.prefs.path_hash_mode)
         self._dispatcher_task = asyncio.create_task(self.node.start())
         logger.info(
             f"CompanionRadio started: name={self.prefs.node_name}, "
@@ -164,6 +165,11 @@ class CompanionRadio(CompanionBase):
         """Set flood region and propagate to the dispatcher."""
         super().set_flood_region(region_name)
         self.node.dispatcher.flood_transport_key = self._flood_transport_key
+
+    def set_path_hash_mode(self, mode: int) -> None:
+        """Set path hash mode and sync to dispatcher default."""
+        super().set_path_hash_mode(mode)
+        self.node.dispatcher.set_default_path_hash_mode(self.prefs.path_hash_mode)
 
     # -------------------------------------------------------------------------
     # Device Configuration (overrides for radio hardware)

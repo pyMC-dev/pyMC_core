@@ -19,6 +19,7 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_TRACE,
     ROUTE_TYPE_DIRECT,
 )
+from pymc_core.protocol.utils import determine_contact_type_from_flags, get_contact_type_name
 
 # ---------------------------------------------------------------------------
 # ResponseWaiter
@@ -79,6 +80,25 @@ class TestAdvTypeToFlags:
     def test_unknown_defaults_to_chat(self):
         assert adv_type_to_flags(99) == ADVERT_FLAG_IS_CHAT_NODE
         assert adv_type_to_flags(0) == ADVERT_FLAG_IS_CHAT_NODE
+
+
+class TestDetermineContactTypeFromFlags:
+    """Wire advert flags (low nibble) map to ADV_TYPE_* (1=chat, 2=repeater, 3=room, 4=sensor)."""
+
+    def test_sensor_flags_map_to_adv_type_sensor(self):
+        assert determine_contact_type_from_flags(0x04) == ADV_TYPE_SENSOR
+        assert determine_contact_type_from_flags(0x14) == ADV_TYPE_SENSOR  # with HAS_LOCATION
+        assert get_contact_type_name(4) == "Sensor"
+
+    def test_all_node_types(self):
+        assert determine_contact_type_from_flags(0x01) == ADV_TYPE_CHAT
+        assert determine_contact_type_from_flags(0x02) == ADV_TYPE_REPEATER
+        assert determine_contact_type_from_flags(0x03) == ADV_TYPE_ROOM
+        assert determine_contact_type_from_flags(0x04) == ADV_TYPE_SENSOR
+
+    def test_unknown(self):
+        assert determine_contact_type_from_flags(0x05) == 0
+        assert determine_contact_type_from_flags(0) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -175,3 +195,17 @@ class TestApplyPathHashMode:
         assert pkt.path_len == 0
         assert pkt.get_path_hash_size() == 1
         assert pkt.get_path_hash_count() == 0
+
+    def test_sets_path_hash_mode_applied_marker(self):
+        """Companion sets _path_hash_mode_applied so dispatcher does not overwrite."""
+        bridge = _make_bridge(path_hash_mode=1)
+        pkt = Packet()
+        pkt.header = 0x06
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+
+        bridge._apply_path_hash_mode(pkt)
+
+        assert getattr(pkt, "_path_hash_mode_applied", False) is True

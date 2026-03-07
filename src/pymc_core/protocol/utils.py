@@ -10,6 +10,7 @@ from .constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
+    ADVERT_FLAG_IS_SENSOR,
     PUB_KEY_SIZE,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
@@ -65,6 +66,8 @@ def describe_advert_flags(flags: int) -> str:
         labels.append("is repeater")
     if flags & ADVERT_FLAG_IS_ROOM_SERVER:
         labels.append("is room server")
+    if flags & ADVERT_FLAG_IS_SENSOR:
+        labels.append("is sensor")
     if flags & ADVERT_FLAG_HAS_LOCATION:
         labels.append("has location")
     if flags & ADVERT_FLAG_HAS_FEATURE1:
@@ -148,21 +151,22 @@ def determine_contact_type_from_flags(flags: int) -> int:
         ADVERT_FLAG_IS_CHAT_NODE,
         ADVERT_FLAG_IS_REPEATER,
         ADVERT_FLAG_IS_ROOM_SERVER,
+        ADVERT_FLAG_IS_SENSOR,
     )
 
     # Extract node type from bits 0-3 (mask with 0x0F)
     node_type = flags & 0x0F
 
     if node_type == ADVERT_FLAG_IS_ROOM_SERVER:  # 0x03
-        return 3  # CONTACT_TYPE_ROOM_SERVER
+        return 3  # ADV_TYPE_ROOM
     elif node_type == ADVERT_FLAG_IS_REPEATER:  # 0x02
-        return 2  # CONTACT_TYPE_REPEATER
+        return 2  # ADV_TYPE_REPEATER
     elif node_type == ADVERT_FLAG_IS_CHAT_NODE:  # 0x01
-        return 1  # CONTACT_TYPE_CHAT_NODE
-    elif node_type == 0x04:  # Sensor (if defined)
-        return 5  # CONTACT_TYPE_SENSOR (you may need to add this constant)
+        return 1  # ADV_TYPE_CHAT
+    elif node_type == ADVERT_FLAG_IS_SENSOR:  # 0x04
+        return 4  # ADV_TYPE_SENSOR
     else:
-        return 0  # CONTACT_TYPE_UNKNOWN
+        return 0  # unknown
 
 
 def get_contact_type_name(contact_type: int) -> str:
