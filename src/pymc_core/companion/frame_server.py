@@ -166,8 +166,10 @@ class CompanionFrameServer:
 
     One client per companion at a time.  If a new connection arrives while
     one is already active, the existing connection is closed and the new
-    one is accepted (eviction). An idle read timeout (client_idle_timeout_sec)
-    frees the slot when no data is received. Persistence is handled through
+    one is accepted (eviction). An optional idle read timeout
+    (client_idle_timeout_sec) frees the slot when no data is received; pass
+    None to disable (no disconnect on idle, matching firmware behaviour).
+    Persistence is handled through
     overridable hook methods; the base class works with in-memory stores only.
     """
 
@@ -185,7 +187,7 @@ class CompanionFrameServer:
         stats_getter: Optional[Callable] = None,
         control_handler: Optional[Any] = None,
         heartbeat_interval: int = 15,
-        client_idle_timeout_sec: int = 120,
+        client_idle_timeout_sec: Optional[int] = 120,
     ):
         self.bridge = bridge
         self.companion_hash = companion_hash
@@ -840,6 +842,7 @@ class CompanionFrameServer:
     async def _handle_cmd(self, payload: bytes) -> None:
         """Dispatch command to handler."""
         if not payload:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         cmd = payload[0]
         data = payload[1:]
@@ -1569,6 +1572,9 @@ class CompanionFrameServer:
                 ch = self.bridge.get_channel(idx)
                 frame = _channel_info_frame(idx, ch)
                 self._write_frame(frame)
+            if max_channels_val == 0:
+                # Send at least one frame so client always gets a response per command
+                self._write_frame(_channel_info_frame(0, None))
             return
 
         if channel_idx < 0 or channel_idx >= max_channels_val:

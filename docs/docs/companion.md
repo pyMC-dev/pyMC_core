@@ -557,11 +557,11 @@ CompanionFrameServer(
     stats_getter: Callable | None = None,
     control_handler: Any | None = None,
     heartbeat_interval: int = 15,      # seconds between keepalive frames
-    client_idle_timeout_sec: int = 120,  # no data from client → disconnect and free slot
+    client_idle_timeout_sec: int | None = 120,  # no data from client → disconnect; None = no timeout (firmware behaviour)
 )
 ```
 
-**Connection management:** Only one client is allowed at a time. If a new connection arrives while one is already active, the server closes the existing connection and accepts the new one (same as firmware). If the client disappears without closing (e.g. kill, network drop), the slot is freed after no data is received for `client_idle_timeout_sec` seconds (default 120). Operators can tune this timeout to avoid dropping slow but live clients.
+**Connection management:** Only one client is allowed at a time. If a new connection arrives while one is already active, the server closes the existing connection and accepts the new one (same as firmware). If the client disappears without closing (e.g. kill, network drop), the slot is freed after no data is received for `client_idle_timeout_sec` seconds (default 120). Pass `None` to disable the idle timeout (no disconnect on idle, matching firmware). Operators can tune this timeout to avoid dropping slow but live clients.
 
 ### Supported Commands
 
