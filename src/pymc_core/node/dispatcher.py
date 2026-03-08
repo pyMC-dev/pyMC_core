@@ -9,6 +9,7 @@ from ..protocol import Packet
 from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_TRACE,
     PH_TYPE_SHIFT,
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
@@ -94,6 +95,11 @@ class Dispatcher:
         # When set, flood packets are tagged with a transport code and sent
         # as ROUTE_TYPE_TRANSPORT_FLOOD.  Set via companion set_flood_scope().
         self.flood_transport_key: Optional[bytes] = None
+
+        # Default path hash mode for flood packets with 0 hops that have not
+        # had path hash mode set by the companion. 0=1-byte, 1=2-byte, 2=3-byte.
+        # When None, no default is applied.
+        self.path_hash_mode: Optional[int] = None
 
         self._logger = logging.getLogger("Dispatcher")
         self._current_expected_crc: Optional[int] = None
@@ -464,6 +470,33 @@ class Dispatcher:
         pkt.transport_codes[1] = 0  # reserved for home region
         pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_TRANSPORT_FLOOD
 
+    def set_default_path_hash_mode(self, mode: Optional[int]) -> None:
+        """Set or clear the default path hash mode for flood packets with 0 hops.
+
+        When set, packets sent via send_packet() that have not already had path
+        hash mode applied (e.g. by the companion) will get path_len bits 6-7
+        set from this mode. Companion-originated packets are never overwritten.
+
+        Args:
+            mode: 0=1-byte, 1=2-byte, 2=3-byte per hop; None to disable.
+        """
+        if mode is not None and mode not in (0, 1, 2):
+            raise ValueError(f"path_hash_mode must be None, 0, 1, or 2, got {mode}")
+        self.path_hash_mode = mode
+
+    def _apply_default_path_hash_mode(self, pkt: Packet) -> None:
+        """Apply dispatcher default path hash mode if set and packet is eligible."""
+        if self.path_hash_mode is None:
+            return
+        route_type = pkt.get_route_type()
+        if route_type not in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+            return
+        if pkt.get_path_hash_count() != 0:
+            return
+        if getattr(pkt, "_path_hash_mode_applied", False):
+            return
+        pkt.apply_path_hash_mode(self.path_hash_mode, mark_applied=False)
+
     async def send_packet(
         self,
         packet: Packet,
@@ -480,7 +513,14 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        # TRACE is only sent via sendDirect() in firmware; flood TRACE is unsupported.
+        route_type = packet.get_route_type()
+        if route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+            if packet.get_payload_type() == PAYLOAD_TYPE_TRACE:
+                self._log("TRACE not supported for flood; dropping")
+                return False
         self._apply_flood_scope(packet)
+        self._apply_default_path_hash_mode(packet)
         async with self._tx_lock:  # Wait our turn
             return await self._send_packet_immediate(packet, wait_for_ack, expected_crc)
 

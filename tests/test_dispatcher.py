@@ -5,7 +5,14 @@ import pytest
 
 from pymc_core.node.dispatcher import Dispatcher, DispatcherState
 from pymc_core.protocol import Packet
-from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG
+from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ACK,
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_TRACE,
+    PAYLOAD_TYPE_TXT_MSG,
+    ROUTE_TYPE_DIRECT,
+    ROUTE_TYPE_FLOOD,
+)
 from pymc_core.protocol.packet_filter import PacketFilter
 from pymc_core.protocol.packet_utils import PathUtils
 
@@ -355,6 +362,93 @@ class TestDispatcherSendPacket:
 
         assert result is True
         dispatcher.radio.transmit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_path_hash_mode_applied_to_flood_packet(self, dispatcher):
+        """When path_hash_mode is set, flood packets with 0 hops get path_len bits 6-7 set."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        dispatcher.set_default_path_hash_mode(1)  # 2-byte hashes
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ADVERT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"advert_payload")
+        pkt.payload_len = len(pkt.payload)
+
+        await dispatcher.send_packet(pkt)
+
+        raw = dispatcher.radio.tx_data
+        assert raw is not None
+        path_len_byte = raw[1]
+        assert path_len_byte == 0x40
+
+    @pytest.mark.asyncio
+    async def test_path_hash_mode_not_overwritten_when_companion_applied(self, dispatcher):
+        """Packet with _path_hash_mode_applied is not overwritten by dispatcher default."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        dispatcher.set_default_path_hash_mode(2)  # 3-byte
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ADVERT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        pkt.apply_path_hash_mode(1, mark_applied=True)
+
+        await dispatcher.send_packet(pkt)
+
+        raw = dispatcher.radio.tx_data
+        assert raw is not None
+        path_len_byte = raw[1]
+        assert path_len_byte == 0x40
+
+    @pytest.mark.asyncio
+    async def test_trace_flood_rejected(self, dispatcher):
+        """TRACE payload with flood route is rejected; send_packet returns False and no TX."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00")  # tag, auth, flags
+        pkt.payload_len = len(pkt.payload)
+
+        result = await dispatcher.send_packet(pkt)
+
+        assert result is False
+        assert dispatcher.radio.tx_data is None
+
+    @pytest.mark.asyncio
+    async def test_trace_direct_still_sends(self, dispatcher):
+        """TRACE with direct route is still sent (no regression)."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT) | ROUTE_TYPE_DIRECT
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+        pkt.payload_len = len(pkt.payload)
+
+        result = await dispatcher.send_packet(pkt, wait_for_ack=False)
+
+        assert result is True
+        assert dispatcher.radio.tx_data is not None
+
+    def test_set_default_path_hash_mode_validates(self, dispatcher):
+        """set_default_path_hash_mode accepts None, 0, 1, 2 and rejects other values."""
+        dispatcher.set_default_path_hash_mode(None)
+        assert dispatcher.path_hash_mode is None
+        for mode in (0, 1, 2):
+            dispatcher.set_default_path_hash_mode(mode)
+            assert dispatcher.path_hash_mode == mode
+        with pytest.raises(ValueError, match="path_hash_mode must be None, 0, 1, or 2"):
+            dispatcher.set_default_path_hash_mode(3)
+        with pytest.raises(ValueError, match="path_hash_mode must be None, 0, 1, or 2"):
+            dispatcher.set_default_path_hash_mode(-1)
 
     @pytest.mark.asyncio
     async def test_send_packet_failure(self, dispatcher):

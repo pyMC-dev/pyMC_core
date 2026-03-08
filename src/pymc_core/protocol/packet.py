@@ -2,6 +2,7 @@ from typing import ByteString, Optional
 
 from .constants import (
     MAX_SUPPORTED_PAYLOAD_VERSION,
+    PAYLOAD_TYPE_TRACE,
     PH_ROUTE_MASK,
     PH_TYPE_MASK,
     PH_TYPE_SHIFT,
@@ -113,6 +114,7 @@ class Packet:
         "_do_not_retransmit",
         "drop_reason",
         "_tx_metadata",
+        "_path_hash_mode_applied",
     )
 
     def __init__(self):
@@ -135,6 +137,7 @@ class Packet:
         # Repeater flag to prevent retransmission and log drop reason
         self._do_not_retransmit = False
         self.drop_reason = None  # Optional: reason for dropping packet
+        self._path_hash_mode_applied = False
 
     def get_route_type(self) -> int:
         """
@@ -217,6 +220,36 @@ class Packet:
     def get_path_byte_len(self) -> int:
         """Calculate actual path byte length from the encoded path_len byte."""
         return PathUtils.get_path_byte_len(self.path_len)
+
+    def apply_path_hash_mode(
+        self,
+        mode: int,
+        *,
+        mark_applied: bool = False,
+    ) -> None:
+        """Set path_len bits 6-7 from path_hash_mode for 0-hop packets (skip TRACE).
+
+        Used by companion and dispatcher so the rule lives in one place. TRACE
+        packets are excluded because the repeater's trace handler uses path/path_len
+        for SNR values, not routing hashes.
+
+        Args:
+            mode: Path hash mode: 0=1-byte, 1=2-byte, 2=3-byte per hop.
+            mark_applied: If True, set _path_hash_mode_applied so dispatcher
+                does not overwrite (used when companion applies its preference).
+
+        Raises:
+            ValueError: If mode not in (0, 1, 2).
+        """
+        if mode not in (0, 1, 2):
+            raise ValueError(f"path_hash_mode must be 0, 1, or 2, got {mode}")
+        if self.get_payload_type() == PAYLOAD_TYPE_TRACE:
+            return
+        if self.get_path_hash_count() != 0:
+            return
+        self.path_len = PathUtils.encode_path_len(mode + 1, 0)
+        if mark_applied:
+            self._path_hash_mode_applied = True
 
     def get_path_hashes(self) -> list:
         """Return path as a list of per-hop hash entries (1, 2, or 3 bytes each).

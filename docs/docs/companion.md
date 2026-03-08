@@ -282,6 +282,12 @@ companion.set_radio_params(915_000_000, 250_000, 10, 5)  # freq, bw, SF, CR
 companion.set_tx_power(22)                                # dBm
 companion.set_tuning_params(rx_delay=0.0, airtime_factor=0.0)
 
+# Path hash mode for flood packets: 0=1-byte, 1=2-byte, 2=3-byte per hop (repeaters
+# use this to decide how many bytes to append when forwarding). Applied to all
+# companion-originated flood packets with 0 hops. Set via CMD_SET_PATH_HASH_MODE on
+# the frame server.
+companion.set_path_hash_mode(1)   # use 2-byte path hashes
+
 # Fetch current radio configuration (frequency, bandwidth, SF, CR, TX power, tuning)
 radio_params = companion.get_radio_params()
 # {'frequency_hz': 915000000, 'bandwidth_hz': 250000, 'spreading_factor': 10, ...}
@@ -309,6 +315,13 @@ companion.set_other_params(
 
 prefs = companion.get_self_info()   # -> NodePrefs (copy)
 ```
+
+Originated flood packets (including adverts) set the high bits of the packet's
+``path_len`` byte so repeaters know how many bytes to append when forwarding
+(1-, 2-, or 3-byte path hashes). The companion applies its ``path_hash_mode``
+preference to all such packets with zero hops via ``set_path_hash_mode()``;
+the frame server exposes this as CMD_SET_PATH_HASH_MODE and reports it in
+device info (byte 81).
 
 ### Flood Scope (Regions)
 
@@ -365,6 +378,7 @@ stats = companion.get_stats(STATS_TYPE_PACKETS)
 | `set_advert_name()` | Updates `prefs.node_name` | Also syncs `node.node_name` |
 | `set_flood_scope()` | Stores transport key | Also syncs to `node.dispatcher` |
 | `set_flood_region()` | Derives key from name | Also syncs to `node.dispatcher` |
+| `set_path_hash_mode()` | Updates `prefs.path_hash_mode` | Also syncs to `node.dispatcher.set_default_path_hash_mode()` |
 
 ---
 
@@ -543,11 +557,11 @@ CompanionFrameServer(
     stats_getter: Callable | None = None,
     control_handler: Any | None = None,
     heartbeat_interval: int = 15,      # seconds between keepalive frames
-    client_idle_timeout_sec: int = 120,  # no data from client → disconnect and free slot
+    client_idle_timeout_sec: int | None = 120,  # no data from client → disconnect; None = no timeout (firmware behaviour)
 )
 ```
 
-**Connection management:** Only one client is allowed at a time. If a new connection arrives while one is already active, the server closes the existing connection and accepts the new one (same as firmware). If the client disappears without closing (e.g. kill, network drop), the slot is freed after no data is received for `client_idle_timeout_sec` seconds (default 120). Operators can tune this timeout to avoid dropping slow but live clients.
+**Connection management:** Only one client is allowed at a time. If a new connection arrives while one is already active, the server closes the existing connection and accepts the new one (same as firmware). If the client disappears without closing (e.g. kill, network drop), the slot is freed after no data is received for `client_idle_timeout_sec` seconds (default 120). Pass `None` to disable the idle timeout (no disconnect on idle, matching firmware). Operators can tune this timeout to avoid dropping slow but live clients.
 
 ### Supported Commands
 
@@ -904,7 +918,10 @@ class NodePrefs:
     rx_delay_base: float = 0.0
     airtime_factor: float = 0.0
     client_repeat: int = 0   # reported in CMD_DEVICE_QUERY device info frame (byte 80)
+    path_hash_mode: int = 0   # 0=1-byte, 1=2-byte, 2=3-byte path hashes for flood packets (byte 81)
 ```
+
+---
 
 ### SentResult
 

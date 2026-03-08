@@ -29,7 +29,6 @@ from ..protocol.constants import (
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
     PAYLOAD_TYPE_CONTROL,
-    PAYLOAD_TYPE_TRACE,
     REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
     ROUTE_TYPE_FLOOD,
@@ -584,15 +583,9 @@ class CompanionBase(ABC):
         Packets with existing hops (stored contact paths) are untouched.
         Trace packets are excluded because the repeater's trace handler uses
         ``path``/``path_len`` to store SNR values, not routing hashes.
-
-        Mirrors firmware ``sendFlood(pkt, delay, _prefs.path_hash_mode + 1)``
-        which calls ``pkt->setPathHashSizeAndCount(hash_size, 0)``.
+        Sets ``_path_hash_mode_applied`` so the dispatcher does not overwrite.
         """
-        if pkt.get_payload_type() == PAYLOAD_TYPE_TRACE:
-            return
-        if pkt.get_path_hash_count() == 0:
-            hash_size = self.prefs.path_hash_mode + 1
-            pkt.path_len = PathUtils.encode_path_len(hash_size, 0)
+        pkt.apply_path_hash_mode(self.prefs.path_hash_mode, mark_applied=True)
 
     # -------------------------------------------------------------------------
     # Statistics (subclasses may override _get_radio_stats for STATS_TYPE_RADIO)
