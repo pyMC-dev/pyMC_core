@@ -657,7 +657,9 @@ class CompanionFrameServer:
     # Must exceed DEFAULT_MAX_CONTACTS (+2 for START/END) so that
     # _cmd_get_contacts can enqueue the full contact dump without drops.
     _WRITE_QUEUE_MAXSIZE = 2048
-    _DRAIN_BATCH = 10
+    # Drain after every frame so clients that count one TCP receive per response
+    # (e.g. _receive_count per data_received()) stay in sync with sends.
+    _DRAIN_BATCH = 1
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
         """Single writer task: pull frames from the queue, write to the
@@ -1039,7 +1041,8 @@ class CompanionFrameServer:
         if ok:
             self._write_ok()
         else:
-            self._write_err(ERR_CODE_BAD_STATE)
+            # Firmware uses ERR_CODE_NOT_FOUND for both bad channel and sendGroupMessage failure
+            self._write_err(ERR_CODE_NOT_FOUND)
 
     async def _cmd_send_binary_req(self, data: bytes) -> None:
         if len(data) < 33:
