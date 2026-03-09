@@ -205,14 +205,8 @@ class ProtocolRequestHandler:
         """
         Build RESPONSE packet to send back to client.
 
-        Args:
-            original_packet: Original REQ packet
-            client: Client info
-            response_data: Response payload (includes timestamp)
-            shared_secret: Encryption secret
-
-        Returns:
-            Packet: RESPONSE packet ready to send
+        Matches simple_repeater firmware: REQ via flood → path-return PATH via flood;
+        REQ via direct → RESPONSE via direct (if client out_path) else RESPONSE via flood.
         """
         try:
             # Get client identity
@@ -228,12 +222,51 @@ class ProtocolRequestHandler:
                 )
                 client_identity = Identity(pk)
 
-            # Decide routing based on out_path_len if available
-            route_type = "direct"
-            if hasattr(client, "out_path_len") and client.out_path_len < 0:
-                route_type = "flood"
+            client_hash = client_identity.get_public_key()[0]
+            our_hash = self.local_identity.get_public_key()[0]
 
-            # Create RESPONSE datagram
+            # REQ via flood → path-return PATH (firmware: createPathReturn + sendFlood)
+            if getattr(original_packet, "is_route_flood", lambda: False)():
+                path_len_byte = getattr(original_packet, "path_len", 0)
+                path_byte_len = (
+                    PathUtils.get_path_byte_len(path_len_byte)
+                    if PathUtils.is_valid_path_len(path_len_byte)
+                    else 0
+                )
+                raw_path = getattr(original_packet, "path", None) or b""
+                path_list = list(raw_path[:path_byte_len]) if path_byte_len else []
+                reply_packet = PacketBuilder.create_path_return(
+                    dest_hash=client_hash,
+                    src_hash=our_hash,
+                    secret=shared_secret,
+                    path=path_list,
+                    extra_type=PAYLOAD_TYPE_RESPONSE,
+                    extra=response_data,
+                )
+                hash_size = (
+                    PathUtils.get_path_hash_size(path_len_byte)
+                    if PathUtils.is_valid_path_len(path_len_byte)
+                    else 1
+                )
+                reply_packet.apply_path_hash_mode(hash_size - 1)
+                self.log(f"PATH (path-return) built for 0x{client_hash:02X} via FLOOD")
+                return reply_packet
+
+            # REQ via direct: use client out_path if set, else flood
+            route_type = "flood"
+            path_bytes = None
+            path_len_encoded = None
+            if (
+                hasattr(client, "out_path_len")
+                and client.out_path_len >= 0
+                and hasattr(client, "out_path")
+                and len(client.out_path) > 0
+                and PathUtils.is_valid_path_len(client.out_path_len)
+            ):
+                route_type = "direct"
+                path_bytes = client.out_path[:MAX_PATH_SIZE]
+                path_len_encoded = client.out_path_len
+
             reply_packet = PacketBuilder.create_datagram(
                 ptype=PAYLOAD_TYPE_RESPONSE,
                 dest=client_identity,
@@ -242,22 +275,10 @@ class ProtocolRequestHandler:
                 plaintext=response_data,
                 route_type=route_type,
             )
+            if path_bytes is not None and path_len_encoded is not None:
+                reply_packet.set_path(path_bytes, path_len_encoded)
 
-            # Add path for direct routing if available
-            if hasattr(client, "out_path_len") and hasattr(client, "out_path"):
-                if client.out_path_len >= 0 and len(client.out_path) > 0:
-                    reply_packet.set_path(
-                        client.out_path[:MAX_PATH_SIZE],
-                        client.out_path_len
-                        if PathUtils.is_valid_path_len(client.out_path_len)
-                        else None,
-                    )
-
-            self.log(
-                f"RESPONSE built for 0x{client_identity.get_public_key()[0]:02X} "
-                f"via {route_type.upper()}"
-            )
-
+            self.log(f"RESPONSE built for 0x{client_hash:02X} via {route_type.upper()}")
             return reply_packet
 
         except Exception as e:
