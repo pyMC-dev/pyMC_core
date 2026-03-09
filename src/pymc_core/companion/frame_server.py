@@ -812,10 +812,11 @@ class CompanionFrameServer:
                     break
                 payload = await reader.readexactly(frame_len)
                 await self._handle_cmd(payload)
-                if self._writer_task is None or self._writer_task.done():
+                writer_task = self._writer_task
+                if writer_task is None or writer_task.done():
                     disconnect_reason = "writer_failed"
-                    if self._writer_task is not None and self._writer_task.done():
-                        exc = self._writer_task.exception()
+                    if writer_task is not None and writer_task.done():
+                        exc = writer_task.exception()
                         if exc is not None:
                             logger.error(
                                 "Writer task failed (port=%s): %s",
