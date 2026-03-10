@@ -764,6 +764,16 @@ class CompanionFrameServer:
                 self.port,
             )
             old_writer = self._client_writer
+            # Cancel and await the old writer task so it's fully gone before we replace
+            # the queue and create a new task (avoids the new task being mistaken for
+            # a failed writer when the old task had already exited).
+            if self._writer_task is not None:
+                self._writer_task.cancel()
+                try:
+                    await self._writer_task
+                except asyncio.CancelledError:
+                    pass
+                self._writer_task = None
             try:
                 old_writer.close()
                 await old_writer.wait_closed()
@@ -802,8 +812,18 @@ class CompanionFrameServer:
                     break
                 payload = await reader.readexactly(frame_len)
                 await self._handle_cmd(payload)
-                if self._writer_task.done():
+                writer_task = self._writer_task
+                if writer_task is None or writer_task.done():
                     disconnect_reason = "writer_failed"
+                    if writer_task is not None and writer_task.done():
+                        exc = writer_task.exception()
+                        if exc is not None:
+                            logger.error(
+                                "Writer task failed (port=%s): %s",
+                                self.port,
+                                exc,
+                                exc_info=True,
+                            )
                     break
         except asyncio.IncompleteReadError:
             disconnect_reason = "incomplete_read"

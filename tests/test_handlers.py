@@ -10,6 +10,7 @@ from pymc_core.node.handlers import (
     GroupTextHandler,
     LoginResponseHandler,
     PathHandler,
+    ProtocolRequestHandler,
     ProtocolResponseHandler,
     TextMessageHandler,
     TraceHandler,
@@ -21,10 +22,13 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_REQ,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
     PAYLOAD_TYPE_TXT_MSG,
     PUB_KEY_SIZE,
+    ROUTE_TYPE_DIRECT,
+    ROUTE_TYPE_FLOOD,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
 )
@@ -496,6 +500,121 @@ class TestProtocolResponseHandler:
         assert callback_calls[0][0] == peer_pubkey
         assert callback_calls[0][1] == path_len_byte  # encoded byte, not raw count
         assert callback_calls[0][2] == path_bytes  # all 4 bytes of path data
+
+
+class TestProtocolRequestHandler:
+    """Tests for ProtocolRequestHandler._build_response (firmware-consistent)."""
+
+    def setup_method(self):
+        self.local_identity = LocalIdentity()
+        self.contacts = MockContactBook()
+        self.log_fn = MagicMock()
+        self.handler = ProtocolRequestHandler(
+            self.local_identity, self.contacts, log_fn=self.log_fn
+        )
+
+    def _client_with_key(self, pubkey_bytes: bytes):
+        """Return a minimal client object with public_key (no .id to use public_key path)."""
+
+        class Client:
+            pass
+
+        c = Client()
+        c.public_key = pubkey_bytes
+        c.out_path = b""
+        c.out_path_len = -1
+        return c
+
+    def test_flood_req_returns_path_packet(self):
+        """REQ via flood → path-return PATH packet (firmware createPathReturn + sendFlood)."""
+        peer_identity = LocalIdentity()
+        client = self._client_with_key(peer_identity.get_public_key())
+        client_hash = peer_identity.get_public_key()[0]
+        our_hash = self.local_identity.get_public_key()[0]
+
+        # Incoming REQ via flood with 1-hop path
+        original = Packet()
+        original.header = (ROUTE_TYPE_FLOOD & 0x03) | (PAYLOAD_TYPE_REQ << 2)
+        original.path_len = 1
+        original.path = bytearray([0xAA])
+        assert original.is_route_flood()
+
+        response_data = b"\x39\x30\x00\x00\x00"  # timestamp LE + req_type 0
+        shared_secret = peer_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+        result = self.handler._build_response(original, client, response_data, shared_secret)
+
+        assert result is not None
+        assert result.get_payload_type() == PAYLOAD_TYPE_PATH
+        assert result.is_route_flood()
+        assert result.payload[0] == client_hash
+        assert result.payload[1] == our_hash
+
+    def test_flood_req_applies_path_hash_mode(self):
+        """Path-return packet preserves incoming path hash size (2-byte hashes)."""
+        from pymc_core.protocol.packet_utils import PathUtils
+
+        peer_identity = LocalIdentity()
+        client = self._client_with_key(peer_identity.get_public_key())
+        shared_secret = peer_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+        original = Packet()
+        original.header = (ROUTE_TYPE_FLOOD & 0x03) | (PAYLOAD_TYPE_REQ << 2)
+        # 2 hops × 2-byte hashes → encoded path_len
+        original.path_len = PathUtils.encode_path_len(2, 2)
+        original.path = bytearray([0x01, 0x02, 0x03, 0x04])
+        response_data = b"\x00\x00\x00\x00\x00"
+
+        result = self.handler._build_response(original, client, response_data, shared_secret)
+
+        assert result is not None
+        assert result.get_payload_type() == PAYLOAD_TYPE_PATH
+        # path_len high bits = (2-1)<<6 = 0x40 for 2-byte hash size, 0 hops
+        assert result.path_len == 0x40
+
+    def test_direct_req_no_out_path_returns_response_flood(self):
+        """Direct REQ and no client out_path → RESPONSE via flood (no reversed path)."""
+        peer_identity = LocalIdentity()
+        client = self._client_with_key(peer_identity.get_public_key())
+        client.out_path = b""
+        client.out_path_len = -1
+        shared_secret = peer_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+        original = Packet()
+        original.header = (ROUTE_TYPE_DIRECT & 0x03) | (PAYLOAD_TYPE_REQ << 2)
+        original.path_len = 1
+        original.path = bytearray([0xBB])
+        assert not original.is_route_flood()
+
+        response_data = b"\x01\x00\x00\x00\x00"
+        result = self.handler._build_response(original, client, response_data, shared_secret)
+
+        assert result is not None
+        assert result.get_payload_type() == PAYLOAD_TYPE_RESPONSE
+        assert result.is_route_flood()
+        assert result.path_len == 0
+
+    def test_direct_req_with_out_path_returns_response_direct(self):
+        """Direct REQ and client has out_path → RESPONSE via direct with that path."""
+        peer_identity = LocalIdentity()
+        client = self._client_with_key(peer_identity.get_public_key())
+        client.out_path = bytes([0x01, 0x02])
+        client.out_path_len = 2
+        shared_secret = peer_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+        original = Packet()
+        original.header = (ROUTE_TYPE_DIRECT & 0x03) | (PAYLOAD_TYPE_REQ << 2)
+        original.path_len = 0
+        original.path = bytearray()
+
+        response_data = b"\x02\x00\x00\x00\x00"
+        result = self.handler._build_response(original, client, response_data, shared_secret)
+
+        assert result is not None
+        assert result.get_payload_type() == PAYLOAD_TYPE_RESPONSE
+        assert result.is_route_direct()
+        assert result.path_len == 2
+        assert bytes(result.path) == b"\x01\x02"
 
 
 class TestTraceHandler:
