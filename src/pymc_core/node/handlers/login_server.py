@@ -265,6 +265,11 @@ class LoginServerHandler(BaseHandler):
                 f"original_flood={is_flood}"
             )
 
+            path_len_encoded_arg = (
+                original_packet.path_len
+                if original_packet and original_packet.path_len > 0
+                else None
+            )
             response_pkt = PacketBuilder.create_path_return(
                 dest_hash=client_hash,
                 src_hash=server_hash,
@@ -272,6 +277,7 @@ class LoginServerHandler(BaseHandler):
                 path=path_list,
                 extra_type=PAYLOAD_TYPE_RESPONSE,
                 extra=bytes(reply_data),
+                path_len_encoded=path_len_encoded_arg,
             )
             packet_type_name = "PATH"
 

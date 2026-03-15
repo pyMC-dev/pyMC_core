@@ -1,6 +1,6 @@
 import asyncio
 
-from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder, PacketTimingUtils
+from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder, PacketTimingUtils, PathUtils
 from ...protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_TXT_MSG
 from .base import BaseHandler
 
@@ -124,6 +124,11 @@ class TextMessageHandler(BaseHandler):
 
                 # Create PATH ACK response
                 incoming_path = list(packet.path if hasattr(packet, "path") else [])
+                path_len_encoded = (
+                    getattr(packet, "path_len", None)
+                    if PathUtils.is_valid_path_len(getattr(packet, "path_len", -1))
+                    else None
+                )
 
                 ack_packet = PacketBuilder.create_path_return(
                     dest_hash=PacketBuilder._hash_byte(pubkey),
@@ -132,6 +137,7 @@ class TextMessageHandler(BaseHandler):
                     path=incoming_path,
                     extra_type=PAYLOAD_TYPE_ACK,
                     extra=ack_hash,
+                    path_len_encoded=path_len_encoded,
                 )
 
                 packet_len = len(ack_packet.write_to())

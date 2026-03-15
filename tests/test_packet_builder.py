@@ -1,11 +1,14 @@
 from pymc_core import LocalIdentity
+from pymc_core.protocol import CryptoUtils
 from pymc_core.protocol.constants import (
     MAX_PACKET_PAYLOAD,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RAW_CUSTOM,
 )
 from pymc_core.protocol.packet_builder import PacketBuilder
+from pymc_core.protocol.packet_utils import PathUtils
 
 
 # PacketBuilder tests
@@ -77,3 +80,59 @@ def test_packet_builder_create_raw_data_too_large_raises():
     data = bytes(MAX_PACKET_PAYLOAD + 1)
     with pytest.raises(ValueError, match="exceeds MAX_PACKET_PAYLOAD"):
         PacketBuilder.create_raw_data(data)
+
+
+def test_packet_builder_create_path_return_encoded_path_len():
+    """Inner payload first byte must be encoded path_len (hash size + hop count),
+    not path byte count.
+
+    With 2-byte hashes and 2 hops, path is 4 bytes. Encoded path_len = 0x42.
+    Without path_len_encoded, first byte would be 4 (wrong: decoded as 4 hops × 1-byte).
+    """
+    path_len_encoded = PathUtils.encode_path_len(2, 2)  # 0x42: 2-byte hashes, 2 hops
+    assert path_len_encoded == 0x42
+    path_byte_len = PathUtils.get_path_byte_len(path_len_encoded)
+    assert path_byte_len == 4
+
+    path = list(bytes(range(4)))  # 4 path bytes
+    secret = bytes(32)  # 32-byte shared secret
+    pkt = PacketBuilder.create_path_return(
+        dest_hash=0xAB,
+        src_hash=0xCD,
+        secret=secret,
+        path=path,
+        extra_type=0xFF,
+        extra=b"",
+        path_len_encoded=path_len_encoded,
+    )
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_PATH
+    assert pkt.payload[0] == 0xAB
+    assert pkt.payload[1] == 0xCD
+
+    aes_key = secret[:16]
+    cipher = bytes(pkt.payload[2:])
+    decrypted = CryptoUtils.mac_then_decrypt(aes_key, secret, cipher)
+    assert decrypted[0] == 0x42, "first byte must be encoded path_len 0x42, not path byte count 4"
+    assert PathUtils.get_path_hash_size(decrypted[0]) == 2
+    assert PathUtils.get_path_hash_count(decrypted[0]) == 2
+    assert decrypted[1:5] == bytes(path)
+    assert decrypted[5] == 0xFF  # extra_type
+
+
+def test_packet_builder_create_path_return_no_encoded_uses_len_path():
+    """When path_len_encoded is None, first byte is len(path) (1-byte hash semantics)."""
+    path = [0x11, 0x22, 0x33]  # 3 bytes
+    secret = bytes(32)
+    pkt = PacketBuilder.create_path_return(
+        dest_hash=0x01,
+        src_hash=0x02,
+        secret=secret,
+        path=path,
+        extra_type=0xFF,
+        extra=b"",
+        path_len_encoded=None,
+    )
+    aes_key = secret[:16]
+    decrypted = CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(pkt.payload[2:]))
+    assert decrypted[0] == 3
+    assert decrypted[1:4] == bytes(path)
