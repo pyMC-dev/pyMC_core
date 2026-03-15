@@ -7,6 +7,7 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RAW_CUSTOM,
 )
+from pymc_core.protocol.packet import Packet
 from pymc_core.protocol.packet_builder import PacketBuilder
 from pymc_core.protocol.packet_utils import PathUtils
 
@@ -136,3 +137,97 @@ def test_packet_builder_create_path_return_no_encoded_uses_len_path():
     decrypted = CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(pkt.payload[2:]))
     assert decrypted[0] == 3
     assert decrypted[1:4] == bytes(path)
+
+
+def test_create_text_message_truncated_path_path_len_consistency():
+    """When contact has 64-byte path but out_path_len encodes more than 64 bytes
+    (e.g. 33 hops × 2-byte = 66), do not use contact_path_len; use 1-byte
+    encoding and cap path at 63 so path_len never declares more bytes than present.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    # 64-byte path, but encoded as 33 hops × 2-byte = 66 (invalid to use)
+    contact_path_len_66 = PathUtils.encode_path_len(2, 33)  # 0x61, 66 bytes
+    assert PathUtils.get_path_byte_len(contact_path_len_66) == 66
+    contact = type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": list(range(64)),
+            "out_path_len": contact_path_len_66,
+        },
+    )()
+    pkt, _ = PacketBuilder.create_text_message(contact, local, "hi", 0, "direct", out_path=None)
+    # Must not have used contact_path_len (66 > 64); path should be 63 bytes, 1-byte encoding
+    assert pkt.get_path_byte_len() <= len(pkt.path)
+    assert pkt.get_path_byte_len() == 63
+    assert len(pkt.path) == 63
+
+
+def test_create_protocol_request_truncated_path_path_len_consistency():
+    """When contact out_path is > 64 bytes and out_path_len encodes > 64 bytes,
+    truncate path and do not use out_path_len; cap at 63 and use 1-byte encoding.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    out_path_len_66 = PathUtils.encode_path_len(2, 33)  # 66 bytes
+    contact = type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": bytes(range(70)),
+            "out_path_len": out_path_len_66,
+        },
+    )()
+    packet, _ = PacketBuilder.create_protocol_request(contact, local, 0x01, b"")
+    assert packet.get_path_byte_len() <= len(packet.path)
+    assert packet.get_path_byte_len() == 63
+    assert len(packet.path) == 63
+
+
+def test_create_login_packet_truncated_path_path_len_consistency():
+    """Same as create_protocol_request: truncated path must not use out_path_len
+    when it would imply more bytes than present.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    out_path_len_66 = PathUtils.encode_path_len(2, 33)
+    contact = type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": bytes(range(70)),
+            "out_path_len": out_path_len_66,
+        },
+    )()
+    pkt = PacketBuilder.create_login_packet(contact, local, "secret")
+    assert pkt.get_path_byte_len() <= len(pkt.path)
+    assert pkt.get_path_byte_len() == 63
+    assert len(pkt.path) == 63
+
+
+def test_truncated_path_packet_round_trip():
+    """Packet built with truncated path and safe path_len must write_to/read_from
+    without error and without 'truncated path'."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    out_path_len_66 = PathUtils.encode_path_len(2, 33)
+    contact = type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": bytes(range(70)),
+            "out_path_len": out_path_len_66,
+        },
+    )()
+    packet, _ = PacketBuilder.create_protocol_request(contact, local, 0x01, b"data")
+    raw = packet.write_to()
+    pkt2 = Packet()
+    ok = pkt2.read_from(raw)
+    assert ok
+    assert pkt2.get_path_byte_len() == len(pkt2.path)
+    assert pkt2.get_path_byte_len() == 63

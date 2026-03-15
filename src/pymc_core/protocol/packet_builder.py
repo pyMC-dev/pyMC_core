@@ -489,10 +489,15 @@ class PacketBuilder:
         if route_type == "direct" and out_path_len > 0:
             out_path = getattr(contact, "out_path", b"")
             if out_path:
-                pkt.set_path(
-                    out_path[:MAX_PATH_SIZE],
-                    out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
-                )
+                path_bytes = out_path[:MAX_PATH_SIZE]
+                encoded_len = None
+                if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                    out_path_len
+                ) <= len(path_bytes):
+                    encoded_len = out_path_len
+                elif len(path_bytes) == 64:
+                    path_bytes = path_bytes[:63]
+                pkt.set_path(path_bytes, encoded_len)
 
         return pkt
 
@@ -807,6 +812,7 @@ class PacketBuilder:
                 out_path is None
                 and contact_path_len >= 0
                 and PathUtils.is_valid_path_len(contact_path_len)
+                and PathUtils.get_path_byte_len(contact_path_len) <= len(routing_path)
             ):
                 pkt.set_path(bytearray(routing_path), contact_path_len)
             else:
@@ -896,10 +902,15 @@ class PacketBuilder:
         packet = PacketBuilder._create_packet(header, payload)
 
         if route_type == "direct" and len(out_path) > 0:
-            packet.set_path(
-                out_path[:MAX_PATH_SIZE],
-                out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
-            )
+            path_bytes = out_path[:MAX_PATH_SIZE]
+            encoded_len = None
+            if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                out_path_len
+            ) <= len(path_bytes):
+                encoded_len = out_path_len
+            elif len(path_bytes) == 64:
+                path_bytes = path_bytes[:63]
+            packet.set_path(path_bytes, encoded_len)
 
         return packet, timestamp
 
