@@ -41,6 +41,7 @@ from pymc_core.hardware.kiss_modem_wrapper import (
     KISS_FESC,
     KISS_TFEND,
     KISS_TFESC,
+    PENDING_RX_TTL_SEC,
     RESP_BATTERY,
     RESP_ERROR,
     RESP_IDENTITY,
@@ -223,7 +224,7 @@ class TestKissFrameEncoding:
 
         assert len(received) == 0
         assert len(modem._pending_rx_queue) == 1
-        assert modem._pending_rx_queue[0] == b"\x01\x02\x03"
+        assert modem._pending_rx_queue[0][1] == b"\x01\x02\x03"
 
     def test_port_non_zero_discarded(self):
         """Frames with port != 0 are ignored (type byte 0x10 = port 1, cmd 0)"""
@@ -237,6 +238,29 @@ class TestKissFrameEncoding:
         frame = bytes([KISS_FEND, 0x10, 0x01, 0x02, 0x03, KISS_FEND])
         for byte in frame:
             modem._decode_kiss_byte(byte)
+
+        assert len(received) == 0
+        assert len(modem._pending_rx_queue) == 0
+
+    def test_stale_pending_data_expired_before_rx_meta(self):
+        """Pending Data older than PENDING_RX_TTL_SEC is dropped on RxMeta; no ghost delivery"""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        received = []
+        modem.on_frame_received = lambda data, rssi, snr: received.append((data, rssi, snr))
+
+        data_frame = bytes([KISS_FEND, CMD_DATA, 0x01, 0x02, 0x03, KISS_FEND])
+        rx_meta_frame = bytes(
+            [KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_RX_META, 0x10, 0xB0, KISS_FEND]
+        )
+
+        with patch("pymc_core.hardware.kiss_modem_wrapper.time") as mock_time:
+            mock_time.time.side_effect = [0.0, PENDING_RX_TTL_SEC + 1.0]
+            for byte in data_frame:
+                modem._decode_kiss_byte(byte)
+            for byte in rx_meta_frame:
+                modem._decode_kiss_byte(byte)
 
         assert len(received) == 0
         assert len(modem._pending_rx_queue) == 0

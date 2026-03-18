@@ -14,6 +14,7 @@ import logging
 import random
 import struct
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional, Union
@@ -187,6 +188,8 @@ MAX_FRAME_SIZE = 512
 # Data payload ≤255 bytes (MeshCore MAX_TRANS_UNIT); queue bounds unpaired Data frames
 KISS_MAX_PACKET_SIZE = 255
 MAX_PENDING_RX_FRAMES = 64  # max Data frames queued awaiting RxMeta; each payload ≤255 bytes
+# Max age for pending Data before we drop it (avoids delivering stale payload on later RxMeta)
+PENDING_RX_TTL_SEC = 5.0
 RX_BUFFER_SIZE = 1024
 TX_BUFFER_SIZE = 1024
 DEFAULT_BAUDRATE = 115200
@@ -303,7 +306,7 @@ class KissModemWrapper(LoRaRadio):
         self._tx_done_event = threading.Event()
         self._tx_done_result: Optional[bool] = None
 
-        # Pending RX data payloads (Data frame) waiting for RxMeta frame
+        # Pending RX: (timestamp, payload) waiting for RxMeta; expire by TTL to avoid ghost delivery
         self._pending_rx_queue: deque = deque()
 
         self.stats = {
@@ -1383,7 +1386,7 @@ class KissModemWrapper(LoRaRadio):
                     MAX_PENDING_RX_FRAMES,
                 )
             else:
-                self._pending_rx_queue.append(payload)
+                self._pending_rx_queue.append((time.time(), payload))
 
         elif cmd == KISS_CMD_SETHARDWARE:
             # SetHardware: first byte is sub_cmd, rest is payload
@@ -1407,11 +1410,25 @@ class KissModemWrapper(LoRaRadio):
                     self.stats["last_snr"] = snr_db
                     self.stats["last_rssi"] = rssi_raw
                     self.stats["rx_packets"] += 1
+                # Expire stale pending Data (lost RxMeta) so we don't deliver old payload
+                # when a later RxMeta arrives.
+                now = time.time()
+                while (
+                    self._pending_rx_queue
+                    and (now - self._pending_rx_queue[0][0]) > PENDING_RX_TTL_SEC
+                ):
+                    self._pending_rx_queue.popleft()
+                    self.stats["frame_errors"] += 1
+                    logger.debug("Dropped stale pending RX Data (no RxMeta within TTL)")
                 if self._pending_rx_queue:
-                    packet_data = self._pending_rx_queue.popleft()
+                    _, packet_data = self._pending_rx_queue.popleft()
                     if self.on_frame_received:
                         try:
-                            self._dispatch_rx_callback(packet_data, rssi_raw, snr_db)
+                            self._dispatch_rx_callback(
+                                packet_data,
+                                rssi_raw,
+                                snr_db,
+                            )
                         except Exception as e:
                             logger.error(f"Error in frame received callback: {e}")
                 else:
