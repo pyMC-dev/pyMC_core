@@ -1633,9 +1633,14 @@ class CompanionFrameServer:
         self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
 
     async def _cmd_set_flood_scope(self, data: bytes) -> None:
-        """Delegate flood scope to the bridge."""
-        if len(data) >= 16:
-            self.bridge.set_flood_scope(data[:16])
+        """Delegate flood scope to the bridge.
+
+        Wire format after cmd byte is stripped: [reserved=0x00 (1)] [key (16)]
+        The firmware (MyMesh.cpp) uses cmd_frame[2] as key start, skipping the
+        reserved byte at cmd_frame[1].  We mirror that by using data[1:17].
+        """
+        if len(data) >= 17:
+            self.bridge.set_flood_scope(data[1:17])
         else:
             self.bridge.set_flood_scope(None)
         self._write_ok()

@@ -235,6 +235,9 @@ class ProtocolRequestHandler:
                 )
                 raw_path = getattr(original_packet, "path", None) or b""
                 path_list = list(raw_path[:path_byte_len]) if path_byte_len else []
+                path_len_encoded_arg = (
+                    path_len_byte if PathUtils.is_valid_path_len(path_len_byte) else None
+                )
                 reply_packet = PacketBuilder.create_path_return(
                     dest_hash=client_hash,
                     src_hash=our_hash,
@@ -242,6 +245,7 @@ class ProtocolRequestHandler:
                     path=path_list,
                     extra_type=PAYLOAD_TYPE_RESPONSE,
                     extra=response_data,
+                    path_len_encoded=path_len_encoded_arg,
                 )
                 hash_size = (
                     PathUtils.get_path_hash_size(path_len_byte)

@@ -424,6 +424,7 @@ class ProtocolResponseHandler:
                 path=in_path,
                 extra_type=0xFF,  # no extra payload (dummy, same as C++ NULL/0)
                 extra=b"",
+                path_len_encoded=pkt.path_len,
             )
 
             # Convert to DIRECT routing using the inner out_path (the route

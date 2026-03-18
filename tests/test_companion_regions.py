@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from pymc_core.companion import CompanionRadio
+from pymc_core.companion.models import Channel
 from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     ROUTE_TYPE_DIRECT,
@@ -234,6 +235,99 @@ class TestAdvertiseWithFloodScope:
         await companion.start()
         try:
             await companion.advertise(flood=True)
+        finally:
+            await companion.stop()
+
+        assert len(radio.sent) > 0
+        raw = radio.sent[-1]
+        pkt = Packet()
+        pkt.read_from(raw)
+        assert pkt.get_route_type() == ROUTE_TYPE_FLOOD
+        assert pkt.transport_codes == [0, 0]
+
+
+# ---------------------------------------------------------------------------
+# Integration: GRP_TXT channel message with flood scope (firmware compat)
+# ---------------------------------------------------------------------------
+
+
+class TestChannelMessageFloodScope:
+    """Verify send_channel_message produces firmware-compatible scoped packets.
+
+    This is the key integration test: when set_flood_region("#nl-li") is used
+    and a channel message is sent, the outgoing packet must be TRANSPORT_FLOOD
+    and the transport code must match calc_transport_code(#nl-li key, packet).
+
+    A firmware repeater's findMatch() re-derives the code from the region key
+    and the received payload — if they don't match the packet is dropped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_channel_message_produces_transport_flood(self):
+        radio = MockRadio()
+        identity = LocalIdentity()
+        companion = CompanionRadio(radio=radio, identity=identity, node_name="scoped")
+        companion.channels.set(0, Channel(name="test-ch", secret=b"\xAB" * 16))
+        companion.set_flood_region("#nl-li")
+
+        await companion.start()
+        try:
+            await companion.send_channel_message(0, "hello")
+        finally:
+            await companion.stop()
+
+        assert len(radio.sent) > 0, "Expected at least one packet sent"
+        raw = radio.sent[-1]
+        pkt = Packet()
+        pkt.read_from(raw)
+        assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
+        assert pkt.transport_codes[0] != 0
+        assert pkt.transport_codes[1] == 0
+
+    @pytest.mark.asyncio
+    async def test_channel_message_transport_code_matches_nl_li_key(self):
+        """Transport code stored in the packet must equal what the repeater would compute.
+
+        This is the definitive firmware-compatibility test for GRP_TXT scoping.
+        The repeater calls calcTransportCode(get_auto_key_for("#nl-li"), pkt)
+        and compares with pkt.transport_codes[0]. If they differ, the packet is dropped.
+        """
+        radio = MockRadio()
+        identity = LocalIdentity()
+        companion = CompanionRadio(radio=radio, identity=identity, node_name="scoped")
+        companion.channels.set(0, Channel(name="test-ch", secret=b"\xAB" * 16))
+        companion.set_flood_region("#nl-li")
+
+        await companion.start()
+        try:
+            await companion.send_channel_message(0, "hello")
+        finally:
+            await companion.stop()
+
+        assert len(radio.sent) > 0
+        raw = radio.sent[-1]
+        pkt = Packet()
+        pkt.read_from(raw)
+
+        key = get_auto_key_for("#nl-li")
+        expected_code = calc_transport_code(key, pkt)
+        assert pkt.transport_codes[0] == expected_code, (
+            f"Transport code mismatch: stored {pkt.transport_codes[0]:#06x}, "
+            f"computed {expected_code:#06x}. "
+            "The companion is not using the #nl-li key for GRP_TXT packets."
+        )
+
+    @pytest.mark.asyncio
+    async def test_channel_message_no_scope_sends_normal_flood(self):
+        radio = MockRadio()
+        identity = LocalIdentity()
+        companion = CompanionRadio(radio=radio, identity=identity, node_name="noscope")
+        companion.channels.set(0, Channel(name="test-ch", secret=b"\xAB" * 16))
+        # No flood scope
+
+        await companion.start()
+        try:
+            await companion.send_channel_message(0, "hello")
         finally:
             await companion.stop()
 

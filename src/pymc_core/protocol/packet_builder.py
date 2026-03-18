@@ -489,10 +489,15 @@ class PacketBuilder:
         if route_type == "direct" and out_path_len > 0:
             out_path = getattr(contact, "out_path", b"")
             if out_path:
-                pkt.set_path(
-                    out_path[:MAX_PATH_SIZE],
-                    out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
-                )
+                path_bytes = out_path[:MAX_PATH_SIZE]
+                encoded_len = None
+                if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                    out_path_len
+                ) <= len(path_bytes):
+                    encoded_len = out_path_len
+                elif len(path_bytes) == 64:
+                    path_bytes = path_bytes[:63]
+                pkt.set_path(path_bytes, encoded_len)
 
         return pkt
 
@@ -674,12 +679,19 @@ class PacketBuilder:
         path: Sequence[int],
         extra_type: int = 0xFF,
         extra: bytes = b"",
+        path_len_encoded: Optional[int] = None,
     ) -> Packet:
         """
         Create a secure return path packet with optional metadata.
 
         Generates an encrypted packet containing a return path for secure
         two-way communication, with optional additional data.
+
+        The inner payload first byte is the encoded path_len (bits 6-7 = hash
+        size - 1, bits 0-5 = hop count). When path_len_encoded is provided
+        and valid, it is used so 2- and 3-byte path hashes match firmware.
+        When path_len_encoded is None, the first byte is len(path) (1-byte
+        hash semantics).
 
         Args:
             dest_hash: Destination node hash (1 byte).
@@ -688,17 +700,31 @@ class PacketBuilder:
             path: Sequence of node hashes for the return path.
             extra_type: Type identifier for extra data (default: 0xFF).
             extra: Additional binary data to include.
+            path_len_encoded: Encoded path_len byte from the original packet.
+                If None, first byte of inner payload is len(path) (1-byte hashes).
 
         Returns:
             Packet: Encrypted return path packet.
 
         Raises:
-            ValueError: If combined path and extra data exceed packet limits.
+            ValueError: If combined path and extra data exceed packet limits,
+                or if path_len_encoded is provided but path length does not match.
         """
         if len(path) + len(extra) + 5 > (MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE):
             raise ValueError("Combined path/extra too long")
 
-        inner = bytes([len(path)]) + bytes(path) + bytes([extra_type]) + extra
+        if path_len_encoded is not None and PathUtils.is_valid_path_len(path_len_encoded):
+            expected_len = PathUtils.get_path_byte_len(path_len_encoded)
+            if len(path) != expected_len:
+                raise ValueError(
+                    f"path length {len(path)} does not match path_len_encoded "
+                    f"(expected {expected_len} bytes)"
+                )
+            first_byte = path_len_encoded
+        else:
+            first_byte = len(path)
+
+        inner = bytes([first_byte]) + bytes(path) + bytes([extra_type]) + extra
         aes_key = secret[:16]
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, inner)
         payload = bytearray([dest_hash, src_hash]) + cipher
@@ -786,6 +812,7 @@ class PacketBuilder:
                 out_path is None
                 and contact_path_len >= 0
                 and PathUtils.is_valid_path_len(contact_path_len)
+                and PathUtils.get_path_byte_len(contact_path_len) <= len(routing_path)
             ):
                 pkt.set_path(bytearray(routing_path), contact_path_len)
             else:
@@ -875,10 +902,15 @@ class PacketBuilder:
         packet = PacketBuilder._create_packet(header, payload)
 
         if route_type == "direct" and len(out_path) > 0:
-            packet.set_path(
-                out_path[:MAX_PATH_SIZE],
-                out_path_len if PathUtils.is_valid_path_len(out_path_len) else None,
-            )
+            path_bytes = out_path[:MAX_PATH_SIZE]
+            encoded_len = None
+            if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                out_path_len
+            ) <= len(path_bytes):
+                encoded_len = out_path_len
+            elif len(path_bytes) == 64:
+                path_bytes = path_bytes[:63]
+            packet.set_path(path_bytes, encoded_len)
 
         return packet, timestamp
 

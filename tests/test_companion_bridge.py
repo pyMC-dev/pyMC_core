@@ -10,6 +10,7 @@ from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
 from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet
 from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RAW_CUSTOM,
@@ -17,6 +18,7 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_TXT_MSG,
     ROUTE_TYPE_FLOOD,
 )
+from pymc_core.protocol.packet_utils import PathUtils
 
 
 def _make_peer_contact(name: str) -> Contact:
@@ -442,6 +444,75 @@ class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
         assert contact is not None
         assert contact.out_path_len == path_len_byte
         assert contact.out_path == path_bytes
+
+    async def test_path_packet_with_ack_uses_encoded_path_byte_len_for_2byte_and_3byte_hashes(self):
+        """PATH ACK extraction uses PathUtils.get_path_byte_len so 2- and 3-byte hashes work."""
+        injector = MockPacketInjector()
+        local_identity = LocalIdentity()
+        peer_identity = LocalIdentity()
+        peer_pubkey = peer_identity.get_public_key()
+        bridge = CompanionBridge(local_identity, injector)
+        bridge.contacts.add(Contact(public_key=peer_pubkey, name="Peer"))
+
+        ack_crc_expected = 0x12345678
+        peer_id = Identity(peer_pubkey)
+        shared_secret = peer_id.calc_shared_secret(local_identity.get_private_key())
+        aes_key = shared_secret[:16]
+        our_hash = local_identity.get_public_key()[0]
+        src_hash = peer_pubkey[0]
+
+        def build_path_packet(path_len_byte: int, path_bytes: bytes) -> Packet:
+            plaintext = (
+                bytes([path_len_byte])
+                + path_bytes
+                + bytes([PAYLOAD_TYPE_ACK])
+                + ack_crc_expected.to_bytes(4, "little")
+            )
+            encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+            payload = bytes([our_hash, src_hash]) + encrypted
+            pkt = Packet()
+            pkt.header = (ROUTE_TYPE_FLOOD << 0) | (PAYLOAD_TYPE_PATH << 2)
+            pkt.path_len = 0
+            pkt.path = bytearray()
+            pkt.payload = bytearray(payload)
+            pkt.payload_len = len(payload)
+            return pkt
+
+        send_confirmed_calls = []
+        bridge.on_send_confirmed(send_confirmed_calls.append)
+        bridge._track_pending_ack(ack_crc_expected)
+
+        # 2-byte path hash: 1 hop -> 2 path bytes (encoded 0x41)
+        path_len_2 = PathUtils.encode_path_len(2, 1)
+        assert PathUtils.get_path_byte_len(path_len_2) == 2
+        pkt2 = build_path_packet(path_len_2, bytes([0xAA, 0xBB]))
+        await bridge.process_received_packet(pkt2)
+        assert len(send_confirmed_calls) == 1
+        assert send_confirmed_calls[0] == ack_crc_expected
+
+        # 3-byte path hash: 1 hop -> 3 path bytes (encoded 0x81)
+        path_len_3 = PathUtils.encode_path_len(3, 1)
+        assert PathUtils.get_path_byte_len(path_len_3) == 3
+        send_confirmed_calls.clear()
+        ack_crc_3 = 0xDEADBEEF
+        bridge._track_pending_ack(ack_crc_3)
+        plaintext_3 = (
+            bytes([path_len_3])
+            + bytes([0x11, 0x22, 0x33])
+            + bytes([PAYLOAD_TYPE_ACK])
+            + ack_crc_3.to_bytes(4, "little")
+        )
+        encrypted_3 = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext_3)
+        payload_3 = bytes([our_hash, src_hash]) + encrypted_3
+        pkt3 = Packet()
+        pkt3.header = (ROUTE_TYPE_FLOOD << 0) | (PAYLOAD_TYPE_PATH << 2)
+        pkt3.path_len = 0
+        pkt3.path = bytearray()
+        pkt3.payload = bytearray(payload_3)
+        pkt3.payload_len = len(payload_3)
+        await bridge.process_received_packet(pkt3)
+        assert len(send_confirmed_calls) == 1
+        assert send_confirmed_calls[0] == ack_crc_3
 
     async def test_node_discovered_fires_node_discovered_even_when_filtered(self):
         injector = MockPacketInjector()
