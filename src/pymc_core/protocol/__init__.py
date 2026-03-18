@@ -75,6 +75,7 @@ from .packet_utils import (
     PathUtils,
     RouteTypeUtils,
 )
+from .region_map import REGION_DENY_DIRECT, REGION_DENY_FLOOD, RegionEntry, RegionMap
 from .transport_keys import calc_transport_code, get_auto_key_for
 from .utils import decode_appdata, parse_advert_payload
 
@@ -87,6 +88,11 @@ __all__ = [
     "LocalIdentity",
     "ModemIdentity",
     "Identity",
+    # Region support
+    "RegionMap",
+    "RegionEntry",
+    "REGION_DENY_FLOOD",
+    "REGION_DENY_DIRECT",
     # Utility functions
     "parse_advert_payload",
     "decode_appdata",
