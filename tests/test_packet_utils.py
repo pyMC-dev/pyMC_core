@@ -337,3 +337,13 @@ class TestPathUtils:
         # 3-byte hashes: max 21 hops (63 bytes)
         assert PathUtils.is_path_at_max_hops(PathUtils.encode_path_len(3, 20)) is False
         assert PathUtils.is_path_at_max_hops(PathUtils.encode_path_len(3, 21)) is True
+
+    # --- TRACE payload (Mesh.cpp flags & 0x03) ---
+
+    def test_trace_payload_hash_width(self):
+        """TRACE uses 1 << (flags & 3) bytes per hop, not Packet path_len encoding."""
+        assert PathUtils.trace_payload_hash_width(0) == 1
+        assert PathUtils.trace_payload_hash_width(1) == 2
+        assert PathUtils.trace_payload_hash_width(2) == 4
+        assert PathUtils.trace_payload_hash_width(3) == 8
+        assert PathUtils.trace_payload_hash_width(0xFF) == 8
