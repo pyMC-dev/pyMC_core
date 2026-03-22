@@ -518,7 +518,7 @@ class CompanionFrameServer:
     # Public push methods (called directly by host application)
     # -------------------------------------------------------------------------
 
-    async def push_trace_data(
+    def push_trace_data(
         self,
         path_len: int,
         flags: int,
@@ -531,8 +531,8 @@ class CompanionFrameServer:
         """Push PUSH_CODE_TRACE_DATA (0x89) to client.  Matches firmware
         ``onTraceRecv()`` frame format.
 
-        Kept as ``async def`` for backward-compatible call sites that
-        ``await`` it, but the body is synchronous (just enqueues).
+        Sync, non-blocking.  Safe to call from any context (async or sync),
+        like :pymethod:`push_rx_raw`.
         """
         if self._write_queue is None:
             return
@@ -553,6 +553,29 @@ class CompanionFrameServer:
             + bytes([final_snr_byte & 0xFF])
         )
         self._enqueue_frame(data)
+
+    async def push_trace_data_async(
+        self,
+        path_len: int,
+        flags: int,
+        tag: int,
+        auth_code: int,
+        path_hashes: bytes,
+        path_snrs: bytes,
+        final_snr_byte: int,
+    ) -> None:
+        """Async wrapper for code that must ``await`` a coroutine (same as
+        :pymethod:`push_trace_data`).
+        """
+        self.push_trace_data(
+            path_len,
+            flags,
+            tag,
+            auth_code,
+            path_hashes,
+            path_snrs,
+            final_snr_byte,
+        )
 
     def push_rx_raw(self, snr: float, rssi: int, raw: bytes) -> None:
         """Push raw RX packet to client (PUSH_CODE_LOG_RX_DATA 0x88).
@@ -1209,7 +1232,7 @@ class CompanionFrameServer:
             snr_len = path_len >> path_sz
             path_snrs = bytes(snr_len)
             final_snr_byte = 0
-            await self.push_trace_data(
+            self.push_trace_data(
                 path_len,
                 flags,
                 tag,
@@ -1317,12 +1340,12 @@ class CompanionFrameServer:
         self._write_frame(bytes([RESP_CODE_SENT, 0]) + struct.pack("<II", 0, 15000))
         result = await self.bridge.send_status_request(pubkey)
         if not result.get("success"):
-            self._write_frame(bytes([PUSH_CODE_STATUS_RESPONSE, 0]) + pubkey[:6])
+            logger.debug("Status request failed for %s; no push sent)", pubkey[:6].hex())
             return
         stats_data = result.get("stats", {})
         raw_bytes = stats_data.get("raw_bytes", b"")
         if not raw_bytes:
-            self._write_frame(bytes([PUSH_CODE_STATUS_RESPONSE, 0]) + pubkey[:6])
+            logger.debug("Status response had no raw_bytes for %s; no push sent", pubkey[:6].hex())
             return
         self._write_frame(bytes([PUSH_CODE_STATUS_RESPONSE, 0]) + pubkey[:6] + raw_bytes)
 
@@ -1345,12 +1368,14 @@ class CompanionFrameServer:
             want_environment=want_environment,
         )
         if not result.get("success"):
-            self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
+            logger.debug("Telemetry request failed for %s; no push sent", pubkey[:6].hex())
             return
         telem_data = result.get("telemetry_data", {})
         raw_bytes = telem_data.get("raw_bytes", b"")
         if not raw_bytes:
-            self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6])
+            logger.debug(
+                "Telemetry response had no raw_bytes for %s; no push sent", pubkey[:6].hex()
+            )
             return
         self._write_frame(bytes([PUSH_CODE_TELEMETRY_RESPONSE, 0]) + pubkey[:6] + raw_bytes)
         logger.info("Telemetry push sent to client: %d bytes LPP", len(raw_bytes))

@@ -1,3 +1,4 @@
+import struct
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -630,6 +631,41 @@ class TestTraceHandler:
     def test_trace_handler_initialization(self):
         """Test trace handler initialization."""
         assert self.handler._log == self.log_fn
+
+    def test_parse_trace_payload_one_byte_hashes(self):
+        """flags=0: 1 byte per hop; path 0x01 0x02 = two hops."""
+        payload = struct.pack("<IIB", 0x11111111, 0x22222222, 0x00) + bytes([0x01, 0x02])
+        r = self.handler._parse_trace_payload(payload)
+        assert r["valid"]
+        assert r["path_hash_width"] == 1
+        assert r["path_hop_count"] == 2
+        assert r["trace_hops"] == [b"\x01", b"\x02"]
+        assert r["trace_path_bytes"] == b"\x01\x02"
+        assert r["trace_path"] == [0x01, 0x02]
+
+    def test_parse_trace_payload_two_byte_hashes(self):
+        """flags=0x01: 2 bytes per hop; 0x01 0x02 = one hop 0x0102."""
+        payload = struct.pack("<IIB", 1, 2, 0x01) + bytes([0x01, 0x02])
+        r = self.handler._parse_trace_payload(payload)
+        assert r["valid"]
+        assert r["path_hash_width"] == 2
+        assert r["path_hop_count"] == 1
+        assert r["trace_hops"] == [b"\x01\x02"]
+        assert r["trace_path"] == [0x01]
+
+    def test_format_trace_response_multibyte_hops(self):
+        parsed = {
+            "valid": True,
+            "tag": 0xC88E314F,
+            "auth_code": 0,
+            "flags": 1,
+            "trace_hops": [b"\x01\x02"],
+            "snr": 11.8,
+            "rssi": -45,
+        }
+        s = self.handler._format_trace_response(parsed)
+        assert "0x0102" in s
+        assert "path=[0x0102]" in s
 
 
 # Integration Tests

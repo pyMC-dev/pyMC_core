@@ -175,6 +175,17 @@ class PathUtils:
         max_hops = min(PATH_HASH_COUNT_MASK, MAX_PATH_SIZE // hash_size)
         return hash_count >= max_hops
 
+    @staticmethod
+    def trace_payload_hash_width(flags: int) -> int:
+        """Per-hop path hash size inside TRACE payload (Mesh.cpp ``PAYLOAD_TYPE_TRACE``).
+
+        Lower two bits of ``flags`` select width as ``1 << (flags & 0x03)`` bytes per hop
+        (1, 2, 4, or 8). This matches companion_radio / ``isHashMatch(..., 1 << path_sz)``.
+        It is not the same encoding as ``get_path_hash_size`` for the packet ``path``
+        field (1–3 bytes via bits 6–7 of ``path_len``).
+        """
+        return 1 << (int(flags) & 0x03)
+
 
 class PacketDataUtils:
     """Centralized data packing and unpacking utilities."""

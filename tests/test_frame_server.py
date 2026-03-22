@@ -226,7 +226,7 @@ async def test_push_trace_data_enqueues_frame():
     server = CompanionFrameServer(bridge, "hash", port=0)
     server._write_queue = asyncio.Queue(maxsize=256)
 
-    await server.push_trace_data(
+    server.push_trace_data(
         path_len=1,
         flags=0,
         tag=1,
@@ -276,6 +276,24 @@ def test_push_rx_raw_sync_enqueues_immediately():
     server._write_queue = asyncio.Queue(maxsize=256)
 
     server.push_rx_raw(snr=-5.0, rssi=-100, raw=b"abc")
+    assert server._write_queue.qsize() == 1
+
+
+def test_push_trace_data_sync_enqueues_immediately():
+    """Sync push_trace_data() enqueues immediately with no event loop scheduling."""
+    bridge = _MockBridgeSendRawDirect()
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._write_queue = asyncio.Queue(maxsize=256)
+
+    server.push_trace_data(
+        path_len=1,
+        flags=0,
+        tag=1,
+        auth_code=0,
+        path_hashes=b"\x00",
+        path_snrs=b"\x00",
+        final_snr_byte=0,
+    )
     assert server._write_queue.qsize() == 1
 
 
@@ -406,3 +424,91 @@ async def test_device_info_includes_path_hash_mode():
     assert frame[0] == RESP_CODE_DEVICE_INFO
     assert len(frame) == 82  # 81 bytes (old) + 1 byte path_hash_mode
     assert frame[81] == 2  # path_hash_mode at last byte
+
+
+# ---------------------------------------------------------------------------
+# CMD_SEND_STATUS_REQ / CMD_SEND_TELEMETRY_REQ — no empty push on failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_status_req_failure_no_empty_push():
+    """Failed status request must NOT send PUSH_CODE_STATUS_RESPONSE (matches firmware)."""
+    from pymc_core.companion.constants import PUSH_CODE_STATUS_RESPONSE, RESP_CODE_SENT
+
+    bridge = Mock()
+    bridge.send_status_request = AsyncMock(return_value={"success": False, "reason": "timeout"})
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    frames: list[bytes] = []
+    server._write_frame = lambda f: frames.append(f)
+
+    pubkey = bytes(range(32))
+    await server._cmd_send_status_req(pubkey)
+
+    # Should have sent RESP_CODE_SENT but NOT PUSH_CODE_STATUS_RESPONSE
+    assert any(f[0] == RESP_CODE_SENT for f in frames)
+    assert not any(f[0] == PUSH_CODE_STATUS_RESPONSE for f in frames)
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_status_req_empty_raw_bytes_no_push():
+    """Status response with empty raw_bytes must NOT send PUSH_CODE_STATUS_RESPONSE."""
+    from pymc_core.companion.constants import PUSH_CODE_STATUS_RESPONSE, RESP_CODE_SENT
+
+    bridge = Mock()
+    bridge.send_status_request = AsyncMock(
+        return_value={"success": True, "stats": {"raw_bytes": b""}}
+    )
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    frames: list[bytes] = []
+    server._write_frame = lambda f: frames.append(f)
+
+    pubkey = bytes(range(32))
+    await server._cmd_send_status_req(pubkey)
+
+    assert any(f[0] == RESP_CODE_SENT for f in frames)
+    assert not any(f[0] == PUSH_CODE_STATUS_RESPONSE for f in frames)
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_status_req_success_sends_push_with_data():
+    """Successful status request with data sends PUSH_CODE_STATUS_RESPONSE with raw_bytes."""
+    from pymc_core.companion.constants import PUSH_CODE_STATUS_RESPONSE
+
+    raw = b"\x01" * 56
+    bridge = Mock()
+    bridge.send_status_request = AsyncMock(
+        return_value={"success": True, "stats": {"raw_bytes": raw}}
+    )
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    frames: list[bytes] = []
+    server._write_frame = lambda f: frames.append(f)
+
+    pubkey = bytes(range(32))
+    await server._cmd_send_status_req(pubkey)
+
+    status_frames = [f for f in frames if f[0] == PUSH_CODE_STATUS_RESPONSE]
+    assert len(status_frames) == 1
+    # Frame: cmd(1) + reserved(1) + pubkey_prefix(6) + raw_bytes(56) = 64
+    assert len(status_frames[0]) == 64
+    assert status_frames[0][8:] == raw
+
+
+@pytest.mark.asyncio
+async def test_cmd_send_telemetry_req_failure_no_empty_push():
+    """Failed telemetry request must NOT send PUSH_CODE_TELEMETRY_RESPONSE."""
+    from pymc_core.companion.constants import PUSH_CODE_TELEMETRY_RESPONSE, RESP_CODE_SENT
+
+    bridge = Mock()
+    bridge.send_telemetry_request = AsyncMock(return_value={"success": False})
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    frames: list[bytes] = []
+    server._write_frame = lambda f: frames.append(f)
+
+    # CMD_SEND_TELEMETRY_REQ expects 3 reserved bytes + 32-byte pubkey
+    pubkey = bytes(range(32))
+    data = bytes(3) + pubkey
+    await server._cmd_send_telemetry_req(data)
+
+    assert any(f[0] == RESP_CODE_SENT for f in frames)
+    assert not any(f[0] == PUSH_CODE_TELEMETRY_RESPONSE for f in frames)

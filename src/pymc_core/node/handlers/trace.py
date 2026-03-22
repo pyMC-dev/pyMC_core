@@ -5,10 +5,11 @@ for network diagnostics and analysis.
 """
 
 import struct
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_TRACE
+from ...protocol.packet_utils import PathUtils
 
 
 class TraceHandler:
@@ -56,15 +57,15 @@ class TraceHandler:
                 f"[TraceHandler] Parsed trace: tag=0x{parsed_data.get('tag', 0):08X}, "
                 f"auth=0x{parsed_data.get('auth_code', 0):08X}, "
                 f"flags=0x{parsed_data.get('flags', 0):02X}, "
-                f"path_length={parsed_data.get('path_length', 0)}"
+                f"path_hops={parsed_data.get('path_hop_count', 0)}"
             )
 
-            # Extract source hash from trace data if available
+            # Callback key: last byte of final hop hash (legacy single-byte contact id)
             src_hash = None
-            trace_path = parsed_data.get("trace_path", [])
-            if trace_path:
-                # Usually the source is the last node in the trace path
-                src_hash = trace_path[-1] if trace_path else None
+            trace_hops: List[bytes] = parsed_data.get("trace_hops") or []
+            if trace_hops:
+                last = trace_hops[-1]
+                src_hash = last[-1] if last else None
 
             # If we have a callback waiting for this source, call it
             if src_hash and src_hash in self._response_callbacks:
@@ -106,7 +107,8 @@ class TraceHandler:
     def _parse_trace_payload(self, payload: bytes) -> Dict[str, Any]:
         """Parse trace packet payload.
 
-        Expected format: tag(4) + auth_code(4) + flags(1) + trace_path_bytes...
+        Format: tag(4) + auth_code(4) + flags(1) + concatenated per-hop path hashes.
+        Hash width is ``1 << (flags & 0x03)`` bytes per hop (MeshCore TRACE).
         """
         try:
             if len(payload) < 9:
@@ -115,16 +117,33 @@ class TraceHandler:
             # Unpack the fixed fields (little-endian)
             tag, auth_code, flags = struct.unpack("<IIB", payload[:9])
 
-            # Extract trace path bytes (remaining payload)
-            trace_path_bytes = payload[9:]
-            trace_path = list(trace_path_bytes) if trace_path_bytes else []
+            trace_path_bytes = bytes(payload[9:])
+            path_hash_width = PathUtils.trace_payload_hash_width(flags)
+            trace_hops: List[bytes] = []
+            remainder = (
+                len(trace_path_bytes) % path_hash_width
+                if path_hash_width
+                else len(trace_path_bytes)
+            )
+            if path_hash_width and len(trace_path_bytes) >= path_hash_width:
+                end = len(trace_path_bytes) - remainder
+                for i in range(0, end, path_hash_width):
+                    trace_hops.append(trace_path_bytes[i : i + path_hash_width])
+
+            # Legacy: one int per hop (first byte only), for older callers
+            trace_path = [h[0] for h in trace_hops] if trace_hops else []
 
             return {
                 "tag": tag,
                 "auth_code": auth_code,
                 "flags": flags,
+                "trace_path_bytes": trace_path_bytes,
+                "path_hash_width": path_hash_width,
+                "trace_hops": trace_hops,
                 "trace_path": trace_path,
-                "path_length": len(trace_path),
+                "path_length": len(trace_path_bytes),
+                "path_hop_count": len(trace_hops),
+                "trace_path_remainder": remainder if remainder else 0,
                 "raw_payload": payload.hex(),
                 "valid": True,
             }
@@ -144,7 +163,7 @@ class TraceHandler:
         tag = parsed_data.get("tag", 0)
         auth_code = parsed_data.get("auth_code", 0)
         flags = parsed_data.get("flags", 0)
-        trace_path = parsed_data.get("trace_path", [])
+        trace_hops: List[bytes] = parsed_data.get("trace_hops") or []
 
         response_parts = [
             f"TRACE_RESPONSE tag=0x{tag:08X}",
@@ -152,8 +171,8 @@ class TraceHandler:
             f"flags=0x{flags:02X}",
         ]
 
-        if trace_path:
-            path_str = " -> ".join(f"0x{hop:02X}" for hop in trace_path)
+        if trace_hops:
+            path_str = " -> ".join(f"0x{h.hex()}" for h in trace_hops)
             response_parts.append(f"path=[{path_str}]")
 
         # Add signal strength information
