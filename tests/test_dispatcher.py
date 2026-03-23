@@ -756,3 +756,68 @@ class TestDispatcherIntegration:
         """Test clearing packet filter."""
         dispatcher.clear_packet_filter()
         # Should not crash
+
+
+class TestDispatcherPayloadBasedDedup:
+    """Test that dedup uses payload-based hash (matching firmware), not raw-frame hash."""
+
+    @pytest.mark.asyncio
+    async def test_same_payload_different_paths_deduplicated(self, dispatcher):
+        """Packets with same payload but different paths are caught as duplicates."""
+        mock_handler = MockHandler(PAYLOAD_TYPE_TXT_MSG)
+        dispatcher.register_handler(PAYLOAD_TYPE_TXT_MSG, mock_handler)
+
+        # Packet 1: 1-byte hash mode, 0 hops
+        pkt1 = Packet()
+        pkt1.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2) | ROUTE_TYPE_FLOOD
+        pkt1.path_len = PathUtils.encode_path_len(1, 0)
+        pkt1.path = bytearray()
+        pkt1.payload = bytearray(b"Hello mesh!")
+        pkt1.payload_len = len(pkt1.payload)
+        data1 = pkt1.write_to()
+
+        # Packet 2: same payload, 2 hops in path
+        pkt2 = Packet()
+        pkt2.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2) | ROUTE_TYPE_FLOOD
+        pkt2.path_len = PathUtils.encode_path_len(1, 2)
+        pkt2.path = bytearray(b"\xAA\xBB")
+        pkt2.payload = bytearray(b"Hello mesh!")
+        pkt2.payload_len = len(pkt2.payload)
+        data2 = pkt2.write_to()
+
+        # Raw bytes must differ (path is different)
+        assert data1 != data2
+
+        await dispatcher._process_received_packet(data1)
+        await dispatcher._process_received_packet(data2)
+
+        # Second packet should be deduplicated — handler called only once
+        assert mock_handler.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_payloads_not_deduplicated(self, dispatcher):
+        """Packets with different payloads are processed independently."""
+        mock_handler = MockHandler(PAYLOAD_TYPE_TXT_MSG)
+        dispatcher.register_handler(PAYLOAD_TYPE_TXT_MSG, mock_handler)
+
+        data1 = create_test_packet(PAYLOAD_TYPE_TXT_MSG, b"message_one")
+        data2 = create_test_packet(PAYLOAD_TYPE_TXT_MSG, b"message_two")
+
+        await dispatcher._process_received_packet(data1)
+        await dispatcher._process_received_packet(data2)
+
+        assert mock_handler.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_malformed_packet_blacklisted_by_raw_hash(self, dispatcher):
+        """Malformed packets are blacklisted by raw hash and rejected on repeat."""
+        bad_data = b"\xFF"
+
+        await dispatcher._process_received_packet(bad_data)
+
+        # Should be blacklisted by raw hash
+        raw_hash = dispatcher.packet_filter.generate_hash(bad_data)
+        assert dispatcher.packet_filter.is_blacklisted(raw_hash)
+
+        # Second attempt should be rejected at blacklist check (not re-parsed)
+        await dispatcher._process_received_packet(bad_data)
