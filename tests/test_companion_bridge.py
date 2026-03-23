@@ -8,7 +8,7 @@ from pymc_core.companion import CompanionBridge
 from pymc_core.companion.constants import ADV_TYPE_CHAT, AUTOADD_CHAT
 from pymc_core.companion.models import Contact
 from pymc_core.node.events import MeshEvents
-from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet
+from pymc_core.protocol import CryptoUtils, Identity, LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -240,11 +240,17 @@ class TestCompanionBridgeSendAndShare:
     async def test_share_contact_success(self):
         injector = MockPacketInjector()
         bridge = CompanionBridge(LocalIdentity(), injector)
-        key = b"\x22" * 32
-        bridge.contacts.add(Contact(public_key=key, name="Bob"))
+        remote = LocalIdentity()
+        key = remote.get_public_key()
+        blob = PacketBuilder.create_advert(remote, "Bob", route_type="direct").write_to()
+        bridge.contacts.add(
+            Contact(public_key=key, name="Bob", adv_type=1, last_advert_packet=blob)
+        )
         result = await bridge.share_contact(key)
         assert result is True
         assert len(injector.calls) == 1
+        pkt, _ = injector.calls[0]
+        assert bytes(pkt.payload[:32]) == key
 
     async def test_send_raw_data_direct_injects_packet(self):
         """send_raw_data_direct builds RAW_CUSTOM packet and sends via injector."""

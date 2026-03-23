@@ -5,7 +5,7 @@ import pytest
 from pymc_core.companion import CompanionRadio
 from pymc_core.companion.constants import ADV_TYPE_CHAT
 from pymc_core.companion.models import Contact
-from pymc_core.protocol import LocalIdentity, Packet
+from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK
 
 
@@ -227,8 +227,10 @@ class TestCompanionRadioMisc:
     async def test_share_contact_success(self):
         radio = MockRadio()
         comp = CompanionRadio(radio, LocalIdentity())
-        key = b"\x22" * 32
-        comp.contacts.add(Contact(public_key=key, name="Bob"))
+        remote = LocalIdentity()
+        key = remote.get_public_key()
+        blob = PacketBuilder.create_advert(remote, "Bob", route_type="direct").write_to()
+        comp.contacts.add(Contact(public_key=key, name="Bob", adv_type=1, last_advert_packet=blob))
         result = await comp.share_contact(key)
         assert result is True
         assert len(radio.sent) == 1

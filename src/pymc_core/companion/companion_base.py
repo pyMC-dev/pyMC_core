@@ -28,9 +28,13 @@ from ..protocol.constants import (
     ADVERT_FLAG_IS_SENSOR,
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
+    PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_CONTROL,
+    PH_ROUTE_MASK,
+    PUB_KEY_SIZE,
     REQ_TYPE_GET_STATUS,
     REQ_TYPE_GET_TELEMETRY_DATA,
+    ROUTE_TYPE_DIRECT,
     ROUTE_TYPE_FLOOD,
     ROUTE_TYPE_TRANSPORT_FLOOD,
     TELEM_PERM_BASE,
@@ -703,6 +707,8 @@ class CompanionBase(ABC):
                 contact.out_path = existing.out_path
                 contact.flags = existing.flags
                 contact.sync_since = existing.sync_since
+                if contact.last_advert_packet is None:
+                    contact.last_advert_packet = existing.last_advert_packet
                 self.contacts.update(contact)
                 return contact
             if not self.should_auto_add_contact_type(contact.adv_type):
@@ -962,19 +968,38 @@ class CompanionBase(ABC):
         return success
 
     async def share_contact(self, pub_key: bytes) -> bool:
-        """Share a contact's advert to the mesh."""
+        """Share a contact's advert on zero hops (direct route, empty path).
+
+        Matches firmware ``BaseChatMesh::shareContactZeroHop``: replay the last stored
+        raw ADVERT wire bytes for this contact (see ``Contact.last_advert_packet``),
+        with ``Mesh::sendZeroHop``-style header/path normalization. Does not re-sign with
+        the companion identity. If no blob is stored (never heard an advert for this
+        contact), returns ``False``.
+        """
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return False
+        blob = contact.last_advert_packet
+        if not blob:
+            return False
         try:
-            pkt = PacketBuilder.create_advert(
-                local_identity=self._identity,
-                name=contact.name,
-                flags=adv_type_to_flags(contact.adv_type) | ADVERT_FLAG_HAS_NAME,
-                route_type="direct",
-            )
-            self._apply_flood_scope(pkt)
-            self._apply_path_hash_mode(pkt)
+            pkt = Packet()
+            if not pkt.read_from(bytes(blob)):
+                return False
+            if pkt.get_payload_type() != PAYLOAD_TYPE_ADVERT:
+                return False
+            if len(pkt.payload) >= PUB_KEY_SIZE:
+                embedded = bytes(pkt.payload[:PUB_KEY_SIZE])
+                if embedded != pub_key:
+                    logger.warning(
+                        "Cached advert pubkey does not match contact key; refusing share"
+                    )
+                    return False
+            # Mesh::sendZeroHop (non-transport): direct route, path_len=0, empty path
+            pkt.header = (pkt.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_DIRECT
+            pkt.transport_codes = [0, 0]
+            pkt.path_len = 0
+            pkt.path = bytearray()
             return await self._send_packet(pkt, wait_for_ack=False)
         except Exception as e:
             logger.error(f"Error sharing contact: {e}")
@@ -1694,6 +1719,9 @@ class CompanionBase(ABC):
                 # -> one store update and at most one advert_received (Bridge and Radio).
                 now = int(time.time())
                 contact = Contact.from_dict(data, now=now)
+                raw_blob = data.get("raw_advert_packet")
+                if isinstance(raw_blob, (bytes, bytearray)) and len(raw_blob) > 0:
+                    contact.last_advert_packet = bytes(raw_blob)
                 if len(contact.public_key) >= 7 and contact.name:
                     inbound_path = data.get("inbound_path")
                     path_len_encoded = data.get("path_len_encoded")

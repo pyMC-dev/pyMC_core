@@ -22,6 +22,9 @@ class Contact:
     gps_lat: float = 0.0  # degrees
     gps_lon: float = 0.0  # degrees
     sync_since: int = 0  # for filtered iteration
+    # Last on-wire ADVERT packet bytes (Packet.write_to),
+    # for CMD_SHARE_CONTACT replay (firmware blob).
+    last_advert_packet: Optional[bytes] = None
 
     @classmethod
     def from_dict(
@@ -80,6 +83,16 @@ class Contact:
         out_path_len_val = int(out_path_len_val) if out_path_len_val is not None else -1
         sync_since_val = d.get("sync_since", 0)
         sync_since_val = int(sync_since_val) if sync_since_val is not None else 0
+        lap = d.get("last_advert_packet")
+        if isinstance(lap, str) and lap:
+            try:
+                last_advert_packet = bytes.fromhex(lap)
+            except ValueError:
+                last_advert_packet = None
+        elif isinstance(lap, (bytes, bytearray)):
+            last_advert_packet = bytes(lap)
+        else:
+            last_advert_packet = None
         return cls(
             public_key=pub,
             name=name,
@@ -92,6 +105,7 @@ class Contact:
             gps_lat=gps_lat,
             gps_lon=gps_lon,
             sync_since=sync_since_val,
+            last_advert_packet=last_advert_packet,
         )
 
 
