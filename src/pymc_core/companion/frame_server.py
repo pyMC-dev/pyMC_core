@@ -1443,27 +1443,9 @@ class CompanionFrameServer:
             gps_lon=gps_lon,
         )
         ok = self.bridge.add_update_contact(contact)
+        # Keep command/response parity: return a single frame for CMD_ADD_UPDATE_CONTACT.
+        # Sending an extra RESP_CODE_CONTACT frame can desync some companion clients.
         self._write_ok() if ok else self._write_err(ERR_CODE_TABLE_FULL)
-        if ok:
-            opl_byte = 0xFF if out_path_len < 0 or out_path_len > 255 else out_path_len
-            out_path_padded = (out_path[:MAX_PATH_SIZE] if out_path else b"").ljust(
-                MAX_PATH_SIZE, b"\x00"
-            )
-            name_padded = (name.encode("utf-8")[:32] if isinstance(name, str) else name[:32]).ljust(
-                32, b"\x00"
-            )
-            contact_frame = (
-                bytes([RESP_CODE_CONTACT])
-                + pubkey
-                + bytes([adv_type, flags, opl_byte])
-                + out_path_padded
-                + name_padded
-                + struct.pack("<I", last_advert)
-                + struct.pack("<i", int(gps_lat * 1e6))
-                + struct.pack("<i", int(gps_lon * 1e6))
-                + struct.pack("<I", lastmod)
-            )
-            self._write_frame(contact_frame)
         if ok:
             try:
                 await self._save_contacts()

@@ -13,6 +13,7 @@ from pymc_core.companion.constants import (
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_NEW_ADVERT,
+    RESP_CODE_OK,
 )
 from pymc_core.companion.frame_server import CompanionFrameServer, _build_advert_push_frames
 from pymc_core.companion.models import Contact, SentResult
@@ -135,6 +136,46 @@ async def test_cmd_send_raw_data_valid_writes_ok():
     assert path_len_enc == 1  # 1-byte hash, 1 hop
     server._write_ok.assert_called_once()
     server._write_err.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_add_update_contact_writes_single_ok_response():
+    """CMD_ADD_UPDATE_CONTACT should emit one response frame (OK only)."""
+    bridge = Mock()
+    bridge.add_update_contact = Mock(return_value=True)
+    server = CompanionFrameServer(bridge, "hash", port=0)
+    server._save_contacts = AsyncMock()
+    frames: list[bytes] = []
+    server._write_frame = lambda f: frames.append(f)
+    server._write_err = Mock()
+
+    pubkey = bytes(range(32))
+    adv_type = 1
+    flags = 0x01
+    out_path_len = 0
+    out_path = b"\x00" * MAX_PATH_SIZE
+    name = b"Alice".ljust(32, b"\x00")
+    last_advert = struct.pack("<I", 123)
+    gps_lat = struct.pack("<i", int(52.5 * 1e6))
+    gps_lon = struct.pack("<i", int(-1.7 * 1e6))
+    lastmod = struct.pack("<I", 456)
+    data = (
+        pubkey
+        + bytes([adv_type, flags, out_path_len & 0xFF])
+        + out_path
+        + name
+        + last_advert
+        + gps_lat
+        + gps_lon
+        + lastmod
+    )
+
+    await server._cmd_add_update_contact(data)
+
+    bridge.add_update_contact.assert_called_once()
+    assert frames == [bytes([RESP_CODE_OK])]
+    server._write_err.assert_not_called()
+    server._save_contacts.assert_awaited_once()
 
 
 @pytest.mark.asyncio
