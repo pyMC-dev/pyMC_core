@@ -199,7 +199,8 @@ class ContactStore:
 
         Each dict must have 'public_key' (hex string or bytes) and 'name' keys.
         Optional keys: 'adv_type', 'flags', 'out_path', 'out_path_len',
-        'last_advert_timestamp', 'lastmod', 'gps_lat', 'gps_lon', 'sync_since'.
+        'last_advert_timestamp', 'lastmod', 'gps_lat', 'gps_lon', 'sync_since',
+        'last_advert_packet' (hex string of raw ADVERT wire bytes for CMD_SHARE_CONTACT).
 
         Replaces all existing contacts.
         """
@@ -218,6 +219,16 @@ class ContactStore:
             elif isinstance(out_path, list):
                 out_path = bytes(out_path)
 
+            lap = rec.get("last_advert_packet")
+            if isinstance(lap, str) and lap:
+                try:
+                    last_advert_packet = bytes.fromhex(lap)
+                except ValueError:
+                    last_advert_packet = None
+            elif isinstance(lap, (bytes, bytearray)):
+                last_advert_packet = bytes(lap)
+            else:
+                last_advert_packet = None
             contact = Contact(
                 public_key=pub_key,
                 name=rec.get("name", ""),
@@ -232,6 +243,7 @@ class ContactStore:
                 gps_lat=rec.get("gps_lat", 0.0),
                 gps_lon=rec.get("gps_lon", 0.0),
                 sync_since=rec.get("sync_since", 0),
+                last_advert_packet=last_advert_packet,
             )
             self._contacts[pub_key] = contact
             self._proxies[pub_key] = ContactProxy(contact)
@@ -253,6 +265,9 @@ class ContactStore:
                     "gps_lat": c.gps_lat,
                     "gps_lon": c.gps_lon,
                     "sync_since": c.sync_since,
+                    "last_advert_packet": c.last_advert_packet.hex()
+                    if c.last_advert_packet
+                    else "",
                 }
             )
         return result

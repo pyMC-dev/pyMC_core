@@ -10,7 +10,8 @@ from pymc_core.companion.constants import (
     ADV_TYPE_ROOM,
     ADV_TYPE_SENSOR,
 )
-from pymc_core.protocol import LocalIdentity, Packet
+from pymc_core.companion.models import Contact
+from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
@@ -209,3 +210,54 @@ class TestApplyPathHashMode:
         bridge._apply_path_hash_mode(pkt)
 
         assert getattr(pkt, "_path_hash_mode_applied", False) is True
+
+
+# ---------------------------------------------------------------------------
+# share_contact — replay cached ADVERT blob (firmware shareContactZeroHop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_share_contact_returns_false_without_cached_blob():
+    """No last_advert_packet → cannot replay (matches firmware empty getBlobByKey)."""
+
+    async def _inj(pkt, wait_for_ack=False):
+        return True
+
+    bridge = CompanionBridge(LocalIdentity(), _inj)
+    key = bytes([0xAB] * 32)
+    bridge.contacts.add(Contact(public_key=key, name="OnlyManual", adv_type=1))
+    ok = await bridge.share_contact(key)
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_share_contact_replays_remote_pubkey_zero_hop():
+    """Replays stored wire bytes; payload pubkey stays the remote contact's, route=direct."""
+
+    remote = LocalIdentity()
+    sent = []
+
+    async def _capture(pkt, wait_for_ack=False):
+        sent.append(pkt)
+        return True
+
+    bridge = CompanionBridge(LocalIdentity(), _capture)
+    original = PacketBuilder.create_advert(remote, "RemoteName", route_type="flood")
+    blob = original.write_to()
+    bridge.contacts.add(
+        Contact(
+            public_key=remote.get_public_key(),
+            name="RemoteName",
+            adv_type=1,
+            last_advert_packet=blob,
+        )
+    )
+    ok = await bridge.share_contact(remote.get_public_key())
+    assert ok is True
+    assert len(sent) == 1
+    out = sent[0]
+    assert bytes(out.payload[:32]) == remote.get_public_key()
+    assert out.get_route_type() == ROUTE_TYPE_DIRECT
+    assert out.path_len == 0
+    assert len(out.path) == 0

@@ -179,6 +179,8 @@ await companion.advertise(flood=True)       # broadcast presence
 await companion.share_contact(pub_key)      # share a contact via direct advert
 ```
 
+**Share contact (firmware parity):** MeshCore replays the **last received raw ADVERT** for that contact (`getBlobByKey` + `sendZeroHop`), not a newly signed advert from the companion identity. pyMC_core stores the wire bytes on each contact when an advert is heard (`Contact.last_advert_packet`) and `share_contact()` returns `False` if no blob exists (e.g. contact was only added manually and never advertised on-air).
+
 ### Contact Management
 
 ```python

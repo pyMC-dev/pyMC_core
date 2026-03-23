@@ -142,10 +142,16 @@ class AdvertHandler(BaseHandler):
                     path = getattr(packet, "path", bytearray()) or bytearray()
                     path_byte_len = PathUtils.get_path_byte_len(path_len)
                     inbound_path = bytes(path[:path_byte_len]) if path_byte_len > 0 else b""
+                    # Wire bytes for CMD_SHARE_CONTACT replay (firmware getBlobByKey + sendZeroHop).
+                    try:
+                        raw_advert_packet = packet.write_to()
+                    except Exception:
+                        raw_advert_packet = None
                     event_data = {
                         "public_key": pubkey_hex,
                         "name": name,
                         "contact_type": contact_type_id,
+                        "flags": flags_int,
                         "lat": lat,
                         "lon": lon,
                         "advert_timestamp": advert_timestamp,
@@ -154,6 +160,7 @@ class AdvertHandler(BaseHandler):
                         "rssi": advert_data["rssi"],
                         "inbound_path": inbound_path,
                         "path_len_encoded": path_len,
+                        "raw_advert_packet": raw_advert_packet,
                     }
                     self.event_service.publish_sync(MeshEvents.NODE_DISCOVERED, event_data)
                 except Exception as e:
