@@ -375,31 +375,21 @@ class Dispatcher:
             except Exception as e:
                 self._log(f"Raw RX subscriber error: {e}")
 
-        # Generate packet hash for deduplication and blacklist checking
-        packet_hash = self.packet_filter.generate_hash(data)
-
-        # Skip blacklisted packets (known malformed)
-        if self.packet_filter.is_blacklisted(packet_hash):
+        # Blacklist check uses raw-frame hash (catches known-bad bytes before parsing)
+        raw_hash = self.packet_filter.generate_hash(data)
+        if self.packet_filter.is_blacklisted(raw_hash):
             self._log("[RX DEBUG] Packet blacklisted, skipping")
             return
 
-        # Skip duplicate packets
-        if self.packet_filter.is_duplicate(packet_hash):
-            self._log(f"Duplicate packet ignored (hash: {packet_hash})")
-            return
-
-        # Update packet hash tracking
-        self.packet_filter.track_packet(packet_hash)
-
+        # Parse before dedup — calculate_packet_hash() needs a parsed packet
         pkt = Packet()
         try:
             pkt.read_from(data)
             self._log("[RX DEBUG] Packet parsed successfully")
         except Exception as err:
             self._log(f"Malformed packet: {err}")
-            # Blacklist this packet to avoid repeated parsing attempts
-            self.packet_filter.blacklist(packet_hash)
-            self._log(f"Blacklisted malformed packet (hash: {packet_hash})")
+            self.packet_filter.blacklist(raw_hash)
+            self._log(f"Blacklisted malformed packet (raw hash: {raw_hash})")
             return
 
         # Packets at max hops for their path encoding must not be retransmitted
@@ -426,6 +416,7 @@ class Dispatcher:
                 self._log(f"Error in packet analysis callback: {e}")
 
         # Notify raw packet subscribers (e.g. companion clients for PUSH_CODE_LOG_RX_DATA)
+        # This fires BEFORE dedup so the UI sees all path variants for logging
         analysis = {}
         for callback in self._raw_packet_subscribers:
             await self._invoke_enhanced_raw_callback(callback, pkt, data, analysis)
@@ -433,6 +424,14 @@ class Dispatcher:
             await self._invoke_enhanced_raw_callback(self.raw_packet_callback, pkt, data, {})
         if self._raw_packet_subscribers or self.raw_packet_callback:
             self._log("[RX DEBUG] Raw packet callback completed")
+
+        # Dedup uses payload-based hash (matches firmware), ignoring path differences
+        # Only blocks handler dispatch — UI/logging subscribers above still see all variants
+        packet_hash = pkt.calculate_packet_hash().hex()[:16]
+        if self.packet_filter.is_duplicate(packet_hash):
+            self._log(f"Duplicate packet ignored (hash: {packet_hash})")
+            return
+        self.packet_filter.track_packet(packet_hash)
 
         # Check if this is our own packet before processing handlers
         if self._is_own_packet(pkt):
