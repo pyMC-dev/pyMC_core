@@ -187,7 +187,7 @@ class CompanionFrameServer:
         stats_getter: Optional[Callable] = None,
         control_handler: Optional[Any] = None,
         heartbeat_interval: int = 15,
-        client_idle_timeout_sec: Optional[int] = 120,
+        client_idle_timeout_sec: Optional[int] = 8 * 60 * 60,
     ):
         self.bridge = bridge
         self.companion_hash = companion_hash
