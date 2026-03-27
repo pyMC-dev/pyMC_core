@@ -3,28 +3,28 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
 from ..protocol import Packet
 from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_TRACE,
     PH_TYPE_SHIFT,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
 )
+from ..protocol.packet_utils import PathUtils
+from ..protocol.transport_keys import calc_transport_code
 from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
 
 # Import handler classes
 from .handlers import (
     AckHandler,
-    AdvertHandler,
     AnonReqResponseHandler,
     ControlHandler,
-    GroupTextHandler,
-    LoginResponseHandler,
-    PathHandler,
-    ProtocolResponseHandler,
-    TextMessageHandler,
     TraceHandler,
+    create_core_handlers,
 )
 
 ACK_TIMEOUT = 5.0  # seconds to wait for an ACK
@@ -57,6 +57,10 @@ class Dispatcher:
         log_fn: Optional[Callable[[str], None]] = None,
         packet_filter: Optional[Any] = None,
     ) -> None:
+        # tx_delay: seconds to wait after TX before starting ACK wait (only when wait_for_ack).
+        # Round-trip latency can also be increased by: modem CSMA (TXDELAY/SlotTime in
+        # firmware), handler response delays (e.g. login_server 300 ms), and serial/
+        # event-loop scheduling. KISS wrapper relies on modem CSMA by default (no host LBT).
         self.radio = radio
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
@@ -64,8 +68,17 @@ class Dispatcher:
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
 
-        # Add raw packet callback for detailed logging
+        # Optional listener for ACK received (e.g. companion send_confirmed)
+        self._ack_received_listener: Optional[Callable[[int], Awaitable[None] | None]] = None
+
+        # Optional callback for PAYLOAD_TYPE_RAW_CUSTOM (companion raw_data_received)
+        self.raw_data_received_callback: Optional[Callable[[Packet], Awaitable[None]]] = None
+
+        # Raw packet callbacks: single callback (legacy) and list of subscribers (after parse)
         self.raw_packet_callback: Optional[Callable[[Packet, bytes], Awaitable[None] | None]] = None
+        self._raw_packet_subscribers: List[Callable[..., Any]] = []
+        # Raw RX subscribers: notified for every reception (data, rssi, snr) before duplicate/parse
+        self._raw_rx_subscribers: List[Callable[..., Any]] = []
 
         self._handlers: dict[int, Any] = {}  # Keep track of packet handlers
         self._handler_instances: dict[
@@ -77,6 +90,16 @@ class Dispatcher:
 
         # Contact book for decrypting messages (set by the node later)
         self.contact_book = None
+
+        # Flood scope: 16-byte transport key for region-scoped flooding.
+        # When set, flood packets are tagged with a transport code and sent
+        # as ROUTE_TYPE_TRANSPORT_FLOOD.  Set via companion set_flood_scope().
+        self.flood_transport_key: Optional[bytes] = None
+
+        # Default path hash mode for flood packets with 0 hops that have not
+        # had path hash mode set by the companion. 0=1-byte, 1=2-byte, 2=3-byte.
+        # When None, no default is applied.
+        self.path_hash_mode: Optional[int] = None
 
         self._logger = logging.getLogger("Dispatcher")
         self._current_expected_crc: Optional[int] = None
@@ -152,95 +175,69 @@ class Dispatcher:
         # Keep our identity handy for detecting our own packets
         self.local_identity = local_identity
 
-        # Set up ACK handler with callback to us
+        # --- ACK handler (dispatcher-specific wiring) ---
         ack_handler = AckHandler(self._log, self)
         ack_handler.set_ack_received_callback(self._register_ack_received)
-
-        # Register all the standard handlers
-        self.register_handler(
-            AdvertHandler.payload_type(),
-            AdvertHandler(self._log),
-        )
         self.register_handler(AckHandler.payload_type(), ack_handler)
 
-        # Text message handler - needs to send ACKs back through us
-        text_message_handler = TextMessageHandler(
-            local_identity,
-            contacts,
-            self._log,
-            self.send_packet,
-            event_service,
-            radio_config,
-        )
-        # Keep a reference so the node can use it
-        self.text_message_handler = text_message_handler
-        self.register_handler(
-            TextMessageHandler.payload_type(),
-            text_message_handler,
-        )
-        # Group text handler with channel database
-        self.register_handler(
-            GroupTextHandler.payload_type(),
-            GroupTextHandler(
-                local_identity,
-                contacts,
-                self._log,
-                self.send_packet,
-                channel_db,
-                event_service,
-                node_name,
-            ),
-        )
-        # Protocol response handler for encrypted responses (including telemetry)
-        protocol_response_handler = ProtocolResponseHandler(self._log, local_identity, contacts)
-        # Keep a reference for the node
-        self.protocol_response_handler = protocol_response_handler
-
-        # Login response handler for PAYLOAD_TYPE_RESPONSE packets
-        login_response_handler = LoginResponseHandler(local_identity, contacts, self._log)
-        # Connect protocol response handler for forwarding telemetry
-        login_response_handler.set_protocol_response_handler(protocol_response_handler)
-        # Keep references for backward compatibility
-        # Note: telemetry now uses protocol_response_handler, login uses PAYLOAD_TYPE_RESPONSE
-        self.login_response_handler = login_response_handler
-        # For backward compatibility, point telemetry handler to protocol response handler
-        self.telemetry_response_handler = protocol_response_handler
-
-        # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(
-            self._log, ack_handler, protocol_response_handler, login_response_handler
-        )
-        self.register_handler(PathHandler.payload_type(), path_handler)
-
-        # Login response handler for PAYLOAD_TYPE_RESPONSE packets
-        self.register_handler(
-            LoginResponseHandler.payload_type(),
-            login_response_handler,
+        # --- Core handlers via shared factory ---
+        core = create_core_handlers(
+            identity=local_identity,
+            contacts=contacts,
+            channels=channel_db,
+            event_service=event_service,
+            send_packet_fn=self.send_packet,
+            log_fn=self._log,
+            node_name=node_name,
+            radio_config=radio_config,
+            ack_handler=ack_handler,
         )
 
-        # Anonymous request response handler for login responses that come as ANON_REQ
+        # Keep references for companion layer access
+        self.text_message_handler = core.text_handler
+        self.protocol_response_handler = core.protocol_response_handler
+        self.login_response_handler = core.login_response_handler
+        self.group_text_handler = core.group_text_handler
+        # Backward compat alias
+        self.telemetry_response_handler = core.protocol_response_handler
+
+        # Register core handlers by payload type
+        from .handlers import AdvertHandler as _Adv
+        from .handlers import GroupTextHandler as _Grp
+        from .handlers import LoginResponseHandler as _Login
+        from .handlers import PathHandler as _Path
+        from .handlers import TextMessageHandler as _Txt
+
+        self.register_handler(_Adv.payload_type(), core.advert_handler)
+        self.register_handler(_Txt.payload_type(), core.text_handler)
+        self.register_handler(_Grp.payload_type(), core.group_text_handler)
+        self.register_handler(_Path.payload_type(), core.path_handler)
+        self.register_handler(_Login.payload_type(), core.login_response_handler)
+
+        # --- Dispatcher-only handlers ---
         self.register_handler(
             AnonReqResponseHandler.payload_type(),
             AnonReqResponseHandler(local_identity, contacts, self._log),
         )
 
-        # TRACE handler for diagnostics and routing analysis
-        trace_handler = TraceHandler(self._log, protocol_response_handler)
-        self.register_handler(
-            TraceHandler.payload_type(),
-            trace_handler,
-        )
-        # Keep a reference for the node
+        trace_handler = TraceHandler(self._log, core.protocol_response_handler)
+        self.register_handler(TraceHandler.payload_type(), trace_handler)
         self.trace_handler = trace_handler
 
-        # CONTROL handler for node discovery
         control_handler = ControlHandler(self._log)
-        self.register_handler(
-            ControlHandler.payload_type(),
-            control_handler,
-        )
-        # Keep a reference for the node
+        self.register_handler(ControlHandler.payload_type(), control_handler)
         self.control_handler = control_handler
+
+        # --- RAW_CUSTOM handler: deliver to companion if direct and callback set ---
+        from ..protocol.constants import PAYLOAD_TYPE_RAW_CUSTOM
+
+        async def raw_custom_handler(pkt: Packet) -> None:
+            if not pkt.is_route_direct():
+                return
+            if self.raw_data_received_callback:
+                await self._invoke_callback(self.raw_data_received_callback, pkt)
+
+        self.register_handler(PAYLOAD_TYPE_RAW_CUSTOM, raw_custom_handler)
 
         self._logger.info("Default handlers registered.")
 
@@ -291,66 +288,125 @@ class Dispatcher:
     ) -> None:
         self.packet_sent_callback = callback
 
+    def set_ack_received_listener(
+        self,
+        callback: Optional[Callable[[int], Awaitable[None] | None]],
+    ) -> None:
+        """Set optional listener for ACK CRCs (e.g. companion send_confirmed)."""
+        self._ack_received_listener = callback
+
     def set_raw_packet_callback(
         self, callback: Callable[[Packet, bytes], Awaitable[None] | None]
     ) -> None:
         """Set callback for raw packet data (includes both parsed packet and raw bytes)."""
         self.raw_packet_callback = callback
 
-    def _on_packet_received(self, data: bytes) -> None:
-        """Called by the radio when a packet comes in."""
-        # Schedule the packet processing in the event loop
+    def add_raw_packet_subscriber(self, callback: Callable[..., Any]) -> None:
+        """Subscribe to every raw packet. Callback (pkt, data) or (pkt, data, analysis).
+        Forward raw RX to clients to track repeats by packet hash.
+        """
+        if callback not in self._raw_packet_subscribers:
+            self._raw_packet_subscribers.append(callback)
+
+    def remove_raw_packet_subscriber(self, callback: Callable[..., Any]) -> None:
+        """Unsubscribe from raw packet notifications (after parse)."""
+        try:
+            self._raw_packet_subscribers.remove(callback)
+        except ValueError:
+            pass
+
+    def add_raw_rx_subscriber(
+        self, callback: Callable[[bytes, int, float], Awaitable[None] | None]
+    ) -> None:
+        """Subscribe to every incoming raw RX. Callback receives (data, rssi, snr).
+        Called before duplicate/blacklist so clients get every repeat.
+        """
+        if callback not in self._raw_rx_subscribers:
+            self._raw_rx_subscribers.append(callback)
+
+    def remove_raw_rx_subscriber(self, callback: Callable[..., Any]) -> None:
+        """Unsubscribe from raw RX notifications."""
+        try:
+            self._raw_rx_subscribers.remove(callback)
+        except ValueError:
+            pass
+
+    def _on_packet_received(
+        self,
+        data: bytes,
+        rssi: Optional[int] = None,
+        snr: Optional[float] = None,
+    ) -> None:
+        """Called by the radio when a packet comes in. rssi/snr are per-packet when provided."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._process_received_packet(data))
+            loop.create_task(self._process_received_packet(data, rssi, snr))
         except RuntimeError:
-            # No event loop running, can't process packet
             self._log("No event loop running, cannot process received packet")
 
-    async def _process_received_packet(self, data: bytes) -> None:
-        """Process a received packet from the radio callback."""
+    async def _process_received_packet(
+        self,
+        data: bytes,
+        rssi: Optional[int] = None,
+        snr: Optional[float] = None,
+    ) -> None:
+        """Process received packet. rssi/snr are per-packet when provided."""
         self._log(f"[RX DEBUG] Processing packet: {len(data)} bytes, data: {data.hex()[:32]}...")
 
-        # Generate packet hash for deduplication and blacklist checking
-        packet_hash = self.packet_filter.generate_hash(data)
+        # Notify raw RX subscribers so clients can track repeats
+        if rssi is not None:
+            rssi_val = rssi
+        elif hasattr(self.radio, "get_last_rssi"):
+            rssi_val = self.radio.get_last_rssi()
+        else:
+            rssi_val = 0
+        if snr is not None:
+            snr_val = snr
+        elif hasattr(self.radio, "get_last_snr"):
+            snr_val = self.radio.get_last_snr()
+        else:
+            snr_val = 0.0
+        for cb in self._raw_rx_subscribers:
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(data, rssi_val, snr_val)
+                else:
+                    cb(data, rssi_val, snr_val)
+            except Exception as e:
+                self._log(f"Raw RX subscriber error: {e}")
 
-        # Skip blacklisted packets (known malformed)
-        if self.packet_filter.is_blacklisted(packet_hash):
+        # Blacklist check uses raw-frame hash (catches known-bad bytes before parsing)
+        raw_hash = self.packet_filter.generate_hash(data)
+        if self.packet_filter.is_blacklisted(raw_hash):
             self._log("[RX DEBUG] Packet blacklisted, skipping")
             return
 
-        # Skip duplicate packets
-        if self.packet_filter.is_duplicate(packet_hash):
-            self._log(f"Duplicate packet ignored (hash: {packet_hash})")
-            return
-
-        # Update packet hash tracking
-        self.packet_filter.track_packet(packet_hash)
-
+        # Parse before dedup — calculate_packet_hash() needs a parsed packet
         pkt = Packet()
         try:
             pkt.read_from(data)
             self._log("[RX DEBUG] Packet parsed successfully")
         except Exception as err:
             self._log(f"Malformed packet: {err}")
-            # Blacklist this packet to avoid repeated parsing attempts
-            self.packet_filter.blacklist(packet_hash)
-            self._log(f"Blacklisted malformed packet (hash: {packet_hash})")
+            self.packet_filter.blacklist(raw_hash)
+            self._log(f"Blacklisted malformed packet (raw hash: {raw_hash})")
             return
+
+        # Packets at max hops for their path encoding must not be retransmitted
+        if PathUtils.is_path_at_max_hops(pkt.path_len):
+            pkt.mark_do_not_retransmit()
 
         ptype = pkt.header >> PH_TYPE_SHIFT
 
         self._log(f"[RX DEBUG] Packet type: {ptype:02X}")
 
-        # Add signal strength information to packet from radio
-        pkt._rssi = self.radio.get_last_rssi()
-        pkt._snr = self.radio.get_last_snr()
+        # Use per-packet rssi/snr when provided (avoids race); else fall back to radio last values
+        pkt._rssi = rssi if rssi is not None else self.radio.get_last_rssi()
+        pkt._snr = snr if snr is not None else self.radio.get_last_snr()
 
         # Let the node know about this packet for analysis (statistics, caching, etc.)
         if self.packet_analysis_callback:
             try:
-                import asyncio
-
                 if asyncio.iscoroutinefunction(self.packet_analysis_callback):
                     await self.packet_analysis_callback(pkt, data)
                 else:
@@ -359,10 +415,23 @@ class Dispatcher:
             except Exception as e:
                 self._log(f"Error in packet analysis callback: {e}")
 
-        # Always call raw packet callback first for logging (regardless of source)
+        # Notify raw packet subscribers (e.g. companion clients for PUSH_CODE_LOG_RX_DATA)
+        # This fires BEFORE dedup so the UI sees all path variants for logging
+        analysis = {}
+        for callback in self._raw_packet_subscribers:
+            await self._invoke_enhanced_raw_callback(callback, pkt, data, analysis)
         if self.raw_packet_callback:
             await self._invoke_enhanced_raw_callback(self.raw_packet_callback, pkt, data, {})
+        if self._raw_packet_subscribers or self.raw_packet_callback:
             self._log("[RX DEBUG] Raw packet callback completed")
+
+        # Dedup uses payload-based hash (matches firmware), ignoring path differences
+        # Only blocks handler dispatch — UI/logging subscribers above still see all variants
+        packet_hash = pkt.calculate_packet_hash().hex()[:16]
+        if self.packet_filter.is_duplicate(packet_hash):
+            self._log(f"Duplicate packet ignored (hash: {packet_hash})")
+            return
+        self.packet_filter.track_packet(packet_hash)
 
         # Check if this is our own packet before processing handlers
         if self._is_own_packet(pkt):
@@ -383,6 +452,50 @@ class Dispatcher:
     # Public interface - sending and receiving packets
     # ------------------------------------------------------------------
 
+    def _apply_flood_scope(self, pkt: Packet) -> None:
+        """Apply flood scope transport codes to a packet in-place.
+
+        If ``flood_transport_key`` is set and the packet uses flood routing,
+        calculates the transport code, attaches it to the packet, and
+        switches the route type to ``ROUTE_TYPE_TRANSPORT_FLOOD``.
+        """
+        if self.flood_transport_key is None:
+            return
+        route_type = pkt.get_route_type()
+        if route_type != ROUTE_TYPE_FLOOD:
+            return
+        code = calc_transport_code(self.flood_transport_key, pkt)
+        pkt.transport_codes[0] = code
+        pkt.transport_codes[1] = 0  # reserved for home region
+        pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_TRANSPORT_FLOOD
+
+    def set_default_path_hash_mode(self, mode: Optional[int]) -> None:
+        """Set or clear the default path hash mode for flood packets with 0 hops.
+
+        When set, packets sent via send_packet() that have not already had path
+        hash mode applied (e.g. by the companion) will get path_len bits 6-7
+        set from this mode. Companion-originated packets are never overwritten.
+
+        Args:
+            mode: 0=1-byte, 1=2-byte, 2=3-byte per hop; None to disable.
+        """
+        if mode is not None and mode not in (0, 1, 2):
+            raise ValueError(f"path_hash_mode must be None, 0, 1, or 2, got {mode}")
+        self.path_hash_mode = mode
+
+    def _apply_default_path_hash_mode(self, pkt: Packet) -> None:
+        """Apply dispatcher default path hash mode if set and packet is eligible."""
+        if self.path_hash_mode is None:
+            return
+        route_type = pkt.get_route_type()
+        if route_type not in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+            return
+        if pkt.get_path_hash_count() != 0:
+            return
+        if getattr(pkt, "_path_hash_mode_applied", False):
+            return
+        pkt.apply_path_hash_mode(self.path_hash_mode, mark_applied=False)
+
     async def send_packet(
         self,
         packet: Packet,
@@ -399,6 +512,14 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        # TRACE is only sent via sendDirect() in firmware; flood TRACE is unsupported.
+        route_type = packet.get_route_type()
+        if route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
+            if packet.get_payload_type() == PAYLOAD_TYPE_TRACE:
+                self._log("TRACE not supported for flood; dropping")
+                return False
+        self._apply_flood_scope(packet)
+        self._apply_default_path_hash_mode(packet)
         async with self._tx_lock:  # Wait our turn
             return await self._send_packet_immediate(packet, wait_for_ack, expected_crc)
 
@@ -526,9 +647,9 @@ class Dispatcher:
     # All ACK processing logic is delegated to the AckHandler.
     # ------------------------------------------------------------------
 
-    def _register_ack_received(self, crc: int) -> None:
+    async def _register_ack_received(self, crc: int) -> None:
         """Record that an ACK with the given CRC was received."""
-        ts = asyncio.get_event_loop().time()
+        ts = asyncio.get_running_loop().time()
         self._recent_acks[crc] = ts
 
         # Notify waiting sender if this CRC matches
@@ -536,12 +657,15 @@ class Dispatcher:
             self._log(f"ACK matched! CRC {crc:08X}")
             evt.set()
 
+        if self._ack_received_listener:
+            await self._invoke_ack_listener(crc)
+
     async def run_forever(self) -> None:
         """Run the dispatcher maintenance loop indefinitely (call this in an asyncio task)."""
         health_check_counter = 0
         while True:
             # Clean out old ACK CRCs (older than 5 seconds)
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             self._recent_acks = {crc: ts for crc, ts in self._recent_acks.items() if now - ts < 5}
 
             # Clean old packet hashes for deduplication
@@ -577,6 +701,16 @@ class Dispatcher:
             await cb(pkt)
         else:
             cb(pkt)
+
+    async def _invoke_ack_listener(self, crc: int) -> None:
+        """Invoke ack-received listener (sync or async)."""
+        cb = self._ack_received_listener
+        if cb is None:
+            return
+        if asyncio.iscoroutinefunction(cb):
+            await cb(crc)
+        else:
+            cb(crc)
 
     async def _invoke_enhanced_raw_callback(
         self, callback, pkt: Packet, data: bytes, analysis: dict

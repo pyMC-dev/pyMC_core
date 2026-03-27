@@ -5,6 +5,7 @@ from Crypto.Cipher import AES
 from nacl.bindings import (
     crypto_scalarmult,
     crypto_scalarmult_base,
+    crypto_scalarmult_ed25519_base_noclamp,
     crypto_sign_ed25519_pk_to_curve25519,
     crypto_sign_ed25519_sk_to_curve25519,
 )
@@ -36,10 +37,17 @@ class CryptoUtils:
     @staticmethod
     def _aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
         cipher = AES.new(key, AES.MODE_ECB)
-        return b"".join(
+        orig_len = len(ciphertext)
+        if orig_len % CIPHER_BLOCK_SIZE != 0:
+            # Firmware may send non-block-aligned ciphertext (e.g. telemetry 63 bytes).
+            # Pad to next block for decrypt, then return only original length.
+            pad_len = CIPHER_BLOCK_SIZE - (orig_len % CIPHER_BLOCK_SIZE)
+            ciphertext = ciphertext + (b"\x00" * pad_len)
+        out = b"".join(
             cipher.decrypt(ciphertext[i : i + CIPHER_BLOCK_SIZE])
             for i in range(0, len(ciphertext), CIPHER_BLOCK_SIZE)
         )
+        return out[:orig_len]
 
     @staticmethod
     def encrypt_then_mac(key_aes: bytes, shared_secret: bytes, plaintext: bytes) -> bytes:
@@ -68,6 +76,32 @@ class CryptoUtils:
         decrypted = CryptoUtils._aes_decrypt(aes_key, ciphertext)
 
         return decrypted
+
+    @staticmethod
+    def x25519_clamp_scalar(scalar: bytes) -> bytes:
+        """Clamp a 32-byte scalar for X25519 (matches MeshCore key_exchange.c)."""
+        if len(scalar) != 32:
+            raise ValueError("scalar must be 32 bytes")
+        s = bytearray(scalar)
+        s[0] &= 248
+        s[31] &= 63
+        s[31] |= 64
+        return bytes(s)
+
+    @staticmethod
+    def ed25519_expand_seed_to_meshcore_64(seed: bytes) -> bytes:
+        """Expand a 32-byte Ed25519 seed to 64-byte MeshCore/orlp format."""
+        if len(seed) != 32:
+            raise ValueError("seed must be 32 bytes")
+        h = hashlib.sha512(seed).digest()
+        return CryptoUtils.x25519_clamp_scalar(h[:32]) + h[32:64]
+
+    @staticmethod
+    def ed25519_public_from_meshcore_64(meshcore_private_64: bytes) -> bytes:
+        """Derive Ed25519 public key from 64-byte MeshCore private key format."""
+        if len(meshcore_private_64) != 64:
+            raise ValueError("meshcore_private_64 must be 64 bytes")
+        return crypto_scalarmult_ed25519_base_noclamp(meshcore_private_64[:32])
 
     @staticmethod
     def scalarmult(private_key: bytes, public_key: bytes) -> bytes:

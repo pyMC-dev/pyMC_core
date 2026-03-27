@@ -89,7 +89,7 @@ class LoginServerHandler(BaseHandler):
         """Handle ANON_REQ login packet from client."""
         try:
             # Debug: Log packet routing info
-            path_data = list(packet.path[: packet.path_len]) if packet.path_len > 0 else []
+            path_data = packet.get_path_hashes_hex() if packet.path_len > 0 else []
             self.log(
                 f"[LoginServer] Packet route flood: {packet.is_route_flood()}, "
                 f"path_len: {packet.path_len}, path: {path_data}"
@@ -144,22 +144,28 @@ class LoginServerHandler(BaseHandler):
                     self.log("[LoginServer] Room server packet too short for sync_since field")
                     return
                 sync_since = struct.unpack("<I", plaintext[4:8])[0]
-                
+
                 # Find null terminator AFTER sync_since field (starting from byte 8)
                 null_idx = plaintext.find(b"\x00", 8)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[8:null_idx]
-                self.log(f"[LoginServer] Room server format: sync_since={sync_since}, password from byte 8 to {null_idx}")
-                self.log(f"[LoginServer] Password bytes hex: {password_bytes.hex() if len(password_bytes) > 0 else '(empty)'}")
+                self.log(
+                    f"[LoginServer] Room server: sync_since={sync_since}, "
+                    f"password from byte 8 to {null_idx}"
+                )
+                self.log(
+                    f"[LoginServer] Password hex: "
+                    f"{password_bytes.hex() if password_bytes else '(empty)'}"
+                )
             else:
                 # Repeater format: password only
                 # Find null terminator after timestamp (starting from byte 4)
                 null_idx = plaintext.find(b"\x00", 4)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[4:null_idx]
                 self.log(f"[LoginServer] Repeater format: password from byte 4 to {null_idx}")
 
@@ -247,7 +253,7 @@ class LoginServerHandler(BaseHandler):
             client_hash = client_identity.get_public_key()[0]
             server_hash = self.local_identity.get_public_key()[0]
             path_list = (
-                list(original_packet.path[: original_packet.path_len])
+                list(original_packet.path[: original_packet.get_path_byte_len()])
                 if original_packet and original_packet.path_len > 0
                 else []
             )
@@ -259,6 +265,11 @@ class LoginServerHandler(BaseHandler):
                 f"original_flood={is_flood}"
             )
 
+            path_len_encoded_arg = (
+                original_packet.path_len
+                if original_packet and original_packet.path_len > 0
+                else None
+            )
             response_pkt = PacketBuilder.create_path_return(
                 dest_hash=client_hash,
                 src_hash=server_hash,
@@ -266,6 +277,7 @@ class LoginServerHandler(BaseHandler):
                 path=path_list,
                 extra_type=PAYLOAD_TYPE_RESPONSE,
                 extra=bytes(reply_data),
+                path_len_encoded=path_len_encoded_arg,
             )
             packet_type_name = "PATH"
 

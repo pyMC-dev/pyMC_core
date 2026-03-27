@@ -149,7 +149,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover nearby mesh nodes")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )
@@ -177,9 +177,7 @@ def main():
     if args.radio_type == "kiss-tnc":
         print(f"Serial port: {args.serial_port}")
 
-    asyncio.run(
-        discover_nodes(args.radio_type, args.serial_port, args.timeout, args.filter)
-    )
+    asyncio.run(discover_nodes(args.radio_type, args.serial_port, args.timeout, args.filter))
 
 
 if __name__ == "__main__":

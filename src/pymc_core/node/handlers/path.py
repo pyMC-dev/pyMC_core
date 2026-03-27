@@ -65,52 +65,28 @@ class PathHandler:
 
             # Optional PATH packet analysis if analyzer is available
             try:
-                # Try to use any available packet analyzer through callback
-                if hasattr(self, "_dispatcher") and hasattr(
-                    self._dispatcher, "packet_analysis_callback"
+                if (
+                    hasattr(self, "_dispatcher")
+                    and hasattr(self._dispatcher, "packet_analysis_callback")
+                    and self._dispatcher.packet_analysis_callback
                 ):
-                    if self._dispatcher.packet_analysis_callback:
-                        self._dispatcher.packet_analysis_callback(pkt)
-                        self._log("PATH packet analysis delegated to app")
-                else:
-                    self._log("PATH packet received - hop analysis requires app-level analyzer")
-
+                    self._dispatcher.packet_analysis_callback(pkt)
             except Exception as e:
                 self._log(f"PATH packet analysis failed: {e}")
 
-            # Extract and log key PATH information directly from packet
+            # Single summary line for PATH packet
             try:
                 payload = pkt.get_payload()
-                hop_count = pkt.path_len
+                hop_count = pkt.get_path_hash_count()
                 if len(payload) >= 2:
                     dest_hash = payload[0]
                     src_hash = payload[1]
                     self._log(
                         f"PATH packet: hop_count={hop_count}, "
-                        f"dest=0x{dest_hash:02X}, src=0x{src_hash:02X}, "
-                        f"payload_len={len(payload)}"
+                        f"dest=0x{dest_hash:02X}, src=0x{src_hash:02X}, payload_len={len(payload)}"
                     )
-                    if hop_count > 0:
-                        self._log(f"Path contains {hop_count} hops")
-                    else:
-                        self._log("Direct PATH (no intermediate hops)")
                 else:
-                    self._log("PATH packet received with minimal payload")
-
-                # Log basic routing behavior based on header
-                try:
-                    # These constants are already imported at the top
-                    # from ...protocol.constants import (
-                    #     ROUTE_TYPE_DIRECT,
-                    #     ROUTE_TYPE_FLOOD,
-                    # )
-
-                    # Extract route type from packet header if possible
-                    # This is a simplified version without full analysis
-                    self._log("PATH packet routing analysis requires app-level analyzer")
-                except ImportError:
-                    pass
-
+                    self._log("PATH packet: minimal payload")
             except Exception as e:
                 self._log(f"Error extracting PATH information: {e}")
 
