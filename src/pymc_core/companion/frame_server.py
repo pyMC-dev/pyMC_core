@@ -787,16 +787,18 @@ class CompanionFrameServer:
                 self.port,
             )
             old_writer = self._client_writer
+            old_writer_task = self._writer_task
             # Cancel and await the old writer task so it's fully gone before we replace
             # the queue and create a new task (avoids the new task being mistaken for
             # a failed writer when the old task had already exited).
-            if self._writer_task is not None:
-                self._writer_task.cancel()
+            if old_writer_task is not None:
+                old_writer_task.cancel()
                 try:
-                    await self._writer_task
+                    await old_writer_task
                 except asyncio.CancelledError:
                     pass
-                self._writer_task = None
+                if self._writer_task is old_writer_task:
+                    self._writer_task = None
             try:
                 old_writer.close()
                 await old_writer.wait_closed()
@@ -806,11 +808,13 @@ class CompanionFrameServer:
         self._client_reader = reader
         self._client_writer = writer
         self._configure_socket(writer)
-        self._write_queue = asyncio.Queue(maxsize=self._WRITE_QUEUE_MAXSIZE)
+        local_write_queue: asyncio.Queue = asyncio.Queue(maxsize=self._WRITE_QUEUE_MAXSIZE)
+        self._write_queue = local_write_queue
         self._setup_push_callbacks()
         logger.info("Companion client connected (port=%s)", self.port)
 
-        self._writer_task = asyncio.create_task(self._writer_loop(writer))
+        local_writer_task = asyncio.create_task(self._writer_loop(writer))
+        self._writer_task = local_writer_task
         disconnect_reason: Optional[str] = None
         try:
             while True:
@@ -835,11 +839,10 @@ class CompanionFrameServer:
                     break
                 payload = await reader.readexactly(frame_len)
                 await self._handle_cmd(payload)
-                writer_task = self._writer_task
-                if writer_task is None or writer_task.done():
+                if local_writer_task.done():
                     disconnect_reason = "writer_failed"
-                    if writer_task is not None and writer_task.done():
-                        exc = writer_task.exception()
+                    if not local_writer_task.cancelled():
+                        exc = local_writer_task.exception()
                         if exc is not None:
                             logger.error(
                                 "Writer task failed (port=%s): %s",
@@ -856,19 +859,30 @@ class CompanionFrameServer:
             disconnect_reason = f"other: {type(e).__name__}: {e}"
             logger.error("Client handler error: %s", e, exc_info=True)
         finally:
-            if self._write_queue is not None:
+            if self._write_queue is local_write_queue:
                 try:
-                    self._write_queue.put_nowait(None)  # Sentinel
+                    local_write_queue.put_nowait(None)  # Sentinel
                 except asyncio.QueueFull:
                     pass
-            if self._writer_task is not None:
-                self._writer_task.cancel()
+            else:
+                logger.debug(
+                    "Skipping stale queue cleanup for disconnected client (port=%s)",
+                    self.port,
+                )
+            if self._writer_task is local_writer_task:
+                local_writer_task.cancel()
                 try:
-                    await self._writer_task
+                    await local_writer_task
                 except asyncio.CancelledError:
                     pass
                 self._writer_task = None
-            self._write_queue = None
+            else:
+                logger.debug(
+                    "Skipping stale writer cleanup for disconnected client (port=%s)",
+                    self.port,
+                )
+            if self._write_queue is local_write_queue:
+                self._write_queue = None
             if self._client_writer is writer:
                 self._client_writer = None
                 self._client_reader = None
