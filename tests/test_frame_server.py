@@ -1,6 +1,7 @@
 """Tests for CompanionFrameServer and advert push frame construction."""
 
 import asyncio
+import logging
 import struct
 from unittest.mock import AsyncMock, Mock
 
@@ -553,3 +554,142 @@ async def test_cmd_send_telemetry_req_failure_no_empty_push():
 
     assert any(f[0] == RESP_CODE_SENT for f in frames)
     assert not any(f[0] == PUSH_CODE_TELEMETRY_RESPONSE for f in frames)
+
+
+class _BlockingReader:
+    """Reader that blocks until released, then returns EOF."""
+
+    def __init__(self, release_event: asyncio.Event):
+        self._release_event = release_event
+
+    async def read(self, _n: int) -> bytes:
+        await self._release_event.wait()
+        return b""
+
+    async def readexactly(self, n: int) -> bytes:
+        raise asyncio.IncompleteReadError(partial=b"", expected=n)
+
+
+class _NeverReader:
+    """Reader that never returns (for idle-timeout path)."""
+
+    async def read(self, _n: int) -> bytes:
+        await asyncio.sleep(3600)
+        return b""
+
+    async def readexactly(self, n: int) -> bytes:
+        raise asyncio.IncompleteReadError(partial=b"", expected=n)
+
+
+class _RaisingReader:
+    """Reader that raises a socket-style exception on read()."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def read(self, _n: int) -> bytes:
+        raise self._exc
+
+    async def readexactly(self, n: int) -> bytes:
+        raise self._exc
+
+
+class _DummyWriter:
+    """Minimal writer for _handle_client tests."""
+
+    def __init__(self):
+        self.closed = False
+
+    def get_extra_info(self, _name):
+        return None
+
+    def write(self, _data: bytes) -> None:
+        return None
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+
+@pytest.mark.asyncio
+async def test_evicted_handler_cleanup_does_not_cancel_new_writer_task():
+    """Old handler finally block must not tear down new client writer state."""
+    bridge = Mock()
+    bridge.get_time = Mock(return_value=0)
+    server = CompanionFrameServer(bridge, "hash", port=0, client_idle_timeout_sec=None)
+
+    first_release = asyncio.Event()
+    second_release = asyncio.Event()
+    reader1 = _BlockingReader(first_release)
+    reader2 = _BlockingReader(second_release)
+    writer1 = _DummyWriter()
+    writer2 = _DummyWriter()
+
+    task1 = asyncio.create_task(server._handle_client(reader1, writer1))
+    for _ in range(50):
+        if server._client_writer is writer1 and server._writer_task is not None:
+            break
+        await asyncio.sleep(0)
+    assert server._client_writer is writer1
+
+    task2 = asyncio.create_task(server._handle_client(reader2, writer2))
+    for _ in range(50):
+        if server._client_writer is writer2 and server._writer_task is not None:
+            break
+        await asyncio.sleep(0)
+    assert server._client_writer is writer2
+
+    writer2_task = server._writer_task
+    assert writer2_task is not None
+    assert not writer2_task.done()
+
+    # Release old handler; its finally should not cancel the new handler writer task.
+    first_release.set()
+    await task1
+
+    assert server._writer_task is writer2_task
+    assert not writer2_task.done()
+
+    # Cleanly exit task2.
+    second_release.set()
+    await task2
+
+
+@pytest.mark.asyncio
+async def test_handle_client_idle_timeout_disconnects_cleanly(caplog):
+    """Idle timeout disconnect path leaves no active client state."""
+    caplog.set_level(logging.INFO, logger="CompanionFrameServer")
+    bridge = Mock()
+    bridge.get_time = Mock(return_value=0)
+    server = CompanionFrameServer(bridge, "hash", port=0, client_idle_timeout_sec=0.01)
+
+    await server._handle_client(_NeverReader(), _DummyWriter())
+
+    assert server._client_writer is None
+    assert server._client_reader is None
+    assert server._writer_task is None
+    assert any("idle_timeout" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_handle_client_connection_reset_disconnects_cleanly(caplog):
+    """ConnectionResetError path leaves no active client state."""
+    caplog.set_level(logging.INFO, logger="CompanionFrameServer")
+    bridge = Mock()
+    bridge.get_time = Mock(return_value=0)
+    server = CompanionFrameServer(bridge, "hash", port=0, client_idle_timeout_sec=None)
+
+    await server._handle_client(_RaisingReader(ConnectionResetError("boom")), _DummyWriter())
+
+    assert server._client_writer is None
+    assert server._client_reader is None
+    assert server._writer_task is None
+    assert any("ConnectionResetError" in rec.message for rec in caplog.records)
