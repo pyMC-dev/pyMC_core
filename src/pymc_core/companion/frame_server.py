@@ -1097,12 +1097,13 @@ class CompanionFrameServer:
         if self.bridge.get_channel(channel_idx) is None:
             self._write_err(ERR_CODE_NOT_FOUND)
             return
+        self._write_ok()
         ok = await self.bridge.send_channel_message(channel_idx, text)
-        if ok:
-            self._write_ok()
-        else:
-            # Firmware uses ERR_CODE_NOT_FOUND for both bad channel and sendGroupMessage failure
-            self._write_err(ERR_CODE_NOT_FOUND)
+        if not ok:
+            logger.warning(
+                "Channel message send failed for channel %d after OK response was already sent",
+                channel_idx,
+            )
 
     async def _cmd_send_binary_req(self, data: bytes) -> None:
         if len(data) < 33:
