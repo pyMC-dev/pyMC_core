@@ -1719,6 +1719,11 @@ class CompanionBase(ABC):
                 # -> one store update and at most one advert_received (Bridge and Radio).
                 now = int(time.time())
                 contact = Contact.from_dict(data, now=now)
+                # Wire advert flags (ADVERT_FLAG_IS_CHAT_NODE=0x01, etc.) must not
+                # be stored as local contact flags (bit 0 = favourite).  For new
+                # contacts the flags start at 0; for existing contacts
+                # _apply_advert_to_stores restores the persisted value (line 708).
+                contact.flags = 0
                 raw_blob = data.get("raw_advert_packet")
                 if isinstance(raw_blob, (bytes, bytearray)) and len(raw_blob) > 0:
                     contact.last_advert_packet = bytes(raw_blob)
