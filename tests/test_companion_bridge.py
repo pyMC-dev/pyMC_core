@@ -405,6 +405,36 @@ class TestCompanionBridgeNodeDiscoveredAdvertPipeline:
         assert len(advert_received_calls) == 1
         assert advert_received_calls[0].name == "SinglePathNode"
 
+    async def test_auto_add_chat_contact_does_not_inherit_wire_flags(self):
+        """Wire protocol advert flags (ADVERT_FLAG_IS_CHAT_NODE=0x01) must not be
+        stored as local contact flags (bit 0 = favourite).  Regression test for the
+        bug where auto-added chat companions appeared as favourites."""
+        injector = MockPacketInjector()
+        bridge = CompanionBridge(LocalIdentity(), injector)
+        peer = LocalIdentity()
+        # Simulate the real event_data produced by advert.py, which includes the
+        # raw wire flags byte (0x81 = IS_CHAT_NODE | HAS_NAME).
+        event_data = {
+            "public_key": peer.get_public_key().hex(),
+            "name": "ChatNode",
+            "contact_type": ADV_TYPE_CHAT,
+            "flags": 0x81,  # ADVERT_FLAG_IS_CHAT_NODE | ADVERT_FLAG_HAS_NAME
+            "lat": 0.0,
+            "lon": 0.0,
+            "advert_timestamp": 1000,
+            "timestamp": 1001,
+            "snr": 0.0,
+            "rssi": 0,
+        }
+        await bridge._handle_mesh_event(MeshEvents.NODE_DISCOVERED, event_data)
+        contact = bridge.contacts.get_by_key(peer.get_public_key())
+        assert contact is not None
+        assert contact.flags == 0, (
+            f"Auto-added contact should have flags=0, got {contact.flags:#x}. "
+            "Wire protocol flags must not bleed into local contact flags."
+        )
+        assert (contact.flags & 0x01) == 0, "Contact must not be marked as favourite after auto-add"
+
     async def test_path_packet_updates_contact_path_and_fires_contact_path_updated_once(self):
         """PATH packet that decrypts updates contact out_path and fires contact_path_updated."""
         injector = MockPacketInjector()
