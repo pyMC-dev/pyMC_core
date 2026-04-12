@@ -742,6 +742,7 @@ class PacketBuilder:
         attempt: int = 0,
         message_type: str = "direct",
         out_path: Optional[list] = None,
+        txt_type: int = 0,
     ) -> tuple[Packet, int]:
         """
         Create a secure text message with encryption and CRC validation.
@@ -756,6 +757,9 @@ class PacketBuilder:
             attempt: The attempt number for retries (0-3).
             message_type: The message routing type ("direct" or "flood").
             out_path: The optional routing path for directed messages.
+            txt_type: Text type in upper 6 bits of the flags byte (0=PLAIN, 1=CLI_DATA, …),
+                combined with attempt as ``(txt_type << 2) | (attempt & 3)``. Matches MeshCore
+                ``TXT_TYPE_*`` so repeaters skip delivery ACK for CLI_DATA.
 
         Returns:
             tuple: (packet, crc) - The encrypted packet and CRC for ACK verification.
@@ -772,10 +776,12 @@ class PacketBuilder:
             ```
         """
         attempt &= 0x03
+        txt_type &= 0x3F
+        flags_byte = (txt_type << 2) | attempt
         timestamp = PacketBuilder._get_timestamp()
 
         # Use  timestamp+data packing
-        plaintext = PacketBuilder._pack_timestamp_data(timestamp, attempt, message, b"\x00")
+        plaintext = PacketBuilder._pack_timestamp_data(timestamp, flags_byte, message, b"\x00")
 
         # Use  encryption and payload creation
         payload, shared_secret, aes_key = PacketBuilder._create_encrypted_payload(
@@ -783,7 +789,7 @@ class PacketBuilder:
         )
 
         # Calculate CRC using centralized packing
-        crc_input = PacketBuilder._pack_timestamp_data(timestamp, attempt, message)
+        crc_input = PacketBuilder._pack_timestamp_data(timestamp, flags_byte, message)
         ack_crc = int.from_bytes(
             CryptoUtils.sha256(crc_input + local_identity.get_public_key())[:4],
             "little",
@@ -840,7 +846,10 @@ class PacketBuilder:
         )
         logger.debug(f"  Path: {list(pkt.path)} (len={pkt.path_len})")
         logger.debug(f"  Payload: {len(pkt.payload)} bytes, first 10: {list(pkt.payload[:10])}")
-        logger.debug(f"  Message: '{message}', attempt={attempt}, timestamp={timestamp}")
+        logger.debug(
+            f"  Message: '{message}', attempt={attempt}, txt_type={txt_type}, "
+            f"flags=0x{flags_byte:02X}, timestamp={timestamp}"
+        )
         logger.debug(f"  CRC: 0x{ack_crc:08X}")
 
         return pkt, ack_crc
@@ -929,8 +938,14 @@ class PacketBuilder:
         Returns:
             tuple: (packet, crc) - The logout packet and CRC for verification.
         """
+        # CLI_DATA (1): MeshCore repeaters do not send delivery ACK for CLI text.
         return PacketBuilder.create_text_message(
-            contact, local_identity, "logout", attempt=0, message_type="direct"
+            contact,
+            local_identity,
+            "logout",
+            attempt=0,
+            message_type="direct",
+            txt_type=1,  # TXT_TYPE_CLI_DATA
         )
 
     # ---------- Telemetry  ----------

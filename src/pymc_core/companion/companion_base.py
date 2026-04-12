@@ -66,6 +66,7 @@ from .constants import (
     STATS_TYPE_CORE,
     STATS_TYPE_PACKETS,
     STATS_TYPE_RADIO,
+    TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
 )
 from .contact_store import ContactStore
@@ -1201,6 +1202,8 @@ class CompanionBase(ABC):
         When wait_for_ack is True (default), blocks until ACK or timeout.
         When wait_for_ack is False, returns as soon as the packet is handed off;
         ACK (if any) is still tracked and will trigger send_confirmed later.
+        For ``txt_type == TXT_TYPE_CLI_DATA``, delivery ACK is not used on MeshCore
+        repeaters; ``wait_for_ack`` is treated as False and pending ACK is not tracked.
         """
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
@@ -1218,11 +1221,14 @@ class CompanionBase(ABC):
                 message=text,
                 attempt=attempt,
                 message_type=msg_type,
+                txt_type=txt_type,
             )
             self._apply_flood_scope(pkt)
             self._apply_path_hash_mode(pkt)
-            self._track_pending_ack(ack_crc)
-            if wait_for_ack:
+            effective_wait_ack = wait_for_ack and txt_type != TXT_TYPE_CLI_DATA
+            if txt_type != TXT_TYPE_CLI_DATA:
+                self._track_pending_ack(ack_crc)
+            if effective_wait_ack:
                 success = await self._send_packet(pkt, wait_for_ack=True)
                 if success:
                     self.stats.record_tx(is_flood=is_flood)
@@ -1640,15 +1646,16 @@ class CompanionBase(ABC):
         text_handler.set_command_response_callback(_response_cb)
         try:
             msg_type = "flood" if proxy.out_path_len < 0 else "direct"
-            pkt, ack_crc = PacketBuilder.create_text_message(
+            pkt, _ = PacketBuilder.create_text_message(
                 contact=proxy,
                 local_identity=self._identity,
                 message=full_command,
                 attempt=1,
                 message_type=msg_type,
+                txt_type=TXT_TYPE_CLI_DATA,
             )
             self._apply_path_hash_mode(pkt)
-            await self._send_packet(pkt, wait_for_ack=True)
+            await self._send_packet(pkt, wait_for_ack=False)
             try:
                 await asyncio.wait_for(response_event.wait(), timeout=15.0)
             except asyncio.TimeoutError:

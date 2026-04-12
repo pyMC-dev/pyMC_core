@@ -7,6 +7,7 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RAW_CUSTOM,
 )
+from pymc_core.protocol.identity import Identity
 from pymc_core.protocol.packet import Packet
 from pymc_core.protocol.packet_builder import PacketBuilder
 from pymc_core.protocol.packet_utils import PathUtils
@@ -137,6 +138,39 @@ def test_packet_builder_create_path_return_no_encoded_uses_len_path():
     decrypted = CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(pkt.payload[2:]))
     assert decrypted[0] == 3
     assert decrypted[1:4] == bytes(path)
+
+
+def test_create_text_message_cli_data_flags_byte():
+    """TXT_TYPE_CLI_DATA sets upper bits of flags; ACK crc includes full flags byte."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": [],
+            "out_path_len": -1,
+        },
+    )()
+    pkt_plain, crc_plain = PacketBuilder.create_text_message(
+        contact, local, "cmd", 1, "direct", None, 0
+    )
+    pkt_cli, crc_cli = PacketBuilder.create_text_message(
+        contact, local, "cmd", 1, "direct", None, 1
+    )
+    peer_pub = local.get_public_key()
+    secret = Identity(peer_pub).calc_shared_secret(other.get_private_key())
+    aes_key = secret[:16]
+
+    def _dec_txt(p):
+        return CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(p.payload[2:]))
+
+    dec_p = _dec_txt(pkt_plain)
+    dec_c = _dec_txt(pkt_cli)
+    assert dec_p[4] == 0x01  # PLAIN: (0 << 2) | attempt 1
+    assert dec_c[4] == 0x05  # CLI_DATA: (1 << 2) | attempt 1
+    assert crc_plain != crc_cli
 
 
 def test_create_text_message_truncated_path_path_len_consistency():
