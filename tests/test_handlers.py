@@ -1,4 +1,5 @@
 import struct
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -741,3 +742,288 @@ def test_anon_req_response_handler():
 
     # Should have same payload type as anonymous requests
     assert AnonReqResponseHandler.payload_type() == PAYLOAD_TYPE_ANON_REQ
+
+
+# LoginServerHandler Tests — verify parity with C++ simple_repeater
+class TestLoginServerHandler:
+    """
+    Tests for the server-side login handler.
+
+    Validates that behavior matches C++ MeshCore/examples/simple_repeater:
+    - Flood login → PATH packet response (login reply as extra data)
+    - Direct login → RESPONSE datagram flooded back
+    - Failed auth → no response sent
+    - Response payload is 13 bytes with correct structure
+    """
+
+    def setup_method(self):
+        from pymc_core.node.handlers.login_server import LoginServerHandler
+
+        self.server_identity = LocalIdentity()
+        self.client_identity_local = LocalIdentity()
+        self.log_fn = MagicMock()
+
+        # Default: successful auth returning admin permissions (0x03)
+        self.auth_callback = MagicMock(return_value=(True, 0x03))
+
+        self.handler = LoginServerHandler(
+            local_identity=self.server_identity,
+            log_fn=self.log_fn,
+            authenticate_callback=self.auth_callback,
+            is_room_server=False,
+        )
+
+        # Capture sent packets
+        self.sent_packets = []
+
+        def capture_send(pkt, delay_ms):
+            self.sent_packets.append((pkt, delay_ms))
+
+        self.handler.set_send_packet_callback(capture_send)
+
+    def _build_login_packet(self, password="admin123", route_type="flood", path=None):
+        """Build an ANON_REQ login packet the same way the client does."""
+        client_pubkey = self.client_identity_local.get_public_key()
+        server_pubkey = self.server_identity.get_public_key()
+
+        # Calculate shared secret (client side)
+        server_id = Identity(server_pubkey)
+        shared_secret = server_id.calc_shared_secret(
+            self.client_identity_local.get_private_key()
+        )
+        aes_key = shared_secret[:16]
+
+        # Repeater format plaintext: timestamp(4) + password + null
+        timestamp = int(time.time())
+        plaintext = struct.pack("<I", timestamp) + password.encode("utf-8") + b"\x00"
+        encrypted = CryptoUtils.encrypt_then_mac(aes_key, shared_secret, plaintext)
+
+        # ANON_REQ payload: dest_hash(1) + client_pubkey(32) + encrypted_data
+        dest_hash = server_pubkey[0]
+        payload = bytes([dest_hash]) + client_pubkey + encrypted
+
+        # Build packet with appropriate route type
+        if route_type == "flood":
+            header = (PAYLOAD_TYPE_ANON_REQ << 2) | ROUTE_TYPE_FLOOD
+        else:
+            header = (PAYLOAD_TYPE_ANON_REQ << 2) | ROUTE_TYPE_DIRECT
+
+        pkt = Packet()
+        pkt.header = header
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        if path:
+            pkt.path = bytearray(path)
+            pkt.path_len = len(path)
+        else:
+            pkt.path = bytearray()
+            pkt.path_len = 0
+
+        return pkt
+
+    def test_payload_type(self):
+        """LoginServerHandler handles ANON_REQ packets."""
+        from pymc_core.node.handlers.login_server import LoginServerHandler
+
+        assert LoginServerHandler.payload_type() == PAYLOAD_TYPE_ANON_REQ
+
+    @pytest.mark.asyncio
+    async def test_flood_login_sends_path_packet(self):
+        """Flood login → PATH packet response (matches C++ createPathReturn path)."""
+        pkt = self._build_login_packet(password="admin123", route_type="flood")
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 1
+        response_pkt, delay_ms = self.sent_packets[0]
+
+        # C++ uses SERVER_RESPONSE_DELAY = 300
+        assert delay_ms == 300
+
+        # Must be PAYLOAD_TYPE_PATH — the C++ flood path
+        assert response_pkt.get_payload_type() == PAYLOAD_TYPE_PATH
+
+        # Must be flood routed (createPathReturn sets flood)
+        assert response_pkt.is_route_flood()
+
+        # PATH payload: dest_hash(1) + src_hash(1) + encrypted(...)
+        assert len(response_pkt.payload) > 2
+        # dest_hash should be client's hash
+        client_hash = self.client_identity_local.get_public_key()[0]
+        assert response_pkt.payload[0] == client_hash
+        # src_hash should be server's hash
+        server_hash = self.server_identity.get_public_key()[0]
+        assert response_pkt.payload[1] == server_hash
+
+    @pytest.mark.asyncio
+    async def test_direct_login_sends_response_datagram(self):
+        """Direct login → RESPONSE datagram via flood (matches C++ sendFlood(createDatagram) path)."""
+        pkt = self._build_login_packet(password="admin123", route_type="direct")
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 1
+        response_pkt, delay_ms = self.sent_packets[0]
+
+        assert delay_ms == 300
+
+        # Must be PAYLOAD_TYPE_RESPONSE — regular datagram, NOT a PATH packet
+        assert response_pkt.get_payload_type() == PAYLOAD_TYPE_RESPONSE
+
+        # C++ sends the datagram via flood when reply_path_len < 0
+        assert response_pkt.is_route_flood()
+
+    @pytest.mark.asyncio
+    async def test_flood_login_response_decryptable_with_login_reply(self):
+        """PATH response from flood login contains the 13-byte login reply as extra data."""
+        pkt = self._build_login_packet(password="admin123", route_type="flood")
+        await self.handler(pkt)
+
+        response_pkt, _ = self.sent_packets[0]
+
+        # Decrypt the PATH payload to verify inner structure
+        server_pubkey = self.server_identity.get_public_key()
+        client_id = Identity(self.client_identity_local.get_public_key())
+        shared_secret = client_id.calc_shared_secret(
+            self.server_identity.get_private_key()
+        )
+        aes_key = shared_secret[:16]
+
+        # PATH payload: dest_hash(1) + src_hash(1) + mac_and_ciphertext
+        encrypted_part = bytes(response_pkt.payload[2:])
+        plaintext = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_part)
+
+        # Inner: path_len(1) + path_bytes(0 for no path) + extra_type(1) + extra(13)
+        path_len_byte = plaintext[0]
+        # With no path hops, path_len_byte is 0
+        assert path_len_byte == 0
+
+        extra_type = plaintext[1]
+        assert extra_type == PAYLOAD_TYPE_RESPONSE
+
+        # 13-byte login reply: timestamp(4) + resp_code(1) + keepalive(1) +
+        #                      is_admin(1) + perms(1) + random(4) + fw_ver(1)
+        # AES block padding may add trailing zero bytes — take exactly 13
+        login_reply = plaintext[2:15]
+        assert len(login_reply) == 13
+
+        resp_code = login_reply[4]
+        assert resp_code == 0x00  # RESP_SERVER_LOGIN_OK
+
+        keepalive = login_reply[5]
+        assert keepalive == 0  # Legacy, always 0
+
+        is_admin = login_reply[6]
+        assert is_admin == 1  # permissions 0x03 has admin bit 0x02
+
+        perms = login_reply[7]
+        assert perms == 0x03
+
+        fw_ver = login_reply[12]
+        assert fw_ver == 1  # FIRMWARE_VER_LEVEL
+
+    @pytest.mark.asyncio
+    async def test_failed_auth_sends_no_response(self):
+        """Failed authentication → no response sent (C++ returns 0 from handleLoginReq)."""
+        self.auth_callback.return_value = (False, 0)
+
+        pkt = self._build_login_packet(password="wrongpass", route_type="flood")
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 0
+
+    @pytest.mark.asyncio
+    async def test_packet_too_short_ignored(self):
+        """Packets with payload < 34 bytes are silently dropped."""
+        pkt = Packet()
+        pkt.header = (PAYLOAD_TYPE_ANON_REQ << 2) | ROUTE_TYPE_FLOOD
+        pkt.payload = bytearray(b"\x00" * 10)
+        pkt.payload_len = 10
+        pkt.path = bytearray()
+        pkt.path_len = 0
+
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 0
+
+    @pytest.mark.asyncio
+    async def test_wrong_dest_hash_ignored(self):
+        """Packets addressed to a different server are silently ignored."""
+        pkt = self._build_login_packet(password="admin123", route_type="flood")
+        # Corrupt dest_hash to not match our identity
+        pkt.payload[0] = (self.server_identity.get_public_key()[0] + 1) & 0xFF
+
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 0
+
+    @pytest.mark.asyncio
+    async def test_guest_permissions_is_admin_zero(self):
+        """Guest login (no admin bit) → is_admin = 0 in response (matches C++ check)."""
+        # Permission 0x01 = guest only, no admin bit (0x02)
+        self.auth_callback.return_value = (True, 0x01)
+
+        pkt = self._build_login_packet(password="guest", route_type="flood")
+        await self.handler(pkt)
+
+        response_pkt, _ = self.sent_packets[0]
+
+        # Decrypt and verify is_admin field
+        client_id = Identity(self.client_identity_local.get_public_key())
+        shared_secret = client_id.calc_shared_secret(
+            self.server_identity.get_private_key()
+        )
+        aes_key = shared_secret[:16]
+        encrypted_part = bytes(response_pkt.payload[2:])
+        plaintext = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_part)
+
+        login_reply = plaintext[2:15]  # skip path_len(1) + extra_type(1), take 13
+        is_admin = login_reply[6]
+        assert is_admin == 0  # No admin bit → is_admin = 0
+
+        perms = login_reply[7]
+        assert perms == 0x01
+
+    @pytest.mark.asyncio
+    async def test_no_send_callback_logs_error(self):
+        """Without send callback, logs error but doesn't crash."""
+        self.handler.set_send_packet_callback(None)
+
+        pkt = self._build_login_packet(password="admin123", route_type="flood")
+        await self.handler(pkt)
+
+        # Should have logged the error
+        log_calls = [str(c) for c in self.log_fn.call_args_list]
+        assert any("No send packet callback" in c for c in log_calls)
+
+    @pytest.mark.asyncio
+    async def test_flood_login_with_path_includes_path_in_response(self):
+        """Flood login with path hashes → PATH response includes those hashes."""
+        path_hashes = [0xAA, 0xBB]
+        pkt = self._build_login_packet(
+            password="admin123", route_type="flood", path=path_hashes
+        )
+        # path_len encodes hash size and count: (hash_size-1)<<6 | count
+        # For 1-byte hashes with 2 hops: (0<<6) | 2 = 2
+        pkt.path_len = 2
+
+        await self.handler(pkt)
+
+        assert len(self.sent_packets) == 1
+        response_pkt, _ = self.sent_packets[0]
+        assert response_pkt.get_payload_type() == PAYLOAD_TYPE_PATH
+
+        # Decrypt and verify path is included
+        client_id = Identity(self.client_identity_local.get_public_key())
+        shared_secret = client_id.calc_shared_secret(
+            self.server_identity.get_private_key()
+        )
+        aes_key = shared_secret[:16]
+        encrypted_part = bytes(response_pkt.payload[2:])
+        plaintext = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_part)
+
+        # Inner: path_len_encoded(1) + path(2 bytes) + extra_type(1) + extra(13)
+        path_len_encoded = plaintext[0]
+        assert path_len_encoded == 2  # 2 hops, 1-byte hashes
+        assert plaintext[1] == 0xAA
+        assert plaintext[2] == 0xBB
+        assert plaintext[3] == PAYLOAD_TYPE_RESPONSE  # extra_type

@@ -245,41 +245,55 @@ class LoginServerHandler(BaseHandler):
             reply_data[12] = FIRMWARE_VER_LEVEL  # firmware version
 
             # Create response packet
-            # For ANON_REQ responses, the C++ client cannot decrypt regular RESPONSE
-            # datagrams because it doesn't have the server in its contacts list yet.
-            # The solution: ALWAYS send PATH packets for ANON_REQ responses, even for
-            # direct requests. The PATH format allows the client to process the response
-            # without needing the server as a known contact.
-            client_hash = client_identity.get_public_key()[0]
-            server_hash = self.local_identity.get_public_key()[0]
-            path_list = (
-                list(original_packet.path[: original_packet.get_path_byte_len()])
-                if original_packet and original_packet.path_len > 0
-                else []
-            )
+            # Match C++ simple_repeater behavior:
+            # - Flood login: send PATH packet with response as extra data
+            #   (tells sender the path TO here so they can sendDirect)
+            # - Direct login: send regular RESPONSE datagram via flood
+            if is_flood:
+                client_hash = client_identity.get_public_key()[0]
+                server_hash = self.local_identity.get_public_key()[0]
+                path_list = (
+                    list(original_packet.path[: original_packet.get_path_byte_len()])
+                    if original_packet and original_packet.path_len > 0
+                    else []
+                )
 
-            self.log(
-                f"[LoginServer] Creating PATH response: "
-                f"client_hash=0x{client_hash:02X}, "
-                f"server_hash=0x{server_hash:02X}, path={path_list}, "
-                f"original_flood={is_flood}"
-            )
+                self.log(
+                    f"[LoginServer] Creating PATH response: "
+                    f"client_hash=0x{client_hash:02X}, "
+                    f"server_hash=0x{server_hash:02X}, path={path_list}"
+                )
 
-            path_len_encoded_arg = (
-                original_packet.path_len
-                if original_packet and original_packet.path_len > 0
-                else None
-            )
-            response_pkt = PacketBuilder.create_path_return(
-                dest_hash=client_hash,
-                src_hash=server_hash,
-                secret=shared_secret,
-                path=path_list,
-                extra_type=PAYLOAD_TYPE_RESPONSE,
-                extra=bytes(reply_data),
-                path_len_encoded=path_len_encoded_arg,
-            )
-            packet_type_name = "PATH"
+                path_len_encoded_arg = (
+                    original_packet.path_len
+                    if original_packet and original_packet.path_len > 0
+                    else None
+                )
+                response_pkt = PacketBuilder.create_path_return(
+                    dest_hash=client_hash,
+                    src_hash=server_hash,
+                    secret=shared_secret,
+                    path=path_list,
+                    extra_type=PAYLOAD_TYPE_RESPONSE,
+                    extra=bytes(reply_data),
+                    path_len_encoded=path_len_encoded_arg,
+                )
+                packet_type_name = "PATH"
+            else:
+                # Direct login: send regular RESPONSE datagram via flood
+                # (like C++ simple_repeater when reply_path_len < 0)
+                response_pkt = PacketBuilder.create_datagram(
+                    ptype=PAYLOAD_TYPE_RESPONSE,
+                    dest=client_identity,
+                    local_identity=self.local_identity,
+                    secret=shared_secret,
+                    plaintext=bytes(reply_data),
+                    route_type="flood",
+                )
+                packet_type_name = "RESPONSE(flood)"
+                self.log(
+                    f"[LoginServer] Creating RESPONSE datagram (direct login, flood reply)"
+                )
 
             # Debug: Log packet details
             self.log(
