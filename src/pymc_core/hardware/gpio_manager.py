@@ -233,14 +233,31 @@ class GPIOPinManager:
             # Determine bias setting
             bias = "pull_up" if pull_up else "default"
 
-            # Open GPIO pin as input with edge detection on rising edge
-            gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
+            # Try hardware edge detection first, fall back to polling
+            # (CH341 and some other USB GPIO chips don't support kernel edge IRQ)
+            try:
+                gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
+                use_polling = False
+            except OSError as edge_err:
+                if edge_err.errno == 22:  # EINVAL - edge detection not supported
+                    logger.warning(
+                        f"Pin {pin_number}: edge detection not supported by GPIO chip "
+                        f"(errno 22), falling back to polling mode"
+                    )
+                    gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias)
+                    use_polling = True
+                else:
+                    raise
+
             self._pins[pin_number] = gpio
 
-            # Setup callback with async edge monitoring
+            # Setup callback with edge monitoring or polling fallback
             if callback:
                 self._input_callbacks[pin_number] = callback
-                self._start_edge_detection(pin_number)
+                if use_polling:
+                    self._start_polling_detection(pin_number)
+                else:
+                    self._start_edge_detection(pin_number)
 
             logger.debug(
                 f"Interrupt pin {pin_number} configured "
@@ -288,6 +305,51 @@ class GPIOPinManager:
         thread.start()
         self._edge_threads[pin_number] = thread
         logger.debug(f"Edge detection thread started for pin {pin_number}")
+
+    def _start_polling_detection(self, pin_number: int) -> None:
+        """Start polling-based edge detection for chips that don't support kernel IRQ"""
+        stop_event = threading.Event()
+        self._edge_stop_events[pin_number] = stop_event
+
+        thread = threading.Thread(
+            target=self._monitor_polling,
+            args=(pin_number, stop_event),
+            daemon=True,
+            name=f"GPIO-Poll-{pin_number}",
+        )
+        thread.start()
+        self._edge_threads[pin_number] = thread
+        logger.debug(f"Polling detection thread started for pin {pin_number}")
+
+    def _monitor_polling(self, pin_number: int, stop_event: threading.Event) -> None:
+        """Poll GPIO pin to simulate rising edge detection"""
+        last_value = False
+        poll_interval = 0.005  # 5ms polling = ~200Hz, sufficient for SX1262 DIO1
+
+        try:
+            while not stop_event.is_set() and pin_number in self._pins:
+                try:
+                    gpio = self._pins.get(pin_number)
+                    if not gpio:
+                        break
+
+                    current_value = gpio.read()
+
+                    # Detect rising edge (low -> high transition)
+                    if current_value and not last_value:
+                        callback = self._input_callbacks.get(pin_number)
+                        if callback:
+                            callback()
+
+                    last_value = current_value
+                    time.sleep(poll_interval)
+
+                except Exception:
+                    if not stop_event.is_set():
+                        time.sleep(0.1)
+
+        except Exception as e:
+            logger.error(f"Polling detection error for pin {pin_number}: {e}")
 
     def _monitor_edge_events(self, pin_number: int, stop_event: threading.Event) -> None:
         """Monitor hardware edge events using poll() for interrupts"""

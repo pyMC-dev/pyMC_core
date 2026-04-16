@@ -401,8 +401,9 @@ class SX126x(BaseLoRa):
             return True  # Continue if reset pin unavailable
 
         reset_pin.write(False)  # periphery: write(False) = LOW
-        time.sleep(0.001)
+        time.sleep(0.010)       # 10ms pulse (was 1ms, too short for USB GPIO)
         reset_pin.write(True)   # periphery: write(True) = HIGH
+        time.sleep(0.150)       # 150ms for SX1262 boot via USB GPIO (was none)
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):
@@ -498,7 +499,9 @@ class SX126x(BaseLoRa):
         # periphery pins are initialized on first use by _get_output/_get_input
         _get_output(reset)
         _get_input(busy)
-        _get_output(self._cs_define)
+        # Only setup CS GPIO if not using hardware SPI CS (-1 = hardware CS)
+        if self._cs_define != -1:
+            _get_output(self._cs_define)
         # IRQ pin managed externally by sx1262_wrapper.py via gpio_manager
         # Do NOT initialize it here to avoid double allocation
         if txen != -1:
@@ -1482,7 +1485,13 @@ class SX126x(BaseLoRa):
             return
 
         # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
+        if self._cs_define == -1:  # Hardware SPI CS (e.g. CH341 USB SPI, kernel spidev CS)
+            # SPI controller handles CS automatically - just do the transfer
+            buf = [opCode]
+            for i in range(nBytes):
+                buf.append(data[i])
+            spi.xfer2(buf)
+        elif self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
             # Simple CS control for manual pins
             _get_output(self._cs_define).write(False)
             buf = [opCode]
@@ -1507,7 +1516,15 @@ class SX126x(BaseLoRa):
             return ()
 
         # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
+        if self._cs_define == -1:  # Hardware SPI CS (e.g. CH341 USB SPI, kernel spidev CS)
+            # SPI controller handles CS automatically - just do the transfer
+            buf = [opCode]
+            for i in range(nAddress):
+                buf.append(address[i])
+            for i in range(nBytes):
+                buf.append(0x00)
+            feedback = spi.xfer2(buf)
+        elif self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
             # Simple CS control for manual pins
             _get_output(self._cs_define).write(False)
             buf = [opCode]

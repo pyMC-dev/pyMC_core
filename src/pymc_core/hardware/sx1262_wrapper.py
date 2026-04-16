@@ -49,6 +49,7 @@ class SX1262Radio(LoRaRadio):
         use_dio3_tcxo: bool = False,
         dio3_tcxo_voltage: float = 1.8,
         use_dio2_rf: bool = False,
+        gpio_chip: str = "/dev/gpiochip0",
     ):
         """
         Initialize SX1262 radio
@@ -75,6 +76,8 @@ class SX1262Radio(LoRaRadio):
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
             use_dio2_rf: Enable DIO2 as RF switch control (default: False)
+            gpio_chip: GPIO chip device path (default: /dev/gpiochip0)
+                       Set to e.g. /dev/gpiochip2 for USB GPIO adapters (CH341)
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -108,6 +111,7 @@ class SX1262Radio(LoRaRadio):
         self.use_dio3_tcxo = use_dio3_tcxo
         self.dio3_tcxo_voltage = dio3_tcxo_voltage
         self.use_dio2_rf = use_dio2_rf
+        self.gpio_chip = gpio_chip
 
         # State variables
         self.lora: Optional[SX126x] = None
@@ -119,7 +123,7 @@ class SX1262Radio(LoRaRadio):
         self._tx_lock = asyncio.Lock()
 
         # GPIO management
-        self._gpio_manager = GPIOPinManager()
+        self._gpio_manager = GPIOPinManager(gpio_chip=gpio_chip)
         self._interrupt_setup = False
         self._txen_pin_setup = False
         self._txled_pin_setup = False
@@ -214,9 +218,9 @@ class SX1262Radio(LoRaRadio):
     def _basic_radio_setup(self, use_busy_check: bool = False) -> bool:
         """Common radio setup: reset, standby, and LoRa packet type"""
         self.lora.reset()
-        time.sleep(0.01)  # Give hardware time to complete reset
+        time.sleep(0.20)  # Give hardware time to complete reset (USB GPIO needs longer)
         self.lora.setStandby(self.lora.STANDBY_RC)
-        time.sleep(0.01)  # Give hardware time to enter standby mode
+        time.sleep(0.05)  # Give hardware time to enter standby mode
 
         # Check if standby mode was set correctly (different methods for different boards)
         if use_busy_check:
@@ -519,6 +523,9 @@ class SX1262Radio(LoRaRadio):
             if self.cs_pin != -1:
                 # Override CS pin for special boards (e.g., Waveshare HAT)
                 self.lora.setManualCsPin(self.cs_pin)
+            else:
+                # Use hardware SPI CS - disable GPIO CS in low-level driver
+                self.lora._cs_define = -1
 
             self.lora._reset = self.reset_pin
             self.lora._busy = self.busy_pin
