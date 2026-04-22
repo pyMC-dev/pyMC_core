@@ -14,6 +14,15 @@ from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO, EdgeEvent
+    try:
+        # python-periphery's cdev2 backend asks for realtime event timestamps
+        # by default. Linux 5.10 Rockchip kernels reject that flag during edge
+        # requests, and pyMC does not need IRQ timestamps.
+        import periphery.gpio_cdev2 as _cdev
+
+        _cdev.Cdev2GPIO._GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME = 0
+    except (ImportError, AttributeError):
+        pass
     PERIPHERY_AVAILABLE = True
 except ImportError:
     # Mock GPIO classes for testing/non-hardware environments
@@ -187,6 +196,25 @@ class GPIOPinManager:
                 return "/dev/gpiochip0"
         return gpio_chip
 
+    def _gpio_ref_for_pin(self, pin_number: int):
+        """
+        Resolve a configured pin number to a gpiochip path and line offset.
+
+        Raspberry Pi style BCM numbers are line offsets on /dev/gpiochip0 and
+        continue to work as before. Luckfox/Rockchip documentation often uses
+        global GPIO numbers (bank * 32 + offset). When a configured pin is 32
+        or higher and the matching /dev/gpiochip<bank> exists, split it into
+        the banked character device expected by python-periphery/libgpiod.
+        """
+        if isinstance(pin_number, int) and pin_number >= 32:
+            bank = pin_number // 32
+            line = pin_number % 32
+            chip = f"/dev/gpiochip{bank}"
+            if os.path.exists(chip):
+                logger.debug("Mapped global GPIO %s to %s line %s", pin_number, chip, line)
+                return chip, line
+        return self._gpio_chip, pin_number
+
     def setup_output_pin(self, pin_number: int, initial_value: bool = False) -> bool:
         """
         Setup an output pin with initial value
@@ -204,8 +232,8 @@ class GPIOPinManager:
                 self._pins[pin_number].close()
                 del self._pins[pin_number]
 
-            # Open GPIO pin as output
-            gpio = GPIO(self._gpio_chip, pin_number, "out")
+            chip, line = self._gpio_ref_for_pin(pin_number)
+            gpio = GPIO(chip, line, "out")
             gpio.write(initial_value)
             self._pins[pin_number] = gpio
 
@@ -276,18 +304,19 @@ class GPIOPinManager:
             if callback:
                 # For gpiod backend, libgpiod does not provide the same edge API here
                 # so we open a plain input and use a polling thread to detect edges.
+                chip, line = self._gpio_ref_for_pin(pin_number)
                 if self._backend == "gpiod":
-                    gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias)
+                    gpio = GPIO(chip, line, "in", bias=bias)
                     self._input_callbacks[pin_number] = callback
                     # start polling-based detection
                     self._start_polling_detection(pin_number)
                 else:
-                    gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
+                    gpio = GPIO(chip, line, "in", bias=bias, edge="rising")
                     self._input_callbacks[pin_number] = callback
                     self._start_edge_detection(pin_number)
             else:
-                # No callback, just simple input
-                gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias)
+                chip, line = self._gpio_ref_for_pin(pin_number)
+                gpio = GPIO(chip, line, "in", bias=bias)
 
             self._pins[pin_number] = gpio
 
@@ -361,14 +390,15 @@ class GPIOPinManager:
             bias = "pull_up" if pull_up else "default"
 
             # Open GPIO pin as input with edge detection on rising edge or polling for gpiod
+            chip, line = self._gpio_ref_for_pin(pin_number)
             if self._backend == "gpiod":
-                gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias)
+                gpio = GPIO(chip, line, "in", bias=bias)
                 self._pins[pin_number] = gpio
                 if callback:
                     self._input_callbacks[pin_number] = callback
                     self._start_polling_detection(pin_number)
             else:
-                gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
+                gpio = GPIO(chip, line, "in", bias=bias, edge="rising")
                 self._pins[pin_number] = gpio
                 if callback:
                     self._input_callbacks[pin_number] = callback
