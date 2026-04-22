@@ -18,9 +18,14 @@ try:
         # python-periphery's cdev2 backend asks for realtime event timestamps
         # by default. Linux 5.10 Rockchip kernels reject that flag during edge
         # requests, and pyMC does not need IRQ timestamps.
-        import periphery.gpio_cdev2 as _cdev
-
-        _cdev.Cdev2GPIO._GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME = 0
+        # Resolve the module via the already-imported GPIO class to avoid
+        # hardcoding the internal submodule path.
+        import sys as _sys
+        _cdev_mod = _sys.modules.get(GPIO.__module__, None)
+        if _cdev_mod is not None and hasattr(_cdev_mod, "_GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME"):
+            _cdev_mod._GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME = 0
+        elif hasattr(GPIO, "_GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME"):
+            GPIO._GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME = 0
     except (ImportError, AttributeError):
         pass
     PERIPHERY_AVAILABLE = True
@@ -206,7 +211,7 @@ class GPIOPinManager:
         or higher and the matching /dev/gpiochip<bank> exists, split it into
         the banked character device expected by python-periphery/libgpiod.
         """
-        if isinstance(pin_number, int) and pin_number >= 32:
+        if pin_number >= 32:
             bank = pin_number // 32
             line = pin_number % 32
             chip = f"/dev/gpiochip{bank}"
