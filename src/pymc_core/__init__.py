@@ -3,7 +3,7 @@ PyMC_Core - A Python MeshCore library with SPI LoRa radio support
 Clean, simple API for building mesh network applications.
 """
 
-__version__ = "1.0.9"
+__version__ = "1.0.10"
 
 # Core mesh functionality
 from .node.node import MeshNode
