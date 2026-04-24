@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymc_core"
-version = "1.0.8"
+version = "1.0.9"
 authors = [
     {name = "Lloyd Newton", email = "lloyd@rightup.co.uk"},
 ]
@@ -50,6 +50,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.21.0",
+    "pyserial>=3.5",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",
