@@ -2,6 +2,34 @@
 
 This section documents the node management classes and functions in pyMC_Core.
 
+## Dispatcher default path hash mode
+
+The dispatcher can apply a **default path hash mode** to flood packets with 0 hops
+that have not already had path hash mode set by the companion. This allows
+packets built without the companion (e.g. ``PacketBuilder.create_flood_advert()``
+and ``send_packet()``) to use 2- or 3-byte path hashes when the host sets a default.
+
+- **``path_hash_mode``**: ``Optional[int] = None`` — 0=1-byte, 1=2-byte, 2=3-byte; ``None`` disables.
+- **``set_default_path_hash_mode(mode)``**: Set or clear the default; ``mode`` must be ``None``, 0, 1, or 2.
+
+The default is applied only to flood-routed packets with 0 hops. Packets that
+already have path hash mode applied by the companion (marked with
+``_path_hash_mode_applied``) are never overwritten.
+
+**TRACE and flood:** The TRACE payload type is only sent via direct routing in the
+firmware (path/SNR in payload, ``path_len = 0``). Flood TRACE is explicitly
+unsupported. If ``send_packet()`` is called with a packet that is both
+flood-routed and TRACE payload type, the dispatcher does not transmit and
+returns ``False``.
+
+**Repeater forwarding:** When implementing repeater-style forwarding of packets as
+flood (e.g. path-return or reply floods), preserve the incoming packet's path
+hash size on the outgoing packet so repeaters use the same 1-, 2-, or 3-byte
+path hashes. For example: use ``incoming.get_path_hash_size()`` and call
+``outgoing.apply_path_hash_mode(size - 1)`` when building the reply (mode 0=1-byte,
+1=2-byte, 2=3-byte). This matches firmware behavior where
+``sendFlood(..., packet->getPathHashSize())`` is used when forwarding.
+
 ## MeshNode
 
 ::: pymc_core.node.node.MeshNode

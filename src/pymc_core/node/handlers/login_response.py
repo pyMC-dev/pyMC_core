@@ -3,7 +3,8 @@ import struct
 from typing import Callable, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet
-from ...protocol.constants import PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_RESPONSE
+from ...protocol.constants import PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_PATH, PAYLOAD_TYPE_RESPONSE
+from ...protocol.packet_utils import PathUtils
 from .base import BaseHandler
 
 # Response codes from C++ server
@@ -87,16 +88,15 @@ class LoginResponseHandler(BaseHandler):
             if dest_hash != our_hash and src_hash != our_hash:
                 return
 
-        # Find stored password and matching contact
+        # Find stored password and matching contact(s)
         if lookup_hash not in self._active_login_passwords:
             # This might be a telemetry response, not a login response
-            # Forward to protocol response handler if available
+            # Forward to protocol response handler if available (only for RESPONSE packets;
+            # PATH packets are already handled by PathHandler before we are called).
             if self._protocol_response_handler:
-                # Create a fake PATH packet format that
-                # ProtocolResponseHandler expects
-                # PATH format: dest_hash(1) + src_hash(1) + encrypted_data
-                # RESPONSE format is already: dest_hash(1) + src_hash(1) + encrypted_data
-                # So we can directly forward the packet to the protocol response handler
+                pkt_type = (packet.header >> 2) & 0x0F
+                if pkt_type == PAYLOAD_TYPE_PATH:
+                    return  # PathHandler already invoked protocol_response_handler for this packet
                 try:
                     await self._protocol_response_handler(packet)
                     return
@@ -106,23 +106,38 @@ class LoginResponseHandler(BaseHandler):
                     )
             return
 
-        matched_contact = None
-
+        # Collect all contacts whose public_key first byte matches (hash collision / multiple peers)
+        candidates = []
         for contact in self.contacts.contacts:
             try:
-                contact_pubkey = bytes.fromhex(contact.public_key)
-                if len(contact_pubkey) > 0 and contact_pubkey[0] == lookup_hash:
-                    matched_contact = contact
-                    break
+                pk = contact.public_key
+                contact_pubkey = pk if isinstance(pk, bytes) else bytes.fromhex(pk)
+                if len(contact_pubkey) == 32 and contact_pubkey[0] == lookup_hash:
+                    candidates.append(contact)
             except Exception:
                 continue
 
-        if not matched_contact:
+        if not candidates:
+            if self.login_callback:
+                await self._safe_callback(
+                    False,
+                    {
+                        "error": "No contact found for login response (src_hash=0x%02x)"
+                        % lookup_hash
+                    },
+                )
             return
 
-        # Decrypt and process response
-        response_data = await self._decrypt_response(packet, matched_contact, encrypted_start)
-        if response_data:
+        # Try each candidate until one decrypts successfully (same shared-secret as firmware)
+        response_data = None
+        matched_contact = None
+        for contact in candidates:
+            response_data = await self._decrypt_response(packet, contact, encrypted_start)
+            if response_data:
+                matched_contact = contact
+                break
+
+        if response_data and matched_contact:
             await self._process_login_response(response_data, matched_contact)
             self.clear_login_password(lookup_hash)
         elif self.login_callback:
@@ -137,7 +152,8 @@ class LoginResponseHandler(BaseHandler):
             encrypted_data = packet.payload[encrypted_start:]
 
             # Calculate X25519 ECDH shared secret
-            contact_pubkey = bytes.fromhex(contact.public_key)
+            pk = contact.public_key
+            contact_pubkey = pk if isinstance(pk, bytes) else bytes.fromhex(pk)
             contact_identity = Identity(contact_pubkey)
             shared_secret = contact_identity.calc_shared_secret(
                 self.local_identity.get_private_key()
@@ -147,16 +163,33 @@ class LoginResponseHandler(BaseHandler):
             aes_key = shared_secret[:16]
             plaintext = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, encrypted_data)
 
-            if not plaintext or len(plaintext) < 12:
+            if not plaintext:
                 return None
 
-            # Parse the C++ response format:
+            # If this is a PATH packet, unwrap the path-return envelope to get
+            # the inner response.  PATH format after decryption:
+            #   path_len(1) + path(N) + extra_type(1) + extra_data(M)
+            pkt_type = (packet.header >> 2) & 0x0F
+            if pkt_type == PAYLOAD_TYPE_PATH and len(plaintext) >= 2:
+                path_len_byte = plaintext[0]
+                path_byte_len = PathUtils.get_path_byte_len(path_len_byte)
+                inner_offset = 1 + path_byte_len + 1  # skip path_len + path + extra_type
+                if PathUtils.is_valid_path_len(path_len_byte) and len(plaintext) >= inner_offset:
+                    extra_type = plaintext[1 + path_byte_len] & 0x0F
+                    if extra_type == PAYLOAD_TYPE_RESPONSE and len(plaintext) > inner_offset:
+                        plaintext = plaintext[inner_offset:]
+
+            if len(plaintext) < 12:
+                return None
+
+            # Parse the C++ response format (handleLoginReq reply_data):
             # timestamp(4) + response_code(1) + keep_alive(1) + is_admin(1) +
-            # reserved(1) + random(4)
+            # permissions(1) + random(4) + [firmware_ver_level(1) at index 12]
             timestamp, response_code, keep_alive, is_admin, reserved = struct.unpack(
                 "<IBBBB", plaintext[:8]
             )
             random_blob = plaintext[8:12]
+            firmware_ver_level = int(plaintext[12]) if len(plaintext) >= 13 else None
 
             return {
                 "timestamp": timestamp,
@@ -165,6 +198,7 @@ class LoginResponseHandler(BaseHandler):
                 "is_admin": bool(is_admin),
                 "reserved": reserved,
                 "random_blob": random_blob,
+                "firmware_ver_level": firmware_ver_level,
                 "contact": contact,
             }
 

@@ -96,6 +96,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Node Usage Guide: node.md
+  - Companion Guide: companion.md
   - API Reference:
       - Core: api/core.md
       - Protocol: api/protocol.md

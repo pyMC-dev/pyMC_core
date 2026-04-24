@@ -1,15 +1,30 @@
 import time
-import spidev
+
+# Optional import - spidev is only needed for hardware SPI (Raspberry Pi)
+# When using USB adapters like CH341, a custom transport is provided instead
+try:
+    import spidev
+
+    spi = spidev.SpiDev()
+except ImportError:
+    spi = None
 
 from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
-spi = spidev.SpiDev()
+
 _gpio_manager = None
+
 
 def set_gpio_manager(gpio_manager):
     """Set the GPIO manager instance to be used by this module"""
     global _gpio_manager
     _gpio_manager = gpio_manager
+
+
+def set_spi_transport(spi_transport):
+    """Set the SPI transport instance to be used by this module"""
+    global spi
+    spi = spi_transport
 
 
 def _get_output(pin):
@@ -286,6 +301,7 @@ class SX126x(BaseLoRa):
     RX_GAIN_BOOSTED = 0x01  #                       boosted gain
     POWER_SAVING_GAIN = 0x94  # power saving gain register value
     BOOSTED_GAIN = 0x96  # boosted gain register value
+    _rxGain = RX_GAIN_POWER_SAVING  # track configured gain for re-apply after standby
 
     # TX and RX operation status
     STATUS_DEFAULT = 0  # default status (false)
@@ -307,7 +323,7 @@ class SX126x(BaseLoRa):
     _cs = 0
     _reset = 22
     _busy = 23
-    _cs_define = 21
+    _cs_define = -1  # -1 = use automatic CS from SPI driver, or set via setManualCsPin()
     _irq = -1
     _txen = -1
     _rxen = -1
@@ -402,7 +418,7 @@ class SX126x(BaseLoRa):
 
         reset_pin.write(False)  # periphery: write(False) = LOW
         time.sleep(0.001)
-        reset_pin.write(True)   # periphery: write(True) = HIGH
+        reset_pin.write(True)  # periphery: write(True) = HIGH
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):
@@ -449,28 +465,7 @@ class SX126x(BaseLoRa):
         self._cs = cs
         self._spiSpeed = speed
 
-        # Map CS IDs to actual GPIO pins based on Raspberry Pi SPI pinout
-        if bus == 0:  # SPI0
-            if cs == 0:
-                self._cs_define = 8  # CE0 = GPIO 8
-            elif cs == 1:
-                self._cs_define = 7  # CE1 = GPIO 7
-            else:
-                self._cs_define = 8  # Default to GPIO 8
-        elif bus == 1:  # SPI1
-            if cs == 0:
-                # OVERRIDE: GPIO 18 is busy on ClockworkPi/Heltec boards
-                # Use GPIO 17 instead (confirmed available)
-                self._cs_define = 17  # Override: GPIO 17 instead of standard GPIO 18
-            elif cs == 1:
-                self._cs_define = 17  # CE1 = GPIO 17
-            else:
-                self._cs_define = 17  # Default to GPIO 17 (safe alternative)
-        else:
-            # Keep original hardcoded value for unknown buses
-            self._cs_define = 21
-
-        # open spi line and set bus id, chip select, and spi speed
+        # Open SPI device - driver handles CS pin automatically
         spi.open(bus, cs)
         spi.max_speed_hz = speed
         spi.lsbfirst = False
@@ -498,7 +493,9 @@ class SX126x(BaseLoRa):
         # periphery pins are initialized on first use by _get_output/_get_input
         _get_output(reset)
         _get_input(busy)
-        _get_output(self._cs_define)
+        # Only initialize CS as GPIO if using manual CS control
+        if self._cs_define != -1:
+            _get_output(self._cs_define)
         # IRQ pin managed externally by sx1262_wrapper.py via gpio_manager
         # Do NOT initialize it here to avoid double allocation
         if txen != -1:
@@ -681,6 +678,7 @@ class SX126x(BaseLoRa):
 
     def setRxGain(self, rxGain):
         # set power saving or boosted gain in register
+        self._rxGain = rxGain
         gain = self.POWER_SAVING_GAIN
         if rxGain == self.RX_GAIN_BOOSTED:
             gain = self.BOOSTED_GAIN
@@ -937,9 +935,9 @@ class SX126x(BaseLoRa):
     ### RECEIVE RELATED METHODS ###
 
     def request(self, timeout: int = RX_SINGLE) -> bool:
-        # skip to enter RX mode when previous RX operation incomplete
-        if self.getMode() == self.STATUS_MODE_RX:
-            return False
+        # # skip to enter RX mode when previous RX operation incomplete
+        # if self.getMode() == self.STATUS_MODE_RX:
+        #     return False
         # clear previous interrupt and set RX done, RX timeout, header error, and CRC error as interrupt source
         self._irqSetup(self.IRQ_RX_DONE | self.IRQ_TIMEOUT | self.IRQ_HEADER_ERR | self.IRQ_CRC_ERR)
         # set status to RX wait or RX continuous wait
@@ -956,6 +954,8 @@ class SX126x(BaseLoRa):
         if self._txen != -1:
             self._txState = _get_output(self._txen).read()
             _get_output(self._txen).write(True)
+        # re-apply RX gain — register 0x08AC resets to power-saving after standby
+        self.setRxGain(self._rxGain)
         # set device to receive mode with configured timeout, single, or continuous operation
         self.setRx(rxTimeout)
         # IRQ event handling should be implemented in the higher-level driver using periphery GPIO
@@ -1481,55 +1481,37 @@ class SX126x(BaseLoRa):
         if self.busyCheck():
             return
 
-        # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
-            # Simple CS control for manual pins
+        buf = [opCode]
+        for i in range(nBytes):
+            buf.append(data[i])
+
+        # Use manual CS control only if explicitly set
+        if self._cs_define != -1:
             _get_output(self._cs_define).write(False)
-            buf = [opCode]
-            for i in range(nBytes):
-                buf.append(data[i])
             spi.xfer2(buf)
             _get_output(self._cs_define).write(True)
-        else:  # Kernel CS pin (like ClockworkPi GPIO 8)
-            # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).write(True)  # Initial high state
-            _get_output(self._cs_define).write(False)
-            time.sleep(0.000001)  # 1µs setup time for CS
-            buf = [opCode]
-            for i in range(nBytes):
-                buf.append(data[i])
+        else:
+            # Let SPI driver handle CS automatically
             spi.xfer2(buf)
-            time.sleep(0.000001)  # 1µs hold time before CS release
-            _get_output(self._cs_define).write(True)
 
     def _readBytes(self, opCode: int, nBytes: int, address: tuple = (), nAddress: int = 0) -> tuple:
         if self.busyCheck():
             return ()
 
-        # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
-            # Simple CS control for manual pins
+        buf = [opCode]
+        for i in range(nAddress):
+            buf.append(address[i])
+        for i in range(nBytes):
+            buf.append(0x00)
+
+        # Use manual CS control only if explicitly set
+        if self._cs_define != -1:
             _get_output(self._cs_define).write(False)
-            buf = [opCode]
-            for i in range(nAddress):
-                buf.append(address[i])
-            for i in range(nBytes):
-                buf.append(0x00)
             feedback = spi.xfer2(buf)
             _get_output(self._cs_define).write(True)
-        else:  # Kernel CS pin (like ClockworkPi GPIO 8)
-            # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).write(True)  # Initial high state
-            _get_output(self._cs_define).write(False)
-            time.sleep(0.000001)  # 1µs setup time for CS
-            buf = [opCode]
-            for i in range(nAddress):
-                buf.append(address[i])
-            for i in range(nBytes):
-                buf.append(0x00)
+        else:
+            # Let SPI driver handle CS automatically
             feedback = spi.xfer2(buf)
-            time.sleep(0.000001)  # 1µs hold time before CS release
-            _get_output(self._cs_define).write(True)
 
         return tuple(feedback[nAddress + 1 :])
 

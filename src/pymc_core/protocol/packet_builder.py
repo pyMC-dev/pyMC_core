@@ -23,6 +23,7 @@ from .constants import (
     PAYLOAD_TYPE_GRP_DATA,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
+    PAYLOAD_TYPE_RAW_CUSTOM,
     PAYLOAD_TYPE_REQ,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
@@ -34,7 +35,13 @@ from .constants import (
     TELEM_PERM_LOCATION,
 )
 from .identity import Identity, LocalIdentity
-from .packet_utils import PacketDataUtils, PacketHeaderUtils, PacketValidationUtils, RouteTypeUtils
+from .packet_utils import (
+    PacketDataUtils,
+    PacketHeaderUtils,
+    PacketValidationUtils,
+    PathUtils,
+    RouteTypeUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,9 +476,30 @@ class PacketBuilder:
         contact_identity = Identity(contact_pubkey)
         shared_secret = contact_identity.calc_shared_secret(local_identity.get_private_key())
 
-        return PacketBuilder.create_anon_req(
-            contact_identity, local_identity, shared_secret, plaintext, "direct"
+        out_path_len = getattr(contact, "out_path_len", -1)
+        if out_path_len < 0:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        pkt = PacketBuilder.create_anon_req(
+            contact_identity, local_identity, shared_secret, plaintext, route_type
         )
+
+        if route_type == "direct" and out_path_len > 0:
+            out_path = getattr(contact, "out_path", b"")
+            if out_path:
+                path_bytes = out_path[:MAX_PATH_SIZE]
+                encoded_len = None
+                if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                    out_path_len
+                ) <= len(path_bytes):
+                    encoded_len = out_path_len
+                elif len(path_bytes) == 64:
+                    path_bytes = path_bytes[:63]
+                pkt.set_path(path_bytes, encoded_len)
+
+        return pkt
 
     @staticmethod
     def create_group_datagram(
@@ -523,9 +551,19 @@ class PacketBuilder:
         secret_bytes = (
             bytes.fromhex(channel["secret"])
             if isinstance(channel["secret"], str)
-            else channel["secret"].encode("utf-8")
+            else (
+                channel["secret"]
+                if isinstance(channel["secret"], bytes)
+                else channel["secret"].encode("utf-8")
+            )
         )
-        channel_hash = hashlib.sha256(secret_bytes).digest()[0]
+        # Same channel hash as GroupTextHandler (hash first 16 when key has second 16 zero)
+        hash_input = (
+            secret_bytes[:16]
+            if len(secret_bytes) >= 32 and secret_bytes[16:32] == b"\x00" * 16
+            else (secret_bytes[:32] if len(secret_bytes) > 32 else secret_bytes)
+        )
+        channel_hash = hashlib.sha256(hash_input).digest()[0]
         secret_bytes = (secret_bytes + b"\x00" * 32)[:32]
 
         timestamp, flags = PacketBuilder._get_timestamp(), 0x00
@@ -536,7 +574,7 @@ class PacketBuilder:
         mac = CryptoUtils._hmac_sha256(secret_bytes, ciphertext)[:2]
         payload = bytearray([channel_hash]) + mac + ciphertext
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT)
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_GRP_TXT, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -573,7 +611,7 @@ class PacketBuilder:
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = bytearray([channel_hash]) + cipher
 
-        header = PacketBuilder._create_header(ptype)
+        header = PacketBuilder._create_header(ptype, route_type="flood")
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -619,6 +657,21 @@ class PacketBuilder:
         return pkt
 
     @staticmethod
+    def create_raw_data(data: bytes) -> Packet:
+        """
+        Create a raw custom packet (PAYLOAD_TYPE_RAW_CUSTOM) with no encryption.
+
+        Route type is always DIRECT (consistent with firmware CMD_SEND_RAW_DATA).
+        Caller must set pkt.path and pkt.path_len for direct routing.
+        """
+        if len(data) > MAX_PACKET_PAYLOAD:
+            raise ValueError(
+                f"Raw data length {len(data)} exceeds MAX_PACKET_PAYLOAD ({MAX_PACKET_PAYLOAD})"
+            )
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_RAW_CUSTOM, route_type="direct")
+        return PacketBuilder._create_packet(header, data)
+
+    @staticmethod
     def create_path_return(
         dest_hash: int,
         src_hash: int,
@@ -626,12 +679,19 @@ class PacketBuilder:
         path: Sequence[int],
         extra_type: int = 0xFF,
         extra: bytes = b"",
+        path_len_encoded: Optional[int] = None,
     ) -> Packet:
         """
         Create a secure return path packet with optional metadata.
 
         Generates an encrypted packet containing a return path for secure
         two-way communication, with optional additional data.
+
+        The inner payload first byte is the encoded path_len (bits 6-7 = hash
+        size - 1, bits 0-5 = hop count). When path_len_encoded is provided
+        and valid, it is used so 2- and 3-byte path hashes match firmware.
+        When path_len_encoded is None, the first byte is len(path) (1-byte
+        hash semantics).
 
         Args:
             dest_hash: Destination node hash (1 byte).
@@ -640,17 +700,31 @@ class PacketBuilder:
             path: Sequence of node hashes for the return path.
             extra_type: Type identifier for extra data (default: 0xFF).
             extra: Additional binary data to include.
+            path_len_encoded: Encoded path_len byte from the original packet.
+                If None, first byte of inner payload is len(path) (1-byte hashes).
 
         Returns:
             Packet: Encrypted return path packet.
 
         Raises:
-            ValueError: If combined path and extra data exceed packet limits.
+            ValueError: If combined path and extra data exceed packet limits,
+                or if path_len_encoded is provided but path length does not match.
         """
         if len(path) + len(extra) + 5 > (MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE):
             raise ValueError("Combined path/extra too long")
 
-        inner = bytes([len(path)]) + bytes(path) + bytes([extra_type]) + extra
+        if path_len_encoded is not None and PathUtils.is_valid_path_len(path_len_encoded):
+            expected_len = PathUtils.get_path_byte_len(path_len_encoded)
+            if len(path) != expected_len:
+                raise ValueError(
+                    f"path length {len(path)} does not match path_len_encoded "
+                    f"(expected {expected_len} bytes)"
+                )
+            first_byte = path_len_encoded
+        else:
+            first_byte = len(path)
+
+        inner = bytes([first_byte]) + bytes(path) + bytes([extra_type]) + extra
         aes_key = secret[:16]
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, inner)
         payload = bytearray([dest_hash, src_hash]) + cipher
@@ -668,6 +742,7 @@ class PacketBuilder:
         attempt: int = 0,
         message_type: str = "direct",
         out_path: Optional[list] = None,
+        txt_type: int = 0,
     ) -> tuple[Packet, int]:
         """
         Create a secure text message with encryption and CRC validation.
@@ -682,6 +757,9 @@ class PacketBuilder:
             attempt: The attempt number for retries (0-3).
             message_type: The message routing type ("direct" or "flood").
             out_path: The optional routing path for directed messages.
+            txt_type: Text type in upper 6 bits of the flags byte (0=PLAIN, 1=CLI_DATA, …),
+                combined with attempt as ``(txt_type << 2) | (attempt & 3)``. Matches MeshCore
+                ``TXT_TYPE_*`` so repeaters skip delivery ACK for CLI_DATA.
 
         Returns:
             tuple: (packet, crc) - The encrypted packet and CRC for ACK verification.
@@ -698,10 +776,12 @@ class PacketBuilder:
             ```
         """
         attempt &= 0x03
+        txt_type &= 0x3F
+        flags_byte = (txt_type << 2) | attempt
         timestamp = PacketBuilder._get_timestamp()
 
         # Use  timestamp+data packing
-        plaintext = PacketBuilder._pack_timestamp_data(timestamp, attempt, message, b"\x00")
+        plaintext = PacketBuilder._pack_timestamp_data(timestamp, flags_byte, message, b"\x00")
 
         # Use  encryption and payload creation
         payload, shared_secret, aes_key = PacketBuilder._create_encrypted_payload(
@@ -709,7 +789,7 @@ class PacketBuilder:
         )
 
         # Calculate CRC using centralized packing
-        crc_input = PacketBuilder._pack_timestamp_data(timestamp, attempt, message)
+        crc_input = PacketBuilder._pack_timestamp_data(timestamp, flags_byte, message)
         ack_crc = int.from_bytes(
             CryptoUtils.sha256(crc_input + local_identity.get_public_key())[:4],
             "little",
@@ -732,8 +812,24 @@ class PacketBuilder:
                     f"Path length {len(routing_path)} exceeds maximum {MAX_PATH_SIZE}, truncating"
                 )
                 routing_path = routing_path[:MAX_PATH_SIZE]
-            pkt.path = bytearray(routing_path)
-            pkt.path_len = len(pkt.path)
+            # Preserve encoded path_len from contact when using its stored path
+            contact_path_len = getattr(contact, "out_path_len", -1) if contact else -1
+            if (
+                out_path is None
+                and contact_path_len >= 0
+                and PathUtils.is_valid_path_len(contact_path_len)
+                and PathUtils.get_path_byte_len(contact_path_len) <= len(routing_path)
+            ):
+                pkt.set_path(bytearray(routing_path), contact_path_len)
+            else:
+                # path_len encodes hop count in 6 bits (0-63); 64 would encode as 0
+                if len(routing_path) == 64:
+                    logger.warning(
+                        "Path length 64 exceeds encodable hop count 63 (1-byte hashes), "
+                        "truncating to 63 bytes"
+                    )
+                    routing_path = routing_path[:63]
+                pkt.set_path(bytearray(routing_path))
         else:
             pkt.path_len, pkt.path = 0, bytearray()
 
@@ -750,7 +846,10 @@ class PacketBuilder:
         )
         logger.debug(f"  Path: {list(pkt.path)} (len={pkt.path_len})")
         logger.debug(f"  Payload: {len(pkt.payload)} bytes, first 10: {list(pkt.payload[:10])}")
-        logger.debug(f"  Message: '{message}', attempt={attempt}, timestamp={timestamp}")
+        logger.debug(
+            f"  Message: '{message}', attempt={attempt}, txt_type={txt_type}, "
+            f"flags=0x{flags_byte:02X}, timestamp={timestamp}"
+        )
         logger.debug(f"  CRC: 0x{ack_crc:08X}")
 
         return pkt, ack_crc
@@ -801,8 +900,27 @@ class PacketBuilder:
             contact, local_identity, plaintext
         )
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ)
+        out_path_len = getattr(contact, "out_path_len", -1)
+        out_path = getattr(contact, "out_path", b"") or b""
+        if out_path_len <= 0 or not out_path:
+            route_type = "flood"
+        else:
+            route_type = "direct"
+
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_REQ, route_type)
         packet = PacketBuilder._create_packet(header, payload)
+
+        if route_type == "direct" and len(out_path) > 0:
+            path_bytes = out_path[:MAX_PATH_SIZE]
+            encoded_len = None
+            if PathUtils.is_valid_path_len(out_path_len) and PathUtils.get_path_byte_len(
+                out_path_len
+            ) <= len(path_bytes):
+                encoded_len = out_path_len
+            elif len(path_bytes) == 64:
+                path_bytes = path_bytes[:63]
+            packet.set_path(path_bytes, encoded_len)
+
         return packet, timestamp
 
     @staticmethod
@@ -820,8 +938,14 @@ class PacketBuilder:
         Returns:
             tuple: (packet, crc) - The logout packet and CRC for verification.
         """
+        # CLI_DATA (1): MeshCore repeaters do not send delivery ACK for CLI text.
         return PacketBuilder.create_text_message(
-            contact, local_identity, "logout", attempt=0, message_type="direct"
+            contact,
+            local_identity,
+            "logout",
+            attempt=0,
+            message_type="direct",
+            txt_type=1,  # TXT_TYPE_CLI_DATA
         )
 
     # ---------- Telemetry  ----------

@@ -1,7 +1,9 @@
-from typing import Callable, Optional
+import asyncio
+from typing import Awaitable, Callable, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_ACK
+from ...protocol.packet_utils import PathUtils
 from .base import BaseHandler
 
 
@@ -20,9 +22,11 @@ class AckHandler(BaseHandler):
     def __init__(self, log_fn, dispatcher=None):
         self.log = log_fn
         self.dispatcher = dispatcher
-        self._ack_received_callback: Optional[Callable[[int], None]] = None
+        self._ack_received_callback: Optional[Callable[[int], Awaitable[None] | None]] = None
 
-    def set_ack_received_callback(self, callback: Callable[[int], None]):
+    def set_ack_received_callback(
+        self, callback: Optional[Callable[[int], Awaitable[None] | None]]
+    ):
         """Set callback to notify dispatcher when ACK is received."""
         self._ack_received_callback = callback
 
@@ -138,14 +142,15 @@ class AckHandler(BaseHandler):
             return None
 
         path_length = payload[0]
+        path_byte_len = PathUtils.get_path_byte_len(path_length)
 
-        # Check if we have enough data for: path_length + path + extra_type + extra
-        min_required = 1 + path_length + 1 + 4  # +4 for ACK CRC
+        # Check if we have enough data for: path_byte_len + path + extra_type + extra
+        min_required = 1 + path_byte_len + 1 + 4  # +4 for ACK CRC
         if len(payload) < min_required:
             return None
 
         # Extract extra section
-        extra_start = 1 + path_length
+        extra_start = 1 + path_byte_len
         extra_type = payload[extra_start]
         extra_payload = payload[extra_start + 1 :]
 
@@ -162,5 +167,8 @@ class AckHandler(BaseHandler):
     async def _notify_ack_received(self, crc: int):
         """Notify the dispatcher that an ACK was received."""
         if self._ack_received_callback:
-            # Call the callback directly since _register_ack_received is synchronous
-            self._ack_received_callback(crc)
+            cb = self._ack_received_callback
+            if asyncio.iscoroutinefunction(cb):
+                await cb(crc)
+            else:
+                cb(crc)

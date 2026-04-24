@@ -58,7 +58,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a flood advertisement packet")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

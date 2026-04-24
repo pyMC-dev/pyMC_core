@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymc_core"
-version = "1.0.7"
+version = "1.0.9"
 authors = [
     {name = "Lloyd Newton", email = "lloyd@rightup.co.uk"},
 ]
@@ -38,7 +38,11 @@ hardware = [
     "python-periphery>=2.4.1",
     "spidev>=3.5",
     "pyserial>=3.5",
+    "pyusb>=1.2.1",
 ]
+
+gpiod = ["gpiod>=2.4.0"]
+
 websocket = [
     "websockets>=11.0.0",
 ]
@@ -46,6 +50,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.21.0",
+    "pyserial>=3.5",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",

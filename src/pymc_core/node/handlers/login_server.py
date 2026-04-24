@@ -89,7 +89,7 @@ class LoginServerHandler(BaseHandler):
         """Handle ANON_REQ login packet from client."""
         try:
             # Debug: Log packet routing info
-            path_data = list(packet.path[: packet.path_len]) if packet.path_len > 0 else []
+            path_data = packet.get_path_hashes_hex() if packet.path_len > 0 else []
             self.log(
                 f"[LoginServer] Packet route flood: {packet.is_route_flood()}, "
                 f"path_len: {packet.path_len}, path: {path_data}"
@@ -144,22 +144,28 @@ class LoginServerHandler(BaseHandler):
                     self.log("[LoginServer] Room server packet too short for sync_since field")
                     return
                 sync_since = struct.unpack("<I", plaintext[4:8])[0]
-                
+
                 # Find null terminator AFTER sync_since field (starting from byte 8)
                 null_idx = plaintext.find(b"\x00", 8)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[8:null_idx]
-                self.log(f"[LoginServer] Room server format: sync_since={sync_since}, password from byte 8 to {null_idx}")
-                self.log(f"[LoginServer] Password bytes hex: {password_bytes.hex() if len(password_bytes) > 0 else '(empty)'}")
+                self.log(
+                    f"[LoginServer] Room server: sync_since={sync_since}, "
+                    f"password from byte 8 to {null_idx}"
+                )
+                self.log(
+                    f"[LoginServer] Password hex: "
+                    f"{password_bytes.hex() if password_bytes else '(empty)'}"
+                )
             else:
                 # Repeater format: password only
                 # Find null terminator after timestamp (starting from byte 4)
                 null_idx = plaintext.find(b"\x00", 4)
                 if null_idx == -1:
                     null_idx = len(plaintext)
-                
+
                 password_bytes = plaintext[4:null_idx]
                 self.log(f"[LoginServer] Repeater format: password from byte 4 to {null_idx}")
 
@@ -239,35 +245,55 @@ class LoginServerHandler(BaseHandler):
             reply_data[12] = FIRMWARE_VER_LEVEL  # firmware version
 
             # Create response packet
-            # For ANON_REQ responses, the C++ client cannot decrypt regular RESPONSE
-            # datagrams because it doesn't have the server in its contacts list yet.
-            # The solution: ALWAYS send PATH packets for ANON_REQ responses, even for
-            # direct requests. The PATH format allows the client to process the response
-            # without needing the server as a known contact.
-            client_hash = client_identity.get_public_key()[0]
-            server_hash = self.local_identity.get_public_key()[0]
-            path_list = (
-                list(original_packet.path[: original_packet.path_len])
-                if original_packet and original_packet.path_len > 0
-                else []
-            )
+            # Match C++ simple_repeater behavior:
+            # - Flood login: send PATH packet with response as extra data
+            #   (tells sender the path TO here so they can sendDirect)
+            # - Direct login: send regular RESPONSE datagram via flood
+            if is_flood:
+                client_hash = client_identity.get_public_key()[0]
+                server_hash = self.local_identity.get_public_key()[0]
+                path_list = (
+                    list(original_packet.path[: original_packet.get_path_byte_len()])
+                    if original_packet and original_packet.path_len > 0
+                    else []
+                )
 
-            self.log(
-                f"[LoginServer] Creating PATH response: "
-                f"client_hash=0x{client_hash:02X}, "
-                f"server_hash=0x{server_hash:02X}, path={path_list}, "
-                f"original_flood={is_flood}"
-            )
+                self.log(
+                    f"[LoginServer] Creating PATH response: "
+                    f"client_hash=0x{client_hash:02X}, "
+                    f"server_hash=0x{server_hash:02X}, path={path_list}"
+                )
 
-            response_pkt = PacketBuilder.create_path_return(
-                dest_hash=client_hash,
-                src_hash=server_hash,
-                secret=shared_secret,
-                path=path_list,
-                extra_type=PAYLOAD_TYPE_RESPONSE,
-                extra=bytes(reply_data),
-            )
-            packet_type_name = "PATH"
+                path_len_encoded_arg = (
+                    original_packet.path_len
+                    if original_packet and original_packet.path_len > 0
+                    else None
+                )
+                response_pkt = PacketBuilder.create_path_return(
+                    dest_hash=client_hash,
+                    src_hash=server_hash,
+                    secret=shared_secret,
+                    path=path_list,
+                    extra_type=PAYLOAD_TYPE_RESPONSE,
+                    extra=bytes(reply_data),
+                    path_len_encoded=path_len_encoded_arg,
+                )
+                packet_type_name = "PATH"
+            else:
+                # Direct login: send regular RESPONSE datagram via flood
+                # (like C++ simple_repeater when reply_path_len < 0)
+                response_pkt = PacketBuilder.create_datagram(
+                    ptype=PAYLOAD_TYPE_RESPONSE,
+                    dest=client_identity,
+                    local_identity=self.local_identity,
+                    secret=shared_secret,
+                    plaintext=bytes(reply_data),
+                    route_type="flood",
+                )
+                packet_type_name = "RESPONSE(flood)"
+                self.log(
+                    f"[LoginServer] Creating RESPONSE datagram (direct login, flood reply)"
+                )
 
             # Debug: Log packet details
             self.log(

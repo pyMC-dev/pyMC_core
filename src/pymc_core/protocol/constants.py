@@ -48,7 +48,9 @@ MAX_SUPPORTED_PAYLOAD_VERSION = PAYLOAD_VER_2  # Accept versions 0-1
 MAX_ADVERT_DATA_SIZE = 96
 PUB_KEY_SIZE = 32
 SIGNATURE_SIZE = 64
-PATH_HASH_SIZE = 1
+PATH_HASH_SIZE = 1  # Legacy default; see PathUtils for multi-byte path support
+PATH_HASH_COUNT_MASK = 0x3F  # bits 0-5 of encoded path_len (max encodable hop count)
+PATH_HASH_SIZE_SHIFT = 6  # bits 6-7 of encoded path_len
 CIPHER_MAC_SIZE = 32  # SHA‑256 HMAC
 CIPHER_BLOCK_SIZE = 16
 MAX_PACKET_PAYLOAD = 256  # firmware's default
@@ -66,6 +68,7 @@ TIMESTAMP_SIZE = 4  # 4 bytes for a timestamp (32-bit unsigned int)
 ADVERT_FLAG_IS_CHAT_NODE = 0x01
 ADVERT_FLAG_IS_REPEATER = 0x02
 ADVERT_FLAG_IS_ROOM_SERVER = 0x03
+ADVERT_FLAG_IS_SENSOR = 0x04
 ADVERT_FLAG_HAS_LOCATION = 0x10
 ADVERT_FLAG_HAS_FEATURE1 = 0x20
 ADVERT_FLAG_HAS_FEATURE2 = 0x40
@@ -107,9 +110,10 @@ CONTACT_TYPE_ROOM_SERVER = 3  # Equivalent to C++ ADV_TYPE_ROOM
 CONTACT_TYPE_HYBRID = 4
 
 
-# Telemetry Permissions
-
-REQ_TYPE_GET_TELEMETRY_DATA = 0x03
+# Protocol Request Types
+REQ_TYPE_GET_STATUS = 0x01  # Get repeater stats (RepeaterStats struct)
+REQ_TYPE_GET_TELEMETRY_DATA = 0x03  # Get telemetry data (CayenneLPP)
+REQ_TYPE_GET_OWNER_INFO = 0x07  # Variable-length: tag(4) + "version\nname\nowner" (simple_repeater)
 TELEM_PERM_BASE = 0x01
 TELEM_PERM_LOCATION = 0x02
 TELEM_PERM_ENVIRONMENT = 0x04

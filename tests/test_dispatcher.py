@@ -5,8 +5,16 @@ import pytest
 
 from pymc_core.node.dispatcher import Dispatcher, DispatcherState
 from pymc_core.protocol import Packet
-from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG
+from pymc_core.protocol.constants import (
+    PAYLOAD_TYPE_ACK,
+    PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_TRACE,
+    PAYLOAD_TYPE_TXT_MSG,
+    ROUTE_TYPE_DIRECT,
+    ROUTE_TYPE_FLOOD,
+)
 from pymc_core.protocol.packet_filter import PacketFilter
+from pymc_core.protocol.packet_utils import PathUtils
 
 
 def create_test_packet(payload_type: int, payload: bytes) -> bytes:
@@ -243,7 +251,7 @@ class TestDispatcherACKSystem:
         dispatcher._waiting_acks[crc] = ack_event
 
         # Simulate receiving ACK
-        dispatcher._register_ack_received(crc)
+        await dispatcher._register_ack_received(crc)
 
         # Event should be set
         assert ack_event.is_set()
@@ -356,6 +364,93 @@ class TestDispatcherSendPacket:
         dispatcher.radio.transmit.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_default_path_hash_mode_applied_to_flood_packet(self, dispatcher):
+        """When path_hash_mode is set, flood packets with 0 hops get path_len bits 6-7 set."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        dispatcher.set_default_path_hash_mode(1)  # 2-byte hashes
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ADVERT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"advert_payload")
+        pkt.payload_len = len(pkt.payload)
+
+        await dispatcher.send_packet(pkt)
+
+        raw = dispatcher.radio.tx_data
+        assert raw is not None
+        path_len_byte = raw[1]
+        assert path_len_byte == 0x40
+
+    @pytest.mark.asyncio
+    async def test_path_hash_mode_not_overwritten_when_companion_applied(self, dispatcher):
+        """Packet with _path_hash_mode_applied is not overwritten by dispatcher default."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        dispatcher.set_default_path_hash_mode(2)  # 3-byte
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_ADVERT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        pkt.apply_path_hash_mode(1, mark_applied=True)
+
+        await dispatcher.send_packet(pkt)
+
+        raw = dispatcher.radio.tx_data
+        assert raw is not None
+        path_len_byte = raw[1]
+        assert path_len_byte == 0x40
+
+    @pytest.mark.asyncio
+    async def test_trace_flood_rejected(self, dispatcher):
+        """TRACE payload with flood route is rejected; send_packet returns False and no TX."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00")  # tag, auth, flags
+        pkt.payload_len = len(pkt.payload)
+
+        result = await dispatcher.send_packet(pkt)
+
+        assert result is False
+        assert dispatcher.radio.tx_data is None
+
+    @pytest.mark.asyncio
+    async def test_trace_direct_still_sends(self, dispatcher):
+        """TRACE with direct route is still sent (no regression)."""
+        from pymc_core.protocol.constants import PH_TYPE_SHIFT
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT) | ROUTE_TYPE_DIRECT
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = bytearray(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+        pkt.payload_len = len(pkt.payload)
+
+        result = await dispatcher.send_packet(pkt, wait_for_ack=False)
+
+        assert result is True
+        assert dispatcher.radio.tx_data is not None
+
+    def test_set_default_path_hash_mode_validates(self, dispatcher):
+        """set_default_path_hash_mode accepts None, 0, 1, 2 and rejects other values."""
+        dispatcher.set_default_path_hash_mode(None)
+        assert dispatcher.path_hash_mode is None
+        for mode in (0, 1, 2):
+            dispatcher.set_default_path_hash_mode(mode)
+            assert dispatcher.path_hash_mode == mode
+        with pytest.raises(ValueError, match="path_hash_mode must be None, 0, 1, or 2"):
+            dispatcher.set_default_path_hash_mode(3)
+        with pytest.raises(ValueError, match="path_hash_mode must be None, 0, 1, or 2"):
+            dispatcher.set_default_path_hash_mode(-1)
+
+    @pytest.mark.asyncio
     async def test_send_packet_failure(self, dispatcher):
         """Test packet sending failure."""
         # Create a proper Packet object
@@ -446,6 +541,58 @@ class TestDispatcherCallbacks:
         assert callback_called
         assert received_packet is not None
         assert received_data == packet_data
+
+    @pytest.mark.asyncio
+    async def test_full_hop_count_packet_marked_do_not_retransmit(self, dispatcher):
+        """Packet with path at max hops for its encoding is marked do not retransmit."""
+        received_packet = None
+
+        def capture(packet, data, analysis):
+            nonlocal received_packet
+            received_packet = packet
+
+        dispatcher.set_raw_packet_callback(capture)
+
+        # 1-byte hashes: max 63 hops
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        pkt.path_len = PathUtils.encode_path_len(1, 63)
+        pkt.path = bytearray(bytes(63))
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        packet_data = pkt.write_to()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert received_packet is not None
+        assert received_packet.is_marked_do_not_retransmit() is True
+        assert received_packet.get_path_hash_count() == 63
+
+    @pytest.mark.asyncio
+    async def test_2byte_path_at_max_hops_marked_do_not_retransmit(self, dispatcher):
+        """Packet with 2-byte path at 32 hops (64 bytes) is marked do not retransmit."""
+        received_packet = None
+
+        def capture(packet, data, analysis):
+            nonlocal received_packet
+            received_packet = packet
+
+        dispatcher.set_raw_packet_callback(capture)
+
+        pkt = Packet()
+        pkt.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        pkt.path_len = PathUtils.encode_path_len(2, 32)
+        pkt.path = bytearray(64)  # 32 * 2
+        pkt.payload = bytearray(b"x")
+        pkt.payload_len = 1
+        packet_data = pkt.write_to()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert received_packet is not None
+        assert received_packet.is_marked_do_not_retransmit() is True
+        assert received_packet.get_path_hash_count() == 32
+        assert received_packet.get_path_byte_len() == 64
 
     @pytest.mark.asyncio
     async def test_async_callback(self, dispatcher):
@@ -609,3 +756,68 @@ class TestDispatcherIntegration:
         """Test clearing packet filter."""
         dispatcher.clear_packet_filter()
         # Should not crash
+
+
+class TestDispatcherPayloadBasedDedup:
+    """Test that dedup uses payload-based hash (matching firmware), not raw-frame hash."""
+
+    @pytest.mark.asyncio
+    async def test_same_payload_different_paths_deduplicated(self, dispatcher):
+        """Packets with same payload but different paths are caught as duplicates."""
+        mock_handler = MockHandler(PAYLOAD_TYPE_TXT_MSG)
+        dispatcher.register_handler(PAYLOAD_TYPE_TXT_MSG, mock_handler)
+
+        # Packet 1: 1-byte hash mode, 0 hops
+        pkt1 = Packet()
+        pkt1.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2) | ROUTE_TYPE_FLOOD
+        pkt1.path_len = PathUtils.encode_path_len(1, 0)
+        pkt1.path = bytearray()
+        pkt1.payload = bytearray(b"Hello mesh!")
+        pkt1.payload_len = len(pkt1.payload)
+        data1 = pkt1.write_to()
+
+        # Packet 2: same payload, 2 hops in path
+        pkt2 = Packet()
+        pkt2.header = (1 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2) | ROUTE_TYPE_FLOOD
+        pkt2.path_len = PathUtils.encode_path_len(1, 2)
+        pkt2.path = bytearray(b"\xAA\xBB")
+        pkt2.payload = bytearray(b"Hello mesh!")
+        pkt2.payload_len = len(pkt2.payload)
+        data2 = pkt2.write_to()
+
+        # Raw bytes must differ (path is different)
+        assert data1 != data2
+
+        await dispatcher._process_received_packet(data1)
+        await dispatcher._process_received_packet(data2)
+
+        # Second packet should be deduplicated — handler called only once
+        assert mock_handler.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_payloads_not_deduplicated(self, dispatcher):
+        """Packets with different payloads are processed independently."""
+        mock_handler = MockHandler(PAYLOAD_TYPE_TXT_MSG)
+        dispatcher.register_handler(PAYLOAD_TYPE_TXT_MSG, mock_handler)
+
+        data1 = create_test_packet(PAYLOAD_TYPE_TXT_MSG, b"message_one")
+        data2 = create_test_packet(PAYLOAD_TYPE_TXT_MSG, b"message_two")
+
+        await dispatcher._process_received_packet(data1)
+        await dispatcher._process_received_packet(data2)
+
+        assert mock_handler.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_malformed_packet_blacklisted_by_raw_hash(self, dispatcher):
+        """Malformed packets are blacklisted by raw hash and rejected on repeat."""
+        bad_data = b"\xFF"
+
+        await dispatcher._process_received_packet(bad_data)
+
+        # Should be blacklisted by raw hash
+        raw_hash = dispatcher.packet_filter.generate_hash(bad_data)
+        assert dispatcher.packet_filter.is_blacklisted(raw_hash)
+
+        # Second attempt should be rejected at blacklist check (not re-parsed)
+        await dispatcher._process_received_packet(bad_data)
