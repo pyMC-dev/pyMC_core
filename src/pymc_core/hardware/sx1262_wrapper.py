@@ -41,6 +41,7 @@ class SX1262Radio(LoRaRadio):
         txled_pin: int = -1,
         rxled_pin: int = -1,
         en_pin: int = -1,
+        en_pins: Optional[list[int]] = None,
         frequency: int = 868000000,
         tx_power: int = 22,
         spreading_factor: int = 7,
@@ -70,6 +71,7 @@ class SX1262Radio(LoRaRadio):
             txled_pin: GPIO pin for TX LED (default: -1 if not used)
             rxled_pin: GPIO pin for RX LED (default: -1 if not used)
             en_pin: GPIO pin for powering up the radio goes high on init
+            en_pins: GPIO pins for powering up the radio that go high on init
             frequency: Operating frequency in Hz (default: 868MHz)
             tx_power: TX power in dBm (default: 22)
             spreading_factor: LoRa spreading factor (default: 7)
@@ -91,6 +93,8 @@ class SX1262Radio(LoRaRadio):
                 logger.error(f"Error cleaning up previous instance: {e}")
             SX1262Radio._active_instance = None
 
+        self.en_pins = self._normalize_en_pins(en_pin=en_pin, en_pins=en_pins)
+
         self.bus_id = bus_id
         self.cs_id = cs_id
         self.cs_pin = cs_pin
@@ -103,7 +107,7 @@ class SX1262Radio(LoRaRadio):
         self.rxen_pin = rxen_pin
         self.txled_pin = txled_pin
         self.rxled_pin = rxled_pin
-        self.en_pin = en_pin
+        self.en_pin = self.en_pins[0] if self.en_pins else -1
 
         # Radio configuration
         self.frequency = frequency
@@ -145,7 +149,7 @@ class SX1262Radio(LoRaRadio):
         self._txen_pin_setup = False
         self._txled_pin_setup = False
         self._rxled_pin_setup = False
-        self._en_pin_setup = False
+        self._en_pins_setup = False
 
         self._tx_done_event = asyncio.Event()
         self._rx_done_event = asyncio.Event()
@@ -187,6 +191,23 @@ class SX1262Radio(LoRaRadio):
 
         # RX callback for received packets
         self.rx_callback = None
+
+    @staticmethod
+    def _normalize_en_pins(en_pin: int = -1, en_pins: Optional[list[int]] = None) -> list[int]:
+        normalized_pins = []
+
+        if en_pins:
+            normalized_pins.extend(en_pins)
+        elif en_pin != -1:
+            normalized_pins.append(en_pin)
+
+        deduped_pins = []
+        for pin in normalized_pins:
+            if pin == -1 or pin in deduped_pins:
+                continue
+            deduped_pins.append(pin)
+
+        return deduped_pins
 
     def _get_rx_irq_mask(self) -> int:
         """Get the standard RX interrupt mask"""
@@ -614,13 +635,16 @@ class SX1262Radio(LoRaRadio):
                 else:
                     logger.warning(f"Could not setup RX LED pin {self.rxled_pin}")
 
-            # Setup EN pin if specified (powers up the radio when goes HIGH)
-            if self.en_pin != -1 and not self._en_pin_setup:
-                if self._gpio_manager.setup_output_pin(self.en_pin, initial_value=True):
-                    self._en_pin_setup = True
-                    logger.debug(f"EN pin {self.en_pin} configured and set HIGH")
-                else:
-                    logger.warning(f"Could not setup EN pin {self.en_pin}")
+            # Setup EN pin(s) if specified (powers up the radio when set HIGH)
+            if self.en_pins and not self._en_pins_setup:
+                all_en_pins_configured = True
+                for en_pin in self.en_pins:
+                    if self._gpio_manager.setup_output_pin(en_pin, initial_value=True):
+                        logger.debug(f"EN pin {en_pin} configured and set HIGH")
+                    else:
+                        all_en_pins_configured = False
+                        logger.warning(f"Could not setup EN pin {en_pin}")
+                self._en_pins_setup = all_en_pins_configured
 
             # Basic radio setup
             if not self._basic_radio_setup(use_busy_check=True):
