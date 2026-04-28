@@ -8,6 +8,7 @@ import logging
 import math
 import random
 import time
+from pathlib import Path
 from typing import Optional, Union
 
 from .base import LoRaRadio
@@ -24,7 +25,8 @@ class SX1262Radio(LoRaRadio):
     _active_instance = None
 
     # Common timing constants to avoid magic numbers
-    RADIO_TIMING_DELAY = 0.01  # 10ms delay for radio operations
+    RADIO_TIMING_DELAY = 0.01  # 10ms delay for standard radio operations
+    LUCKFOX_RADIO_TIMING_DELAY = 0.03  # 30ms delay for slower global-GPIO Luckfox stacks
 
     def __init__(
         self,
@@ -108,6 +110,15 @@ class SX1262Radio(LoRaRadio):
         self.txled_pin = txled_pin
         self.rxled_pin = rxled_pin
         self.en_pin = self.en_pins[0] if self.en_pins else -1
+        self._RADIO_TIMING_DELAY = self._select_radio_timing_delay(
+            reset_pin=reset_pin,
+            busy_pin=busy_pin,
+            irq_pin=irq_pin,
+            txen_pin=txen_pin,
+            rxen_pin=rxen_pin,
+            cs_pin=cs_pin,
+            en_pins=self.en_pins,
+        )
 
         # Radio configuration
         self.frequency = frequency
@@ -157,7 +168,6 @@ class SX1262Radio(LoRaRadio):
 
         # Store last IRQ status for background task
         self._last_irq_status = 0
-
         # Track event loop for thread-safe interrupt handling
         self._event_loop = None
 
@@ -209,6 +219,41 @@ class SX1262Radio(LoRaRadio):
 
         return deduped_pins
 
+    @classmethod
+    def _select_radio_timing_delay(
+        cls,
+        *,
+        reset_pin: int,
+        busy_pin: int,
+        irq_pin: int,
+        txen_pin: int,
+        rxen_pin: int,
+        cs_pin: int,
+        en_pins: list[int],
+    ) -> float:
+        """Use extended timing only on Luckfox Pico Pi radio profiles.
+
+        The timing issue was reproduced on the Luckfox Pico Pi, which uses global
+        Linux GPIO numbering across gpiochip banks. Other boards, including the
+        Luckfox Ultra and Raspberry Pi style SBCs, should stay on the standard path
+        unless they explicitly prove they need the slower bring-up timing.
+        """
+        pins = [reset_pin, busy_pin, irq_pin, txen_pin, rxen_pin, cs_pin, *en_pins]
+        if cls._is_luckfox_pico_pi() and any(pin >= 32 for pin in pins if pin != -1):
+            return cls.LUCKFOX_RADIO_TIMING_DELAY
+        return cls.RADIO_TIMING_DELAY
+
+    @staticmethod
+    def _is_luckfox_pico_pi() -> bool:
+        """Detect the Luckfox Pico Pi from the device-tree model string."""
+        try:
+            model = Path("/proc/device-tree/model").read_bytes().decode(
+                "utf-8", errors="ignore"
+            ).rstrip("\x00")
+        except OSError:
+            return False
+        return "Luckfox Pico Pi" in model
+
     def _get_rx_irq_mask(self) -> int:
         """Get the standard RX interrupt mask"""
         return (
@@ -256,9 +301,9 @@ class SX1262Radio(LoRaRadio):
     def _basic_radio_setup(self, use_busy_check: bool = False) -> bool:
         """Common radio setup: reset, standby, and LoRa packet type"""
         self.lora.reset()
-        time.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to complete reset
+        time.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to complete reset
         self.lora.setStandby(self.lora.STANDBY_RC)
-        time.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby mode
+        time.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to enter standby mode
 
         # Check if standby mode was set correctly (different methods for different boards)
         if use_busy_check:
@@ -398,7 +443,7 @@ class SX1262Radio(LoRaRadio):
                     # Wait for RX_DONE event
                     try:
                         await asyncio.wait_for(
-                            self._rx_done_event.wait(), timeout=self.RADIO_TIMING_DELAY
+                            self._rx_done_event.wait(), timeout=self._RADIO_TIMING_DELAY
                         )
                         self._rx_done_event.clear()
                         logger.debug("[RX] RX_DONE event triggered!")
@@ -408,7 +453,6 @@ class SX1262Radio(LoRaRadio):
                         self._last_packet_activity = time.time()
 
                         try:
-                            # Use the IRQ status stored by the interrupt handler
                             irqStat = self._last_irq_status
 
                             if irqStat & self.lora.IRQ_CRC_ERR:
@@ -507,7 +551,7 @@ class SX1262Radio(LoRaRadio):
                             # This ensures the radio stays ready for the next packet
                             try:
                                 self.lora.request(self.lora.RX_CONTINUOUS)
-                                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                                await asyncio.sleep(self._RADIO_TIMING_DELAY)
                                 logger.debug(
                                     f"[RX] Restored RX continuous mode after IRQ 0x{irqStat:04X}"
                                 )
@@ -618,6 +662,7 @@ class SX1262Radio(LoRaRadio):
             # Ensure TX/RX pins are in default state (RX mode)
             if self.txen_pin != -1 or self.rxen_pin != -1:
                 self._control_tx_rx_pins(tx_mode=False)
+                time.sleep(self._RADIO_TIMING_DELAY)
                 logger.debug("TX/RX control pins set to RX mode")
 
             # Setup LED pins if specified
@@ -686,7 +731,9 @@ class SX1262Radio(LoRaRadio):
 
             # Regulator, calibration and RF switch configuration (required for all boards)
             self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+            time.sleep(self._RADIO_TIMING_DELAY)
             self.lora.calibrate(0x7F)
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Image calibration based on frequency band
             if self.frequency < 446000000:
@@ -711,9 +758,10 @@ class SX1262Radio(LoRaRadio):
                 logger.debug("Image calibration for 902-928MHz band")
 
             self.lora.calibrateImage(calFreqMin, calFreqMax)
-            time.sleep(0.01)  # Allow calibration to settle
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             self.lora.setDio2RfSwitch(self.use_dio2_rf)
+            time.sleep(self._RADIO_TIMING_DELAY)
             if self.use_dio2_rf:
                 logger.info("DIO2 RF switch control enabled")
 
@@ -723,13 +771,16 @@ class SX1262Radio(LoRaRadio):
             # Set frequency
             rfFreq = int(self.frequency * 33554432 / 32000000)
             self.lora.setRfFrequency(rfFreq)
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Set buffer base addresses
             self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Set TX power
             logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
             self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Configure modulation parameters
             # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
@@ -742,6 +793,7 @@ class SX1262Radio(LoRaRadio):
             self.lora.setLoRaModulation(
                 self.spreading_factor, self.bandwidth, self.coding_rate, ldro
             )
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Configure packet parameters
             self.lora.setPacketParamsLoRa(
@@ -751,12 +803,14 @@ class SX1262Radio(LoRaRadio):
                 self.lora.CRC_ON,
                 self.lora.IQ_STANDARD,
             )
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Configure RX interrupts and gain
             rx_mask = self._get_rx_irq_mask()
             self.lora.clearIrqStatus(0xFFFF)
             self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
             self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             # Program custom CAD thresholds to chip hardware if available
             if self._custom_cad_peak is not None and self._custom_cad_min is not None:
@@ -777,6 +831,9 @@ class SX1262Radio(LoRaRadio):
                     logger.warning(f"Failed to write CAD thresholds: {e}")
 
             self.lora.request(self.lora.RX_CONTINUOUS)
+            # Luckfox-class boards can otherwise declare the radio "ready" before
+            # the first RX mode transition has actually settled.
+            time.sleep(self._RADIO_TIMING_DELAY)
 
             self._initialized = True
             logger.info("SX1262 radio initialized successfully")
@@ -917,11 +974,11 @@ class SX1262Radio(LoRaRadio):
         """Prepare radio hardware for transmission. Returns (success, lbt_backoff_delays_ms)."""
         self._tx_done_event.clear()
         self.lora.setStandby(self.lora.STANDBY_RC)
-        await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
+        await asyncio.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to enter standby
         if self.lora.busyCheck():
             busy_wait = 0
             while self.lora.busyCheck() and busy_wait < 20:
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
                 busy_wait += 1
 
         # Listen Before Talk (LBT) - Check for channel activity using CAD
@@ -965,13 +1022,14 @@ class SX1262Radio(LoRaRadio):
                 break
 
         self._control_tx_rx_pins(tx_mode=True)
+        await asyncio.sleep(self._RADIO_TIMING_DELAY)
 
         if self.lora.busyCheck():
             logger.warning("Radio is busy before starting transmission")
             # Wait for radio to become ready
             busy_timeout = 0
             while self.lora.busyCheck() and busy_timeout < 100:
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
                 busy_timeout += 1
             if self.lora.busyCheck():
                 logger.error("Radio stayed busy - cannot start transmission")
@@ -1004,7 +1062,7 @@ class SX1262Radio(LoRaRadio):
         # Check if radio accepted the TX command (wait for busy to clear)
         busy_timeout = 0
         while self.lora.busyCheck() and busy_timeout < 50:  # 500ms max wait
-            await asyncio.sleep(self.RADIO_TIMING_DELAY)
+            await asyncio.sleep(self._RADIO_TIMING_DELAY)
             busy_timeout += 1
 
         if self.lora.busyCheck():
@@ -1161,7 +1219,7 @@ class SX1262Radio(LoRaRadio):
 
                 # Step 2: Put radio in standby
                 self.lora.setStandby(self.lora.STANDBY_RC)
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
 
                 # Step 3: Disable all interrupts temporarily during reconfiguration
                 self.lora.setDioIrqParams(
@@ -1179,13 +1237,14 @@ class SX1262Radio(LoRaRadio):
 
                 # Step 6: Start RX mode
                 self.lora.request(self.lora.RX_CONTINUOUS)
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
 
                 # Step 7: Final interrupt clear to start fresh
                 self.lora.clearIrqStatus(0xFFFF)
 
                 # Always restore external RF switch control pins to RX mode
                 self._control_tx_rx_pins(tx_mode=False)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
 
                 logger.debug("[TX->RX] RX mode restoration completed")
 
@@ -1222,7 +1281,7 @@ class SX1262Radio(LoRaRadio):
 
                 # Setup TX interrupts AFTER CAD checks (CAD changes interrupt config)
                 self._setup_tx_interrupts()
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)
                 self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 if not await self._execute_transmission(driver_timeout):
@@ -1489,7 +1548,7 @@ class SX1262Radio(LoRaRadio):
 
             # Step 1: Put radio in standby mode before CAD configuration
             self.lora.setStandby(self.lora.STANDBY_RC)
-            await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
+            await asyncio.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to enter standby
 
             # Step 2: Clear any existing interrupt flags
             existing_irq = self.lora.getIrqStatus()
@@ -1625,7 +1684,7 @@ class SX1262Radio(LoRaRadio):
                 self.lora.clearIrqStatus(0xFFFF)
 
                 self.lora.setStandby(self.lora.STANDBY_RC)
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to enter standby
 
                 self.lora.setDioIrqParams(
                     self.lora.IRQ_NONE, self.lora.IRQ_NONE, self.lora.IRQ_NONE, self.lora.IRQ_NONE
@@ -1637,7 +1696,7 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
                 await asyncio.sleep(0.001)
                 self.lora.request(self.lora.RX_CONTINUOUS)
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter RX mode
+                await asyncio.sleep(self._RADIO_TIMING_DELAY)  # Give hardware time to enter RX mode
 
                 # Step 7: Final interrupt clear to start fresh
                 self.lora.clearIrqStatus(0xFFFF)
