@@ -8,7 +8,6 @@ import logging
 import math
 import random
 import time
-from pathlib import Path
 from typing import Optional, Union
 
 from .base import LoRaRadio
@@ -26,7 +25,6 @@ class SX1262Radio(LoRaRadio):
 
     # Common timing constants to avoid magic numbers
     RADIO_TIMING_DELAY = 0.01  # 10ms delay for standard radio operations
-    LUCKFOX_RADIO_TIMING_DELAY = 0.012  # 12ms delay for Luckfox Pico Pi state transitions
 
     def __init__(
         self,
@@ -55,6 +53,7 @@ class SX1262Radio(LoRaRadio):
         use_dio3_tcxo: bool = False,
         dio3_tcxo_voltage: float = 1.8,
         use_dio2_rf: bool = False,
+        radio_timing_delay: float = RADIO_TIMING_DELAY,
     ):
         """
         Initialize SX1262 radio
@@ -85,6 +84,7 @@ class SX1262Radio(LoRaRadio):
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
             use_dio2_rf: Enable DIO2 as RF switch control (default: False)
+            radio_timing_delay: Delay used for radio state transitions (default: 10ms)
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -110,15 +110,7 @@ class SX1262Radio(LoRaRadio):
         self.txled_pin = txled_pin
         self.rxled_pin = rxled_pin
         self.en_pin = self.en_pins[0] if self.en_pins else -1
-        self._RADIO_TIMING_DELAY = self._select_radio_timing_delay(
-            reset_pin=reset_pin,
-            busy_pin=busy_pin,
-            irq_pin=irq_pin,
-            txen_pin=txen_pin,
-            rxen_pin=rxen_pin,
-            cs_pin=cs_pin,
-            en_pins=self.en_pins,
-        )
+        self._RADIO_TIMING_DELAY = radio_timing_delay
 
         # Radio configuration
         self.frequency = frequency
@@ -219,33 +211,6 @@ class SX1262Radio(LoRaRadio):
             deduped_pins.append(pin)
 
         return deduped_pins
-
-    @classmethod
-    def _select_radio_timing_delay(
-        cls,
-        *,
-        reset_pin: int,
-        busy_pin: int,
-        irq_pin: int,
-        txen_pin: int,
-        rxen_pin: int,
-        cs_pin: int,
-        en_pins: list[int],
-    ) -> float:
-        pins = [reset_pin, busy_pin, irq_pin, txen_pin, rxen_pin, cs_pin, *en_pins]
-        if cls._is_luckfox_pico_pi() and any(pin >= 32 for pin in pins if pin != -1):
-            return cls.LUCKFOX_RADIO_TIMING_DELAY
-        return cls.RADIO_TIMING_DELAY
-
-    @staticmethod
-    def _is_luckfox_pico_pi() -> bool:
-        try:
-            model = Path("/proc/device-tree/model").read_bytes().decode(
-                "utf-8", errors="ignore"
-            ).rstrip("\x00")
-        except OSError:
-            return False
-        return "Luckfox Pico Pi" in model
 
     def _get_rx_irq_mask(self) -> int:
         """Get the standard RX interrupt mask"""
