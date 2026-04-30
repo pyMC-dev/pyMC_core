@@ -1,6 +1,6 @@
 # pyMC_Core
 
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rightup.github.io/pyMC_core/)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://pymc-dev.github.io/pyMC_core/)
 [![PyPI](https://img.shields.io/pypi/v/pymc-core)](https://pypi.org/project/pymc-core/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -10,12 +10,12 @@
 
 ## Documentation
 
-**Complete documentation is available at **[https://rightup.github.io/pyMC_core/](https://rightup.github.io/pyMC_core/)**
+**Complete documentation is available at **[https://rightup.github.io/pyMC_core/](https://pymc-dev.github.io/pyMC_core/)**
 
 ### Quick Links
-- [Node Usage Guide](https://rightup.github.io/pyMC_core/node/) - Guide for using MeshNode
-- [Examples](https://rightup.github.io/pyMC_core/examples/) - Working code examples
-- [API Reference](https://rightup.github.io/pyMC_core/api/) - Detailed API documentation
+- [Node Usage Guide](https://pymc-dev.github.io/pyMC_core/node/) - Guide for using MeshNode
+- [Examples](https://pymc-dev.github.io/pyMC_core/examples/) - Working code examples
+- [API Reference](https://pymc-dev.github.io/pyMC_core/api/) - Detailed API documentation
 
 ## Quick Start
 
@@ -71,7 +71,7 @@ async def main():
 asyncio.run(main())
 ```
 
-For examples, see the [documentation](https://rightup.github.io/pyMC_core/examples/).
+For examples, see the [documentation](https://pymc-dev.github.io/pyMC_core/examples/).
 
 ## Hardware Support
 
@@ -149,7 +149,7 @@ pyMC_Core/
 
 ## Contributing
 
-Contributions are welcome! Please see our [contributing guide](https://rightup.github.io/pyMC_core/contributing/) for details.
+Contributions are welcome! Please see our [contributing guide](https://pymc-dev.github.io/pyMC_core/contributing/) for details.
 
 ### Development Setup
 
@@ -177,9 +177,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- [Documentation](https://rightup.github.io/pyMC_core/)
-- [Issues](https://github.com/rightup/pyMC_Core/issues)
-- [Discussions](https://github.com/rightup/pyMC_Core/discussions)
+- [Documentation](https://pymc-dev.github.io/pyMC_core/)
+- [Issues](https://github.com/pymc-dev/pyMC_Core/issues)
+- [Discussions](https://github.com/pymc-dev/pyMC_Core/discussions)
+- [pyMC Discord](https://discord.gg/SMHkUDwf)
 - [Meshcore Discord](https://discord.gg/fThwBrRc3Q)
 
 ---
