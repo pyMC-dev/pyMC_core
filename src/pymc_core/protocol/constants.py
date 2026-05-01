@@ -45,7 +45,7 @@ MAX_SUPPORTED_PAYLOAD_VERSION = PAYLOAD_VER_2  # Accept versions 0-1
 # ---------------------------------------------------------------------------
 # Misc sizes
 # ---------------------------------------------------------------------------
-MAX_ADVERT_DATA_SIZE = 96
+MAX_ADVERT_DATA_SIZE = 32
 PUB_KEY_SIZE = 32
 SIGNATURE_SIZE = 64
 PATH_HASH_SIZE = 1  # Legacy default; see PathUtils for multi-byte path support
@@ -53,10 +53,9 @@ PATH_HASH_COUNT_MASK = 0x3F  # bits 0-5 of encoded path_len (max encodable hop c
 PATH_HASH_SIZE_SHIFT = 6  # bits 6-7 of encoded path_len
 CIPHER_MAC_SIZE = 32  # SHA‑256 HMAC
 CIPHER_BLOCK_SIZE = 16
-MAX_PACKET_PAYLOAD = 256  # firmware's default
+MAX_PACKET_PAYLOAD = 184  # firmware's default
 
 MAX_PATH_SIZE = 64
-MAX_PACKET_PAYLOAD = 256
 MAX_HASH_SIZE = 32  # SHA-256 truncated
 
 NAME_MAX_LEN = 16  # Max length of a contact name
