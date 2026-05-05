@@ -97,7 +97,7 @@ MAX_PENDING_ACK_CRCS = 64
 # Protocol version reported in RESP_CODE_DEVICE_INFO; phone uses 9+ to infer
 # CMD_SEND_ANON_REQ (owner requests, etc.) is supported.
 # 10+ provides support for multi-byte path lengths.
-FIRMWARE_VER_CODE = 10
+FIRMWARE_VER_CODE = 11
 
 # ---------------------------------------------------------------------------
 # Commands (app -> radio)
